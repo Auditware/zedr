@@ -69,8 +69,6 @@ export function connectLive(queryClient: QueryClient): () => void {
     if (type.startsWith('incident_')) {
       void queryClient.invalidateQueries({ queryKey: ['incidents'] })
       refetchAgentsSoon()
-    } else if (type.startsWith('shell_')) {
-      void queryClient.invalidateQueries({ queryKey: ['shell'] })
     } else if (type === 'install' || type === 'identity_rotated') {
       void queryClient.invalidateQueries({ queryKey: ['install-keys'] })
       refetchAgentsSoon()

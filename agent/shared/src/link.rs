@@ -5,12 +5,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use ed25519_dalek::VerifyingKey;
 use zedr_protocol::{
-    AgentRegistration, AgentStoppingEvent, EventBatch, ShellCommand, StopReason, SystemEvent, UpgradeCommand,
+    AgentRegistration, AgentStoppingEvent, EventBatch, StopReason, SystemEvent, UpgradeCommand,
     MAX_EVENT_BATCH_BYTES, SIGNATURE_HEADER,
 };
 
 use crate::identity::{self, Identity};
-use crate::journal::{AcceptedCommand, CommandJournal};
+use crate::journal::CommandJournal;
 
 const REGISTRATION_TIMEOUT_SECS: u64 = 30;
 const STOP_NOTICE_TIMEOUT_SECS: u64 = 5;
@@ -72,16 +72,8 @@ impl ControlLink {
         }
     }
 
-    pub fn accept_shell_command(&self, command: &ShellCommand) -> Result<(), String> {
-        self.with_accepted_commands(|journal| journal.accept_shell(command, unix_now()))
-    }
-
-    pub fn shell_command_answered(&self, nonce: &str) -> Result<(), String> {
-        self.with_accepted_commands(|journal| journal.answered(nonce, unix_now()))
-    }
-
-    pub fn unanswered_shell_commands(&self) -> Result<Vec<AcceptedCommand>, String> {
-        self.with_accepted_commands(|journal| Ok(journal.unanswered()))
+    pub fn accepted_commands_readable(&self) -> Result<(), String> {
+        self.with_accepted_commands(|_| Ok(()))
     }
 
     pub fn verify_upgrade_command(&self, command: &UpgradeCommand) -> Result<(), String> {

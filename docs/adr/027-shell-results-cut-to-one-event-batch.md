@@ -1,5 +1,7 @@
 # Shell Command Results Cut to One Event Batch
 
+Status: superseded by [ADR 030](./030-no-remote-shell.md)
+
 ## Context and Problem Statement
 
 The result of a remote shell command ([ADR 012](./012-secure-remote-shell.md)) is one `ShellCommandExecuted` event. The agent sends it on its own, outside the sensor queue. It kept up to 1 MiB of each output stream, measured before encoding. The control server reads at most `MAX_EVENT_BATCH_BYTES`, 2 MiB, of a request on `/api/events` ([ADR 024](./024-event-batches-sized-by-encoding-and-narrowed-on-refusal.md)).

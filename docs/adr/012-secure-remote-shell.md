@@ -1,5 +1,7 @@
 # Secure Remote Shell Access
 
+Status: superseded by [ADR 030](./030-no-remote-shell.md)
+
 ## Context and Problem Statement
 
 Administrators need to run diagnostic commands and investigations on remote agents without SSH access or manual login. How can we provide secure, audited remote command execution that maintains the same cryptographic guarantees as upgrade commands while supporting interactive shell sessions?

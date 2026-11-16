@@ -39,26 +39,6 @@ export type UpgradeCommand = {
   created_at: number
 }
 
-export type ShellSession = {
-  id: string
-  agent_id: string
-  created_at: number
-  last_activity_at: number
-  expires_at: number
-  terminated_at: number | null
-  created_by_user_id: string | null
-}
-
-export type ShellCommandResult = {
-  id: string
-  command_text: string
-  issued_at: number
-  executed_at: number | null
-  exit_code: number | null
-  stdout: string | null
-  stderr: string | null
-}
-
 export class ApiError extends Error {
   readonly status: number
   readonly column: number | null
@@ -164,15 +144,6 @@ export const api = {
   upgrades: () => request<UpgradeCommand[]>('GET', '/api/admin/upgrades'),
   issueUpgrade: (body: { agent_id: string; install_key_id: string; target_version: string }) =>
     request<UpgradeCommand>('POST', '/api/admin/upgrades', body),
-
-  shellSessions: () => request<ShellSession[]>('GET', '/api/admin/shell-sessions'),
-  createShellSession: (agent_id: string) =>
-    request<{ session_id: string; expires_at: number }>('POST', '/api/admin/shell-sessions', { agent_id }),
-  terminateShellSession: (id: string) => request<unknown>('DELETE', `/api/admin/shell-sessions/${id}`),
-  shellCommands: (sessionId: string) =>
-    request<ShellCommandResult[]>('GET', `/api/admin/shell-sessions/${sessionId}/commands`),
-  runShellCommand: (sessionId: string, command_text: string) =>
-    request<{ command_id: string }>('POST', `/api/admin/shell-sessions/${sessionId}/commands`, { command_text }),
 
   audit: (limit: number, offset: number) =>
     request<AuditResponse>('GET', '/api/admin/audit' + query({ limit, offset })),

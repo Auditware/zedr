@@ -27,7 +27,7 @@ import {
   type NodeState,
 } from '@/lib/map-layout'
 import { buildProcessModel } from '@/lib/process-tree'
-import { useAgents, useIncidents, useMedia, useNow, useShellSessions } from '@/lib/queries'
+import { useAgents, useIncidents, useMedia, useNow } from '@/lib/queries'
 
 const route = getRouteApi('/app/endpoints')
 const Investigation = lazy(() => import('@/components/investigate/Investigation'))
@@ -50,7 +50,6 @@ export function Endpoints() {
   const narrow = useMedia('(max-width: 860px)')
   const { data: agents, isLoading } = useAgents()
   const { data: incidents } = useIncidents()
-  const { data: sessions } = useShellSessions()
   const side = useCollapsible(STRIP_SIZE)
   const dock = useCollapsible(STRIP_SIZE)
   const stageRef = useRef<HTMLDivElement>(null)
@@ -86,11 +85,6 @@ export function Endpoints() {
 
   const model = useMemo(() => {
     const flagged = new Set(openIncidents.map((incident) => incident.agent_id))
-    const shells = new Set(
-      (sessions ?? [])
-        .filter((session) => session.terminated_at == null && session.expires_at > now)
-        .map((session) => session.agent_id),
-    )
     const states = new Map<string, NodeState>()
     const groups = new Map<string, Agent[]>()
     const nodes: MapNode[] = []
@@ -99,16 +93,14 @@ export function Endpoints() {
       const state = nodeState(agent, flagged.has(agent.id))
       const key = groupKey(agent, state, groupBy)
       states.set(agent.id, state)
-      nodes.push({ id: agent.id, label: agent.hostname, state, shell: shells.has(agent.id) })
+      nodes.push({ id: agent.id, label: agent.hostname, state })
       grouped.push({ id: agent.id, group: key })
       const members = groups.get(key)
       if (members) members.push(agent)
       else groups.set(key, [agent])
     }
     return { nodes, states, groups, layout: layoutMap(grouped, viewport) }
-    // `now` only matters for session expiry, which the session refetch already covers
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [agents, openIncidents, sessions, groupBy, viewport])
+  }, [agents, openIncidents, groupBy, viewport])
 
   const byId = useMemo(() => new Map((agents ?? []).map((agent) => [agent.id, agent])), [agents])
   const selected = search.host ? byId.get(search.host) : undefined

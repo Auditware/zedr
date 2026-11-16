@@ -354,7 +354,7 @@ export function Users() {
                         <Chip tone={user.role === 'admin' ? 'accent' : 'neutral'}>{user.role === 'admin' ? 'admin' : 'read only'}</Chip>
                       </span>
                       <span className={cn(WIDE, 'font-mono text-[11px]', user.mfa_enabled ? 'text-soft' : 'text-warn')} title={user.mfa_enabled ? 'two-factor on' : 'two-factor off'}>
-                        <StateDot state={user.mfa_enabled ? 'shell' : 'suspect'} className="mr-1.5 align-middle" />
+                        <StateDot state={user.mfa_enabled ? 'accent' : 'suspect'} className="mr-1.5 align-middle" />
                         {user.mfa_enabled ? 'on' : 'off'}
                       </span>
                       <Lane entries={entries} from={from} to={now} />

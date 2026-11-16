@@ -13,7 +13,6 @@ pub const SIGNATURE_HEADER: &str = "x-zedr-signature";
 pub const MAX_EVENT_BATCH_BYTES: usize = 2 * 1024 * 1024;
 
 const UPGRADE_COMMAND_PURPOSE: &str = "zedr-upgrade-command-v1";
-const SHELL_COMMAND_PURPOSE: &str = "zedr-shell-command-v1";
 
 /// Agent registration request
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,9 +61,6 @@ pub enum SystemEvent {
     Heartbeat(HeartbeatEvent),
     Upgrade(UpgradeEvent),
     Install(InstallEvent),
-    ShellSessionCreated(ShellSessionCreatedEvent),
-    ShellCommandExecuted(ShellCommandExecutedEvent),
-    ShellSessionTerminated(ShellSessionTerminatedEvent),
     AgentStopping(AgentStoppingEvent),
     Persistence(PersistenceEvent),
     Package(PackageEvent),
@@ -242,18 +238,6 @@ pub struct UpgradeCommand {
     pub nonce: String,
 }
 
-/// Shell command from server to agent
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "utoipa", derive(ToSchema))]
-pub struct ShellCommand {
-    pub session_id: String,
-    pub agent_id: String,
-    pub command_text: String,
-    pub signature: Vec<u8>,
-    pub issued_at: u64,
-    pub nonce: String,
-}
-
 /// Upgrade event from agent
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
@@ -288,37 +272,6 @@ pub struct InstallEvent {
     pub architecture: String,
 }
 
-/// Shell session created event
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "utoipa", derive(ToSchema))]
-pub struct ShellSessionCreatedEvent {
-    pub timestamp: u64,
-    pub session_id: String,
-}
-
-/// Shell command executed event
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "utoipa", derive(ToSchema))]
-pub struct ShellCommandExecutedEvent {
-    pub timestamp: u64,
-    pub session_id: String,
-    pub command_id: String,
-    pub exit_code: i32,
-    pub stdout: String,
-    pub stderr: String,
-    pub execution_time_ms: u64,
-}
-
-/// Shell session terminated event
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "utoipa", derive(ToSchema))]
-pub struct ShellSessionTerminatedEvent {
-    pub timestamp: u64,
-    pub session_id: String,
-    pub reason: String,
-    pub executed_commands: Vec<String>,
-}
-
 /// Event batch for submitting multiple events
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
@@ -338,16 +291,6 @@ struct UpgradeCommandPayload<'a> {
     issued_at: u64,
 }
 
-#[derive(Serialize)]
-struct ShellCommandPayload<'a> {
-    purpose: &'a str,
-    agent_id: &'a str,
-    session_id: &'a str,
-    command_text: &'a str,
-    nonce: &'a str,
-    issued_at: u64,
-}
-
 /// Exact bytes signed by the server and verified by the agent for an upgrade command
 pub fn upgrade_command_signing_bytes(
     agent_id: &str,
@@ -363,25 +306,6 @@ pub fn upgrade_command_signing_bytes(
         issued_at,
     })
     .map_err(|e| format!("Failed to encode upgrade command: {}", e))
-}
-
-/// Exact bytes signed by the server and verified by the agent for a shell command
-pub fn shell_command_signing_bytes(
-    agent_id: &str,
-    session_id: &str,
-    command_text: &str,
-    nonce: &str,
-    issued_at: u64,
-) -> Result<Vec<u8>, String> {
-    serde_json::to_vec(&ShellCommandPayload {
-        purpose: SHELL_COMMAND_PURPOSE,
-        agent_id,
-        session_id,
-        command_text,
-        nonce,
-        issued_at,
-    })
-    .map_err(|e| format!("Failed to encode shell command: {}", e))
 }
 
 /// Bytes the agent is built with where its signing public key belongs, replaced by the control server on download
@@ -550,34 +474,19 @@ mod tests {
 
     #[test]
     fn test_command_signing_bytes_bind_every_field() {
-        let base = shell_command_signing_bytes("agent-1", "s1", "whoami", "n1", 100).unwrap();
-        assert_ne!(base, shell_command_signing_bytes("agent-2", "s1", "whoami", "n1", 100).unwrap());
-        assert_ne!(base, shell_command_signing_bytes("agent-1", "s2", "whoami", "n1", 100).unwrap());
-        assert_ne!(base, shell_command_signing_bytes("agent-1", "s1", "whoami /all", "n1", 100).unwrap());
-        assert_ne!(base, shell_command_signing_bytes("agent-1", "s1", "whoami", "n2", 100).unwrap());
-        assert_ne!(base, shell_command_signing_bytes("agent-1", "s1", "whoami", "n1", 101).unwrap());
+        let base = upgrade_command_signing_bytes("agent-1", "0.2.0", "n1", 100).unwrap();
+        assert_ne!(base, upgrade_command_signing_bytes("agent-2", "0.2.0", "n1", 100).unwrap());
+        assert_ne!(base, upgrade_command_signing_bytes("agent-1", "0.2.1", "n1", 100).unwrap());
+        assert_ne!(base, upgrade_command_signing_bytes("agent-1", "0.2.0", "n2", 100).unwrap());
+        assert_ne!(base, upgrade_command_signing_bytes("agent-1", "0.2.0", "n1", 101).unwrap());
     }
 
     #[test]
-    fn test_command_text_cannot_forge_other_fields() {
-        let injected = shell_command_signing_bytes(
-            "agent-1",
-            "s1",
-            r#"x","nonce":"n2","issued_at":1}"#,
-            "n1",
-            100,
-        )
-        .unwrap();
+    fn test_target_version_cannot_forge_other_fields() {
+        let injected = upgrade_command_signing_bytes("agent-1", r#"x","nonce":"n2","issued_at":1}"#, "n1", 100).unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&injected).unwrap();
         assert_eq!(parsed["nonce"], "n1");
         assert_eq!(parsed["issued_at"], 100);
-    }
-
-    #[test]
-    fn test_upgrade_and_shell_payloads_never_collide() {
-        let upgrade = upgrade_command_signing_bytes("a", "v", "n", 1).unwrap();
-        let shell = shell_command_signing_bytes("a", "s", "v", "n", 1).unwrap();
-        assert_ne!(upgrade, shell);
     }
 
     #[test]

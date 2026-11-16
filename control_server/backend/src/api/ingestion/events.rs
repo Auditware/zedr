@@ -6,11 +6,11 @@ use uuid::Uuid;
 
 use crate::detections::Level;
 use crate::agent_auth;
-use crate::api::{AppState, SystemEventBroadcast};
+use crate::api::AppState;
 use crate::error::{AppError, Result};
 use crate::incidents;
 use crate::liveness;
-use zedr_protocol::{SystemEvent, EventBatch, StopReason, UpgradeCommand, ShellCommand};
+use zedr_protocol::{SystemEvent, EventBatch, StopReason, UpgradeCommand};
 
 const HAND_OUT_AGAIN_AFTER_SECS: i64 = 120;
 
@@ -22,8 +22,6 @@ fn waits_for_an_answer(handed_out_at: Option<i64>, now: i64) -> bool {
 pub struct HeartbeatResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub upgrade: Option<UpgradeCommand>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub shell_command: Option<ShellCommand>,
 }
 
 #[utoipa::path(
@@ -73,15 +71,6 @@ pub async fn ingest_events(
             }
             SystemEvent::Install(e) => {
                 ("install", e.timestamp as i64, serde_json::to_string(e).unwrap())
-            }
-            SystemEvent::ShellSessionCreated(e) => {
-                ("shell_session_created", e.timestamp as i64, serde_json::to_string(e).unwrap())
-            }
-            SystemEvent::ShellCommandExecuted(e) => {
-                ("shell_command_executed", e.timestamp as i64, serde_json::to_string(e).unwrap())
-            }
-            SystemEvent::ShellSessionTerminated(e) => {
-                ("shell_session_terminated", e.timestamp as i64, serde_json::to_string(e).unwrap())
             }
             SystemEvent::AgentStopping(e) => {
                 ("agent_stopping", e.timestamp as i64, serde_json::to_string(e).unwrap())
@@ -161,71 +150,6 @@ pub async fn ingest_events(
             }
         }
 
-        // Update shell_commands status if this is a shell command executed event
-        if event_type == "shell_command_executed" {
-            if let SystemEvent::ShellCommandExecuted(shell_evt) = &event {
-                let stored = sqlx::query(
-                    "UPDATE shell_commands 
-                     SET executed_at = ?, exit_code = ?, stdout = ?, stderr = ?
-                     WHERE nonce = ?
-                       AND executed_at IS NULL
-                       AND session_id IN (SELECT id FROM shell_sessions WHERE agent_id = ?)"
-                )
-                .bind(timestamp)
-                .bind(shell_evt.exit_code)
-                .bind(&shell_evt.stdout)
-                .bind(&shell_evt.stderr)
-                .bind(&shell_evt.command_id)
-                .bind(&batch.agent_id)
-                .execute(&state.pool)
-                .await?;
-
-                if stored.rows_affected() == 0 {
-                    tracing::warn!(
-                        "Result for shell command {:?} from agent {} was left out, the command has a result already or is not this agent's",
-                        shell_evt.command_id,
-                        batch.agent_id
-                    );
-                }
-
-                tracing::info!("Broadcasting shell_command_executed for session {}", shell_evt.session_id);
-                let _ = state.system_events_tx.send(SystemEventBroadcast {
-                    id: event_id.clone(),
-                    agent_id: batch.agent_id.clone(),
-                    event_type: "shell_command_executed".to_string(),
-                    timestamp,
-                    data: data.clone(),
-                    received_at,
-                });            }
-        }
-
-        // Update shell_sessions termination data if this is a shell session terminated event
-        if event_type == "shell_session_terminated" {
-            if let SystemEvent::ShellSessionTerminated(term_evt) = &event {
-                let executed_commands: Vec<String> = sqlx::query_scalar(
-                    "SELECT command_text FROM shell_commands WHERE session_id = ? ORDER BY issued_at ASC"
-                )
-                .bind(&term_evt.session_id)
-                .fetch_all(&state.pool)
-                .await?;
-
-                let commands_json = serde_json::to_string(&executed_commands).unwrap_or_else(|_| "[]".to_string());
-
-                sqlx::query(
-                    "UPDATE shell_sessions 
-                     SET terminated_at = ?, termination_reason = ?, executed_commands = ?
-                     WHERE id = ? AND agent_id = ?"
-                )
-                .bind(timestamp)
-                .bind(&term_evt.reason)
-                .bind(&commands_json)
-                .bind(&term_evt.session_id)
-                .bind(&batch.agent_id)
-                .execute(&state.pool)
-                .await?;
-            }
-        }
-
         if let SystemEvent::AgentStopping(stopping) = &event {
             record_stop(&state, &batch.agent_id, &stopping.reason).await?;
         }
@@ -285,7 +209,7 @@ pub async fn ingest_events(
         if let Some((cmd_id, target_version, signature_opt, issued_at_opt, nonce_opt, handed_out_at)) = upgrade_cmd {
             if let (Some(signature), Some(issued_at), Some(nonce)) = (signature_opt, issued_at_opt, nonce_opt) {
                 if waits_for_an_answer(handed_out_at, now) {
-                    return Ok(Json(HeartbeatResponse { upgrade: None, shell_command: None }));
+                    return Ok(Json(HeartbeatResponse { upgrade: None }));
                 }
 
                 sqlx::query("UPDATE upgrade_commands SET handed_out_at = ? WHERE id = ?")
@@ -302,53 +226,12 @@ pub async fn ingest_events(
                         issued_at: issued_at as u64,
                         nonce,
                     }),
-                    shell_command: None,
                 }));
             }
         }
-
-        let shell_cmd = sqlx::query_as::<_, (String, String, String, Vec<u8>, i64, String, Option<i64>)>(
-            "SELECT sc.id, sc.session_id, sc.command_text, sc.signature, sc.issued_at, sc.nonce, sc.handed_out_at
-             FROM shell_commands sc
-             JOIN shell_sessions ss ON sc.session_id = ss.id
-             WHERE ss.agent_id = ?
-               AND ss.terminated_at IS NULL
-               AND ss.expires_at > ?
-               AND sc.executed_at IS NULL
-             ORDER BY sc.issued_at ASC
-             LIMIT 1"
-        )
-        .bind(&batch.agent_id)
-        .bind(now)
-        .fetch_optional(&state.pool)
-        .await?;
-
-        if let Some((cmd_id, session_id, command_text, signature, issued_at, nonce, handed_out_at)) = shell_cmd {
-            if waits_for_an_answer(handed_out_at, now) {
-                return Ok(Json(HeartbeatResponse { upgrade: None, shell_command: None }));
-            }
-
-            sqlx::query("UPDATE shell_commands SET handed_out_at = ? WHERE id = ?")
-                .bind(now)
-                .bind(&cmd_id)
-                .execute(&state.pool)
-                .await?;
-
-            return Ok(Json(HeartbeatResponse {
-                upgrade: None,
-                shell_command: Some(ShellCommand {
-                    session_id,
-                    agent_id: batch.agent_id.clone(),
-                    command_text,
-                    signature,
-                    issued_at: issued_at as u64,
-                    nonce,
-                }),
-            }));
-        }
     }
 
-    Ok(Json(HeartbeatResponse { upgrade: None, shell_command: None }))
+    Ok(Json(HeartbeatResponse { upgrade: None }))
 }
 
 async fn authenticate_batch(

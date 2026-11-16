@@ -5,7 +5,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
-use std::process::Command;
 use std::ffi::OsString;
 use zedr_shared::link::{ControlLink, HostDescription};
 use zedr_shared::runtime::{self, Platform, Runtime};
@@ -67,10 +66,6 @@ struct WindowsPlatform;
 impl Platform for WindowsPlatform {
     fn log(&self, message: &str) {
         log(message);
-    }
-
-    fn shell_invocation(&self, command_text: &str) -> Command {
-        crate::shell::powershell(command_text)
     }
 
     fn upgrade(&self, command: UpgradeCommand) {

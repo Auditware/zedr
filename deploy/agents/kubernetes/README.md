@@ -21,7 +21,7 @@ kubectl -n zedr-agent rollout status daemonset/zedr-agent
 | `hostPID`, `hostNetwork` | The agent sees the node's processes and reports the node's name and address. |
 | `hostPath /run/systemd`, read only | The agent asks the node's systemd whether the node is shutting down. |
 | `hostPath /etc/os-release`, read only | The console shows the node's distribution. |
-| `privileged` | Remote shell commands run as root in the pod, and from there `nsenter -t 1 -m -u -i -n` reaches the node. |
+| `privileged` | The agent reads the executable, the sockets and the network namespace of every process on the node, and the node's files through `/proc/1/root` for the persistence and package inventories. |
 | `system-node-critical`, tolerates every taint | The agent is scheduled on every node and evicted last. |
 
 For a control server with a private certificate authority, mount the CA from a ConfigMap and set `SSL_CERT_FILE` to its path.

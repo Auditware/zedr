@@ -15,7 +15,6 @@ pub mod journal;
 pub mod link;
 pub mod runtime;
 pub mod sensor;
-pub mod shell;
 
 pub const AGENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const AGENT_NAME: &str = "zedr";
@@ -67,34 +66,20 @@ static NONCE_CACHE: Mutex<Option<HashMap<String, u64>>> = Mutex::new(None);
 const COMMAND_MAX_AGE_SECS: u64 = 300;
 const COMMAND_MAX_FUTURE_SECS: u64 = 60;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Refusal {
-    OutOfDate(String),
-    Other(String),
-}
-
-impl Refusal {
-    pub(crate) fn into_reason(self) -> String {
-        match self {
-            Refusal::OutOfDate(reason) | Refusal::Other(reason) => reason,
-        }
-    }
-}
-
 fn verify_command(
     public_key: &VerifyingKey,
     signed_bytes: &[u8],
     signature: &[u8],
     issued_at: u64,
     nonce: &str,
-) -> Result<(), Refusal> {
+) -> Result<(), String> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_err(|e| Refusal::Other(format!("System time error: {}", e)))?
+        .map_err(|e| format!("System time error: {}", e))?
         .as_secs();
 
     let mut cache_guard = NONCE_CACHE.lock()
-        .map_err(|e| Refusal::Other(format!("Failed to lock nonce cache: {}", e)))?;
+        .map_err(|e| format!("Failed to lock nonce cache: {}", e))?;
 
     let cache = cache_guard.get_or_insert_with(HashMap::new);
 
@@ -120,25 +105,25 @@ fn verify_command_at(
     signature: &[u8],
     issued_at: u64,
     nonce: &str,
-) -> Result<(), Refusal> {
+) -> Result<(), String> {
     let signature = Signature::from_slice(signature)
-        .map_err(|e| Refusal::Other(format!("Invalid signature format: {}", e)))?;
+        .map_err(|e| format!("Invalid signature format: {}", e))?;
 
     public_key.verify(signed_bytes, &signature)
-        .map_err(|_| Refusal::Other("Signature verification failed: command has been tampered with".to_string()))?;
+        .map_err(|_| "Signature verification failed: command has been tampered with".to_string())?;
 
     if issued_at > now + COMMAND_MAX_FUTURE_SECS {
-        return Err(Refusal::OutOfDate("Command timestamp is in the future".to_string()));
+        return Err("Command timestamp is in the future".to_string());
     }
 
     if command_expired(issued_at, now) {
-        return Err(Refusal::OutOfDate("Command expired (older than 5 minutes)".to_string()));
+        return Err("Command expired (older than 5 minutes)".to_string());
     }
 
     used_nonces.retain(|_, &mut nonce_issued_at| !command_expired(nonce_issued_at, now));
 
     if used_nonces.contains_key(nonce) {
-        return Err(Refusal::Other("Nonce already used (replay attack detected)".to_string()));
+        return Err("Nonce already used (replay attack detected)".to_string());
     }
 
     used_nonces.insert(nonce.to_string(), issued_at);
@@ -161,28 +146,6 @@ fn verify_upgrade_command_with_key(
         &cmd.nonce,
         cmd.issued_at,
     )?;
-
-    verify_command(public_key, &signed_bytes, &cmd.signature, cmd.issued_at, &cmd.nonce)
-        .map_err(Refusal::into_reason)
-}
-
-fn verify_shell_command_with_key(
-    public_key: &VerifyingKey,
-    cmd: &ShellCommand,
-    own_agent_id: &str,
-) -> Result<(), Refusal> {
-    if cmd.agent_id != own_agent_id {
-        return Err(Refusal::Other("Command was issued for a different agent".to_string()));
-    }
-
-    let signed_bytes = shell_command_signing_bytes(
-        &cmd.agent_id,
-        &cmd.session_id,
-        &cmd.command_text,
-        &cmd.nonce,
-        cmd.issued_at,
-    )
-    .map_err(Refusal::Other)?;
 
     verify_command(public_key, &signed_bytes, &cmd.signature, cmd.issued_at, &cmd.nonce)
 }
@@ -570,19 +533,6 @@ mod tests {
         ed25519_dalek::SigningKey::from_bytes(&[fill; 32])
     }
 
-    fn signed_shell_command(key: &ed25519_dalek::SigningKey, agent_id: &str, nonce: &str, issued_at: u64) -> ShellCommand {
-        use ed25519_dalek::Signer;
-        let bytes = shell_command_signing_bytes(agent_id, "session-1", "whoami", nonce, issued_at).unwrap();
-        ShellCommand {
-            session_id: "session-1".to_string(),
-            agent_id: agent_id.to_string(),
-            command_text: "whoami".to_string(),
-            signature: key.sign(&bytes).to_bytes().to_vec(),
-            issued_at,
-            nonce: nonce.to_string(),
-        }
-    }
-
     fn signed_upgrade_command(key: &ed25519_dalek::SigningKey, agent_id: &str, nonce: &str, issued_at: u64) -> UpgradeCommand {
         use ed25519_dalek::Signer;
         let bytes = upgrade_command_signing_bytes(agent_id, "0.2.0", nonce, issued_at).unwrap();
@@ -595,57 +545,26 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_shell_command_accepted_for_own_agent() {
-        let key = test_signing_key(1);
-        let cmd = signed_shell_command(&key, "agent-a", "shell-accept", now_secs());
-        assert!(verify_shell_command_with_key(&key.verifying_key(), &cmd, "agent-a").is_ok());
-    }
-
-    #[test]
-    fn test_shell_command_for_other_agent_rejected() {
-        let key = test_signing_key(1);
-        let cmd = signed_shell_command(&key, "agent-a", "shell-other", now_secs());
-        let err = verify_shell_command_with_key(&key.verifying_key(), &cmd, "agent-b").unwrap_err().into_reason();
-        assert!(err.contains("different agent"));
-    }
-
-    #[test]
-    fn test_shell_command_replay_rejected() {
-        let key = test_signing_key(1);
-        let cmd = signed_shell_command(&key, "agent-a", "shell-replay", now_secs());
-        assert!(verify_shell_command_with_key(&key.verifying_key(), &cmd, "agent-a").is_ok());
-        let err = verify_shell_command_with_key(&key.verifying_key(), &cmd, "agent-a").unwrap_err().into_reason();
-        assert!(err.contains("replay"));
-    }
-
     const ISSUED_AT: u64 = 1_794_780_000;
 
-    fn verify_at(used_nonces: &mut HashMap<String, u64>, now: u64, cmd: &ShellCommand) -> Result<(), String> {
-        let bytes = shell_command_signing_bytes(&cmd.agent_id, &cmd.session_id, &cmd.command_text, &cmd.nonce, cmd.issued_at).unwrap();
+    fn verify_at(used_nonces: &mut HashMap<String, u64>, now: u64, cmd: &UpgradeCommand) -> Result<(), String> {
+        let bytes = upgrade_command_signing_bytes(&cmd.agent_id, &cmd.target_version, &cmd.nonce, cmd.issued_at).unwrap();
         verify_command_at(used_nonces, now, &test_signing_key(1).verifying_key(), &bytes, &cmd.signature, cmd.issued_at, &cmd.nonce)
-            .map_err(Refusal::into_reason)
-    }
-
-    fn refusal_at(now: u64, cmd: &ShellCommand) -> Refusal {
-        let bytes = shell_command_signing_bytes(&cmd.agent_id, &cmd.session_id, &cmd.command_text, &cmd.nonce, cmd.issued_at).unwrap();
-        verify_command_at(&mut HashMap::new(), now, &test_signing_key(1).verifying_key(), &bytes, &cmd.signature, cmd.issued_at, &cmd.nonce)
-            .unwrap_err()
     }
 
     #[test]
     fn test_only_a_command_with_a_valid_signature_is_refused_for_its_age() {
-        let authentic = signed_shell_command(&test_signing_key(1), "agent-a", "authentic", ISSUED_AT);
-        assert_eq!(refusal_at(ISSUED_AT + 301, &authentic), Refusal::OutOfDate("Command expired (older than 5 minutes)".to_string()));
-        assert_eq!(refusal_at(ISSUED_AT - 61, &authentic), Refusal::OutOfDate("Command timestamp is in the future".to_string()));
+        let authentic = signed_upgrade_command(&test_signing_key(1), "agent-a", "authentic", ISSUED_AT);
+        assert_eq!(verify_at(&mut HashMap::new(), ISSUED_AT + 301, &authentic), Err("Command expired (older than 5 minutes)".to_string()));
+        assert_eq!(verify_at(&mut HashMap::new(), ISSUED_AT - 61, &authentic), Err("Command timestamp is in the future".to_string()));
 
-        let by_another_key = signed_shell_command(&test_signing_key(2), "agent-a", "another-key", ISSUED_AT);
+        let by_another_key = signed_upgrade_command(&test_signing_key(2), "agent-a", "another-key", ISSUED_AT);
         let mut changed = authentic.clone();
-        changed.command_text = "format c:".to_string();
+        changed.target_version = "9.9.9".to_string();
         for now in [ISSUED_AT - 61, ISSUED_AT, ISSUED_AT + 301] {
             for command in [&by_another_key, &changed] {
-                let refusal = refusal_at(now, command);
-                assert!(matches!(&refusal, Refusal::Other(reason) if reason.contains("Signature verification failed")), "{:?}", refusal);
+                let refusal = verify_at(&mut HashMap::new(), now, command).unwrap_err();
+                assert!(refusal.contains("Signature verification failed"), "{}", refusal);
             }
         }
     }
@@ -653,16 +572,15 @@ mod tests {
     #[test]
     fn test_replay_and_another_agents_command_are_not_refused_for_their_age() {
         let key = test_signing_key(1);
-        let old = signed_shell_command(&key, "agent-a", "old-and-for-another-agent", now_secs() - 301);
-        let refusal = verify_shell_command_with_key(&key.verifying_key(), &old, "agent-b").unwrap_err();
-        assert_eq!(refusal, Refusal::Other("Command was issued for a different agent".to_string()));
+        let old = signed_upgrade_command(&key, "agent-a", "old-and-for-another-agent", now_secs() - 301);
+        let refusal = verify_upgrade_command_with_key(&key.verifying_key(), &old, "agent-b").unwrap_err();
+        assert_eq!(refusal, "Command was issued for a different agent");
 
         let mut used_nonces = HashMap::new();
-        let cmd = signed_shell_command(&key, "agent-a", "seen", ISSUED_AT);
+        let cmd = signed_upgrade_command(&key, "agent-a", "seen", ISSUED_AT);
         assert_eq!(verify_at(&mut used_nonces, ISSUED_AT, &cmd), Ok(()));
-        let bytes = shell_command_signing_bytes(&cmd.agent_id, &cmd.session_id, &cmd.command_text, &cmd.nonce, cmd.issued_at).unwrap();
-        let replay = verify_command_at(&mut used_nonces, ISSUED_AT + 1, &key.verifying_key(), &bytes, &cmd.signature, cmd.issued_at, &cmd.nonce).unwrap_err();
-        assert!(matches!(&replay, Refusal::Other(reason) if reason.contains("replay")), "{:?}", replay);
+        let replay = verify_at(&mut used_nonces, ISSUED_AT + 1, &cmd).unwrap_err();
+        assert!(replay.contains("replay"), "{}", replay);
     }
 
     #[test]
@@ -670,14 +588,14 @@ mod tests {
         let key = test_signing_key(1);
         for age in [0, 1, 299, 300] {
             let mut used_nonces = HashMap::new();
-            let cmd = signed_shell_command(&key, "agent-a", "any-age", ISSUED_AT);
+            let cmd = signed_upgrade_command(&key, "agent-a", "any-age", ISSUED_AT);
 
             assert_eq!(verify_at(&mut used_nonces, ISSUED_AT + age, &cmd), Ok(()), "a command of {} seconds is accepted", age);
             let replay = verify_at(&mut used_nonces, ISSUED_AT + age, &cmd).unwrap_err();
             assert!(replay.contains("replay"), "a command of {} seconds is not accepted twice: {}", age, replay);
         }
 
-        let cmd = signed_shell_command(&key, "agent-a", "too-old", ISSUED_AT);
+        let cmd = signed_upgrade_command(&key, "agent-a", "too-old", ISSUED_AT);
         assert!(verify_at(&mut HashMap::new(), ISSUED_AT + 301, &cmd).unwrap_err().contains("expired"));
     }
 
@@ -685,12 +603,12 @@ mod tests {
     fn test_accepted_command_is_refused_as_a_replay_until_it_has_expired() {
         let key = test_signing_key(1);
         let mut used_nonces = HashMap::new();
-        let cmd = signed_shell_command(&key, "agent-a", "handed-out-again", ISSUED_AT);
+        let cmd = signed_upgrade_command(&key, "agent-a", "handed-out-again", ISSUED_AT);
         assert_eq!(verify_at(&mut used_nonces, ISSUED_AT + 5, &cmd), Ok(()));
 
         for age in (5..=295).step_by(10).chain([299, 300]) {
             let now = ISSUED_AT + age;
-            let other = signed_shell_command(&key, "agent-a", &format!("other-{}", age), now);
+            let other = signed_upgrade_command(&key, "agent-a", &format!("other-{}", age), now);
             assert_eq!(verify_at(&mut used_nonces, now, &other), Ok(()));
 
             let replay = verify_at(&mut used_nonces, now, &cmd).unwrap_err();
@@ -707,13 +625,13 @@ mod tests {
     fn test_command_issued_ahead_of_the_agents_clock_is_refused_as_a_replay_for_its_whole_lifetime() {
         let key = test_signing_key(1);
         let mut used_nonces = HashMap::new();
-        let cmd = signed_shell_command(&key, "agent-a", "issued-ahead", ISSUED_AT);
+        let cmd = signed_upgrade_command(&key, "agent-a", "issued-ahead", ISSUED_AT);
 
         assert!(verify_at(&mut used_nonces, ISSUED_AT - 61, &cmd).unwrap_err().contains("future"));
         assert_eq!(verify_at(&mut used_nonces, ISSUED_AT - 60, &cmd), Ok(()));
 
         for now in [ISSUED_AT - 60, ISSUED_AT, ISSUED_AT + 240, ISSUED_AT + 300] {
-            let other = signed_shell_command(&key, "agent-a", &format!("other-{}", now), now);
+            let other = signed_upgrade_command(&key, "agent-a", &format!("other-{}", now), now);
             assert_eq!(verify_at(&mut used_nonces, now, &other), Ok(()));
             assert!(verify_at(&mut used_nonces, now, &cmd).unwrap_err().contains("replay"));
         }
@@ -724,48 +642,41 @@ mod tests {
     fn test_nonce_is_forgotten_once_its_command_has_expired() {
         let key = test_signing_key(1);
         let mut used_nonces = HashMap::new();
-        let cmd = signed_shell_command(&key, "agent-a", "old", ISSUED_AT);
+        let cmd = signed_upgrade_command(&key, "agent-a", "old", ISSUED_AT);
         assert_eq!(verify_at(&mut used_nonces, ISSUED_AT, &cmd), Ok(()));
 
-        let at_the_limit = signed_shell_command(&key, "agent-a", "at-the-limit", ISSUED_AT + 300);
+        let at_the_limit = signed_upgrade_command(&key, "agent-a", "at-the-limit", ISSUED_AT + 300);
         assert_eq!(verify_at(&mut used_nonces, ISSUED_AT + 300, &at_the_limit), Ok(()));
         assert!(used_nonces.contains_key("old"), "kept for as long as the command would be accepted");
 
-        let later = signed_shell_command(&key, "agent-a", "later", ISSUED_AT + 301);
+        let later = signed_upgrade_command(&key, "agent-a", "later", ISSUED_AT + 301);
         assert_eq!(verify_at(&mut used_nonces, ISSUED_AT + 301, &later), Ok(()));
         assert!(!used_nonces.contains_key("old"));
         assert_eq!(used_nonces.len(), 2);
     }
 
     #[test]
-    fn test_shell_command_expired_rejected() {
+    fn test_upgrade_command_replay_rejected() {
         let key = test_signing_key(1);
-        let cmd = signed_shell_command(&key, "agent-a", "shell-expired", now_secs() - 301);
-        let err = verify_shell_command_with_key(&key.verifying_key(), &cmd, "agent-a").unwrap_err().into_reason();
+        let cmd = signed_upgrade_command(&key, "agent-a", "upgrade-replay", now_secs());
+        assert!(verify_upgrade_command_with_key(&key.verifying_key(), &cmd, "agent-a").is_ok());
+        let err = verify_upgrade_command_with_key(&key.verifying_key(), &cmd, "agent-a").unwrap_err();
+        assert!(err.contains("replay"));
+    }
+
+    #[test]
+    fn test_upgrade_command_expired_rejected() {
+        let key = test_signing_key(1);
+        let cmd = signed_upgrade_command(&key, "agent-a", "upgrade-expired", now_secs() - 301);
+        let err = verify_upgrade_command_with_key(&key.verifying_key(), &cmd, "agent-a").unwrap_err();
         assert!(err.contains("expired"));
     }
 
     #[test]
-    fn test_shell_command_signed_by_wrong_key_rejected() {
-        let cmd = signed_shell_command(&test_signing_key(2), "agent-a", "shell-wrong-key", now_secs());
-        let err = verify_shell_command_with_key(&test_signing_key(1).verifying_key(), &cmd, "agent-a").unwrap_err().into_reason();
+    fn test_upgrade_command_signed_by_wrong_key_rejected() {
+        let cmd = signed_upgrade_command(&test_signing_key(2), "agent-a", "upgrade-wrong-key", now_secs());
+        let err = verify_upgrade_command_with_key(&test_signing_key(1).verifying_key(), &cmd, "agent-a").unwrap_err();
         assert!(err.contains("Signature verification failed"));
-    }
-
-    #[test]
-    fn test_shell_command_tampered_text_rejected() {
-        let key = test_signing_key(1);
-        let mut cmd = signed_shell_command(&key, "agent-a", "shell-tamper", now_secs());
-        cmd.command_text = "format c:".to_string();
-        assert!(verify_shell_command_with_key(&key.verifying_key(), &cmd, "agent-a").is_err());
-    }
-
-    #[test]
-    fn test_shell_command_moved_to_other_session_rejected() {
-        let key = test_signing_key(1);
-        let mut cmd = signed_shell_command(&key, "agent-a", "shell-session", now_secs());
-        cmd.session_id = "session-2".to_string();
-        assert!(verify_shell_command_with_key(&key.verifying_key(), &cmd, "agent-a").is_err());
     }
 
     #[test]

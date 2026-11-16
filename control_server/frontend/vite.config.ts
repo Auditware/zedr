@@ -21,7 +21,7 @@ export default defineConfig(({ command, mode, isPreview }) => {
       open: true,
     },
     optimizeDeps: {
-      include: ['@xyflow/react', 'pixi.js', '@xterm/xterm', '@xterm/addon-fit', 'qrcode'],
+      include: ['@xyflow/react', 'pixi.js', 'qrcode'],
     },
     envDir: '../../secrets',
   }

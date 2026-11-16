@@ -1,5 +1,7 @@
 # Shell Command Results Kept Until the Control Server Takes Them
 
+Status: superseded by [ADR 030](./030-no-remote-shell.md)
+
 ## Context and Problem Statement
 
 The agent sent the result of a remote shell command once ([ADR 012](./012-secure-remote-shell.md)). A result is cut until it fits in one request ([ADR 027](./027-shell-results-cut-to-one-event-batch.md)), so its size no longer costs it. Everything else still did: when the control server could not be reached at that moment, was restarting, did not know the agent yet, or answered with an error, the agent wrote a line in its log and the result was gone.

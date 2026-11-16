@@ -36,17 +36,6 @@ pub async fn get_agent_by_id(pool: &SqlitePool, agent_id: &str) -> Result<Agent>
 }
 
 pub async fn get_event_stats(pool: &SqlitePool) -> Result<EventStats> {
-        let shell_session_created: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM events WHERE event_type = 'shell_session_created'"
-        )
-        .fetch_one(pool)
-        .await?;
-
-        let shell_session_terminated: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM events WHERE event_type = 'shell_session_terminated'"
-        )
-        .fetch_one(pool)
-        .await?;
     let process: (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM events WHERE event_type = 'process'"
     )
@@ -97,8 +86,6 @@ pub async fn get_event_stats(pool: &SqlitePool) -> Result<EventStats> {
         heartbeat: heartbeat.0,
         upgrade: upgrade.0,
         install: install.0,
-        shell_session_created: shell_session_created.0,
-        shell_session_terminated: shell_session_terminated.0,
     })
 }
 

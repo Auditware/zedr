@@ -1,6 +1,5 @@
 mod collector;
 mod service;
-mod shell;
 #[cfg(test)]
 mod tests;
 

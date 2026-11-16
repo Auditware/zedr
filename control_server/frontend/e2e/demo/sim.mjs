@@ -1,6 +1,6 @@
 import { generateKeyPairSync, randomUUID, sign } from 'node:crypto'
 import { demoClient } from './env.mjs'
-import { fleet, pastHeartbeats, seeded, shellOutput, STORY, telemetry } from './scenario.mjs'
+import { fleet, pastHeartbeats, seeded, STORY, telemetry } from './scenario.mjs'
 
 const HEARTBEAT_SECONDS = 30
 const SPARE_KEYS = 3
@@ -67,30 +67,6 @@ setInterval(() => {
   for (const agent of agents) {
     if (!agent.alive || agent.next > moment) continue
     agent.next = moment + HEARTBEAT_SECONDS
-    agent
-      .send('/api/events', agent.batch([{ Heartbeat: { timestamp: moment } }]))
-      .then((response) => {
-        const command = response.json?.shell_command
-        if (!command) return
-        const output = shellOutput(agent, command.command_text)
-        agent.next = now() + 2
-        return agent.send(
-          '/api/events',
-          agent.batch([
-            {
-              ShellCommandExecuted: {
-                timestamp: now(),
-                session_id: command.session_id,
-                command_id: command.nonce,
-                exit_code: output === null ? 1 : 0,
-                stdout: output ?? '',
-                stderr: output === null ? `${command.command_text.split(' ')[0]} : The term is not recognized as the name of a cmdlet.\r\n` : '',
-                execution_time_ms: 40 + Math.floor(random() * 300),
-              },
-            },
-          ]),
-        )
-      })
-      .catch(() => undefined)
+    agent.send('/api/events', agent.batch([{ Heartbeat: { timestamp: moment } }])).catch(() => undefined)
   }
 }, 1000)

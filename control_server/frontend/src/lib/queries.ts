@@ -17,19 +17,6 @@ export function useIncidents() {
   return useQuery({ queryKey: ['incidents'], queryFn: () => api.incidents(), refetchInterval: 15_000 })
 }
 
-export function useShellSessions() {
-  return useQuery({ queryKey: ['shell', 'sessions'], queryFn: api.shellSessions, refetchInterval: 20_000 })
-}
-
-export function useShellCommands(sessionId: string | undefined, fast: boolean) {
-  return useQuery({
-    queryKey: ['shell', 'commands', sessionId],
-    queryFn: () => api.shellCommands(sessionId!),
-    enabled: !!sessionId,
-    refetchInterval: fast ? 2_000 : 15_000,
-  })
-}
-
 export function useInstallKeys() {
   return useQuery({ queryKey: ['install-keys'], queryFn: api.installKeys, refetchInterval: 30_000 })
 }

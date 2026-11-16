@@ -1,17 +1,13 @@
-use std::collections::{BTreeMap, VecDeque};
-use std::process::Command;
-use std::sync::{mpsc, Arc, Mutex, TryLockError};
+use std::collections::BTreeMap;
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use ed25519_dalek::VerifyingKey;
 use serde::Deserialize;
-use zedr_protocol::{HeartbeatEvent, ShellCommand, StopReason, SystemEvent, UpgradeCommand};
+use zedr_protocol::{HeartbeatEvent, StopReason, SystemEvent, UpgradeCommand};
 
 use crate::link::{unix_now, ControlLink, HostDescription};
 use crate::sensor::{Outbox, Sensor, Source};
-use crate::shell::{self, CommandResult, ShellSessions};
-use crate::Refusal;
 
 const EVENT_TIMEOUT_SECS: u64 = 30;
 const DEFAULT_HEARTBEAT_INTERVAL_SECS: u64 = 30;
@@ -20,13 +16,11 @@ const DEFAULT_PERSISTENCE_INTERVAL_SECS: u64 = 60;
 const DEFAULT_PACKAGE_INTERVAL_SECS: u64 = 300;
 const SENSOR_QUEUE_LIMIT: usize = 20_000;
 const SENSOR_BATCH_SIZE: usize = 200;
-const SHELL_RESULT_QUEUE_LIMIT: usize = 16;
 const REGISTRATION_RETRY_START: Duration = Duration::from_secs(30);
 const REGISTRATION_RETRY_LIMIT: Duration = Duration::from_secs(600);
 
 pub trait Platform: Send + Sync + 'static {
     fn log(&self, message: &str);
-    fn shell_invocation(&self, command_text: &str) -> Command;
     fn upgrade(&self, command: UpgradeCommand);
 }
 
@@ -60,8 +54,6 @@ pub fn sensor_intervals() -> SensorIntervals {
 struct HeartbeatReply {
     #[serde(default)]
     upgrade: Option<UpgradeCommand>,
-    #[serde(default)]
-    shell_command: Option<ShellCommand>,
 }
 
 struct RegistrationRetry {
@@ -69,68 +61,27 @@ struct RegistrationRetry {
     delay: Duration,
 }
 
-#[derive(Default)]
-struct ShellResults {
-    queued: VecDeque<CommandResult>,
-    reported: Option<String>,
-}
-
-enum Delivery {
-    Accepted,
-    Refused(String),
-    Unanswered(String),
-}
-
 pub struct Runtime<P: Platform> {
     link: Arc<ControlLink>,
     platform: P,
     host: HostDescription,
-    sessions: ShellSessions,
-    shell_results: Mutex<ShellResults>,
     registration_retry: Mutex<RegistrationRetry>,
-    trusted_key: fn() -> Result<VerifyingKey, String>,
 }
 
 impl<P: Platform> Runtime<P> {
     pub fn new(link: Arc<ControlLink>, platform: P, host: HostDescription) -> Self {
-        let runtime = Self {
+        if let Err(e) = link.accepted_commands_readable() {
+            platform.log(&format!("Upgrade commands are refused: {}", e));
+        }
+
+        Self {
             link,
             platform,
             host,
-            sessions: ShellSessions::new(),
-            shell_results: Mutex::new(ShellResults::default()),
             registration_retry: Mutex::new(RegistrationRetry {
                 not_before: Instant::now(),
                 delay: REGISTRATION_RETRY_START,
             }),
-            trusted_key: crate::signing_public_key,
-        };
-        runtime.answer_commands_of_an_earlier_run();
-        runtime
-    }
-
-    fn answer_commands_of_an_earlier_run(&self) {
-        let unanswered = match self.link.unanswered_shell_commands() {
-            Ok(unanswered) => unanswered,
-            Err(e) => {
-                self.platform.log(&format!("Shell and upgrade commands are refused: {}", e));
-                return;
-            }
-        };
-
-        for command in unanswered {
-            let Some(session_id) = &command.shell_session_id else { continue };
-            self.platform.log(&format!(
-                "Shell command {} of session {} had no answer when this agent stopped, answering it without running it",
-                command.nonce, session_id
-            ));
-            self.queue_shell_result(CommandResult::interrupted(session_id, &command.nonce));
-        }
-    }
-
-    fn shell_command_answered(&self, result: &CommandResult) {
-        if let Err(e) = self.link.shell_command_answered(result.command_id()) {
-            self.platform.log(&format!("Shell command {} stays recorded as unanswered: {}", result.command_id(), e));
         }
     }
 
@@ -291,10 +242,6 @@ impl<P: Platform> Runtime<P> {
         if let Err(e) = self.heartbeat() {
             self.platform.log(&format!("Heartbeat failed: {}", e));
         }
-
-        for event in self.sessions.expire() {
-            self.send(SystemEvent::ShellSessionTerminated(event));
-        }
     }
 
     fn heartbeat(self: &Arc<Self>) -> Result<(), String> {
@@ -303,7 +250,6 @@ impl<P: Platform> Runtime<P> {
 
         match response.status_code {
             200 => {
-                self.retry_shell_results();
                 let reply: HeartbeatReply = serde_json::from_slice(response.as_bytes())
                     .map_err(|e| format!("Unreadable heartbeat response: {}", e))?;
                 self.dispatch(reply);
@@ -324,211 +270,18 @@ impl<P: Platform> Runtime<P> {
             let runtime = Arc::clone(self);
             thread::spawn(move || runtime.platform.upgrade(command));
         }
-
-        if let Some(command) = reply.shell_command {
-            let runtime = Arc::clone(self);
-            thread::spawn(move || runtime.run_shell_command(command));
-        }
-    }
-
-    fn run_shell_command(&self, command: ShellCommand) {
-        let verified = match (self.trusted_key)() {
-            Ok(key) => crate::verify_shell_command_with_key(&key, &command, self.link.agent_id()),
-            Err(e) => Err(Refusal::Other(e)),
-        };
-        match verified {
-            Ok(()) => {}
-            Err(Refusal::OutOfDate(reason)) => {
-                self.answer_without_running(&command, &reason);
-                return;
-            }
-            Err(Refusal::Other(reason)) => {
-                self.platform.log(&format!("Shell command verification failed: {}", reason));
-                return;
-            }
-        }
-
-        if let Err(e) = self.link.accept_shell_command(&command) {
-            self.platform.log(&format!("Shell command is not run: {}", e));
-            return;
-        }
-
-        self.platform.log(&format!("Shell command for session {}: {}", command.session_id, command.command_text));
-
-        if let Err(e) = self.sessions.touch(&command.session_id) {
-            self.platform.log(&format!("Failed to track shell session: {}", e));
-            return;
-        }
-
-        let invocation = self.platform.shell_invocation(&command.command_text);
-        let result = match shell::execute(invocation, &command, shell::command_timeout()) {
-            Ok(result) => {
-                self.platform.log(&format!("Shell command finished with exit code {}", result.exit_code()));
-                result
-            }
-            Err(e) => {
-                self.platform.log(&format!("Shell command execution failed: {}", e));
-                CommandResult::failed(&command, &e)
-            }
-        };
-
-        if let Err(e) = self.sessions.touch(&command.session_id) {
-            self.platform.log(&format!("Failed to track shell session: {}", e));
-        }
-
-        self.queue_shell_result(result);
-        self.deliver_shell_results();
-    }
-
-    fn answer_without_running(&self, command: &ShellCommand, reason: &str) {
-        if let Err(e) = self.link.accept_shell_command(command) {
-            self.platform.log(&format!("Shell command is not run: {}. It is not answered: {}", reason, e));
-            return;
-        }
-
-        self.platform.log(&format!(
-            "Shell command for session {} is answered and not run: {}",
-            command.session_id, reason
-        ));
-        self.queue_shell_result(CommandResult::not_run(command, reason));
-        self.deliver_shell_results();
-    }
-
-    fn queue_shell_result(&self, result: CommandResult) {
-        let mut results = match self.shell_results.lock() {
-            Ok(results) => results,
-            Err(e) => {
-                self.platform.log(&format!("Failed to lock shell command results: {}", e));
-                return;
-            }
-        };
-
-        results.queued.push_back(result);
-        if results.queued.len() > SHELL_RESULT_QUEUE_LIMIT {
-            results.queued.pop_front();
-            self.platform.log("Shell command result queue is full, dropped the oldest result");
-        }
-    }
-
-    fn retry_shell_results(self: &Arc<Self>) {
-        let waiting = match self.shell_results.try_lock() {
-            Ok(results) => !results.queued.is_empty(),
-            Err(_) => false,
-        };
-
-        if waiting {
-            let runtime = Arc::clone(self);
-            thread::spawn(move || runtime.deliver_shell_results());
-        }
-    }
-
-    fn deliver_shell_results(&self) {
-        let mut results = match self.shell_results.try_lock() {
-            Ok(results) => results,
-            Err(TryLockError::WouldBlock) => return,
-            Err(TryLockError::Poisoned(e)) => {
-                self.platform.log(&format!("Failed to lock shell command results: {}", e));
-                return;
-            }
-        };
-
-        let batch_bytes = match self.link.event_bytes_per_batch() {
-            Ok(batch_bytes) => batch_bytes,
-            Err(e) => {
-                self.platform.log(&format!("Shell command results cannot be sent: {}", e));
-                return;
-            }
-        };
-
-        let mut unanswered = None;
-        while let Some(result) = results.queued.front() {
-            match self.report(result, batch_bytes) {
-                Delivery::Accepted => self.shell_command_answered(result),
-                Delivery::Refused(reason) => {
-                    self.platform.log(&format!("Shell command result was discarded: {}", reason));
-                    self.shell_command_answered(result);
-                }
-                Delivery::Unanswered(reason) => {
-                    unanswered = Some(reason);
-                    break;
-                }
-            }
-            results.queued.pop_front();
-        }
-
-        if unanswered != results.reported {
-            match &unanswered {
-                Some(reason) => self.platform.log(&format!(
-                    "Shell command results are queued, {} waiting: {}",
-                    results.queued.len(),
-                    reason
-                )),
-                None => self.platform.log("Shell command results are being delivered again"),
-            }
-            results.reported = unanswered;
-        }
-    }
-
-    fn report(&self, result: &CommandResult, batch_bytes: usize) -> Delivery {
-        let mut room = batch_bytes;
-        let mut refused_bytes = None;
-
-        loop {
-            let fitted = match result.event(room) {
-                Ok(fitted) => fitted,
-                Err(e) => return Delivery::Refused(e),
-            };
-            let sent_bytes = fitted.encoded_bytes;
-            if refused_bytes.is_some_and(|refused_bytes| sent_bytes >= refused_bytes) {
-                return Delivery::Refused("HTTP 413 and no output left to cut".to_string());
-            }
-
-            let event = SystemEvent::ShellCommandExecuted(fitted.event);
-            let response = match self.link.send_events(vec![event], EVENT_TIMEOUT_SECS) {
-                Ok(response) => response,
-                Err(e) => return Delivery::Unanswered(e),
-            };
-
-            match response.status_code {
-                200 => {
-                    if refused_bytes.is_some() {
-                        self.platform.log(&format!(
-                            "Server answered HTTP 413 to the shell command result until it was cut to {} bytes",
-                            sent_bytes
-                        ));
-                    }
-                    return Delivery::Accepted;
-                }
-                413 => {
-                    refused_bytes = Some(sent_bytes);
-                    room = sent_bytes / 2;
-                }
-                status @ (400 | 422) => return Delivery::Refused(format!("HTTP {}", status)),
-                status => return Delivery::Unanswered(format!("HTTP {}", status)),
-            }
-        }
-    }
-
-    fn send(&self, event: SystemEvent) {
-        match self.link.send_events(vec![event], EVENT_TIMEOUT_SECS) {
-            Ok(response) if response.status_code == 200 => {}
-            Ok(response) => self.platform.log(&format!("Event was not accepted: HTTP {}", response.status_code)),
-            Err(e) => self.platform.log(&format!("Failed to send event: {}", e)),
-        }
     }
 }
 
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use ed25519_dalek::{Signature, Signer, SigningKey, Verifier};
+    use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
     use std::collections::HashMap;
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::TcpListener;
     use std::path::PathBuf;
-    use zedr_protocol::{shell_command_signing_bytes, ProcessAction, ProcessEvent, MAX_EVENT_BATCH_BYTES, SIGNATURE_HEADER};
-
-    const NO_ANSWER: u16 = 0;
+    use zedr_protocol::{ProcessAction, ProcessEvent, MAX_EVENT_BATCH_BYTES, SIGNATURE_HEADER};
 
     struct Received {
         path: String,
@@ -562,9 +315,6 @@ mod tests {
                     let (status, body) = respond(&request);
                     request.answer = status;
                     sink.lock().unwrap().push(request);
-                    if status == NO_ANSWER {
-                        continue;
-                    }
                     let _ = write!(
                         stream,
                         "HTTP/1.1 {} Stub\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -644,12 +394,6 @@ mod tests {
             self.logs.lock().unwrap().push(message.to_string());
         }
 
-        fn shell_invocation(&self, command_text: &str) -> Command {
-            let mut command = Command::new("/bin/sh");
-            command.arg("-c").arg(command_text);
-            command
-        }
-
         fn upgrade(&self, command: UpgradeCommand) {
             self.upgrades.lock().unwrap().push(command);
         }
@@ -674,35 +418,10 @@ mod tests {
         SigningKey::from_bytes(&[9u8; 32])
     }
 
-    fn trust_deployment_key() -> Result<VerifyingKey, String> {
-        Ok(deployment_key().verifying_key())
-    }
-
     fn runtime(server: &StubServer, dir: &std::path::Path) -> (Arc<Runtime<Arc<TestPlatform>>>, Arc<TestPlatform>) {
         let platform = Arc::new(TestPlatform::default());
         let link = Arc::new(ControlLink::open_with_key_id(server.url.clone(), dir).unwrap());
-        let mut runtime = Runtime::new(link, Arc::clone(&platform), host());
-        runtime.trusted_key = trust_deployment_key;
-        (Arc::new(runtime), platform)
-    }
-
-    fn signed_shell_reply(key: &SigningKey, agent_id: &str, command_text: &str, nonce: &str) -> String {
-        signed_shell_reply_issued_at(key, agent_id, command_text, nonce, unix_now())
-    }
-
-    fn signed_shell_reply_issued_at(key: &SigningKey, agent_id: &str, command_text: &str, nonce: &str, issued_at: u64) -> String {
-        let bytes = shell_command_signing_bytes(agent_id, "session-1", command_text, nonce, issued_at).unwrap();
-        serde_json::json!({
-            "shell_command": {
-                "session_id": "session-1",
-                "agent_id": agent_id,
-                "command_text": command_text,
-                "signature": key.sign(&bytes).to_bytes().to_vec(),
-                "issued_at": issued_at,
-                "nonce": nonce,
-            }
-        })
-        .to_string()
+        (Arc::new(Runtime::new(link, Arc::clone(&platform), host())), platform)
     }
 
     fn accept_everything(_: &Received) -> (u16, String) {
@@ -789,186 +508,6 @@ mod tests {
 
         assert_eq!(server.requests_to("/api/agents/register").len(), 2, "after a success there is no wait");
         assert!(platform.logged("registering again"));
-
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn test_shell_command_signed_by_the_deployment_runs_and_reports() {
-        let dir = state_dir("shell-runs");
-        let agent_id = ControlLink::open_with_key_id("http://unused".to_string(), &dir).unwrap().agent_id().to_string();
-        let reply = signed_shell_reply(&deployment_key(), &agent_id, "echo from-agent; exit 4", "runtime-shell-runs");
-        let server = StubServer::start(move |request| {
-            if request.body.contains("Heartbeat") {
-                (200, reply.clone())
-            } else {
-                (200, "{}".to_string())
-            }
-        });
-        let (runtime, _) = runtime(&server, &dir);
-
-        runtime.tick();
-
-        let executed = server.wait_for_event("ShellCommandExecuted").expect("the result is reported");
-        assert_eq!(executed["stdout"], "from-agent\n");
-        assert_eq!(executed["exit_code"], 4);
-        assert_eq!(executed["session_id"], "session-1");
-        assert_eq!(executed["command_id"], "runtime-shell-runs");
-        assert!(wait_until(|| recorded_as_answered(&dir, "runtime-shell-runs")));
-
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    fn assert_command_never_runs(name: &str, reply_for: impl Fn(&str, &std::path::Path) -> String, expected_log: &str) {
-        let dir = state_dir(name);
-        let marker = dir.join("command-ran");
-        let agent_id = ControlLink::open_with_key_id("http://unused".to_string(), &dir).unwrap().agent_id().to_string();
-        let reply = reply_for(&agent_id, &marker);
-        let server = StubServer::start(move |request| {
-            if request.body.contains("Heartbeat") {
-                (200, reply.clone())
-            } else {
-                (200, "{}".to_string())
-            }
-        });
-        let (runtime, platform) = runtime(&server, &dir);
-
-        runtime.tick();
-
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !platform.logged("Shell command verification failed") && Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(20));
-        }
-        thread::sleep(Duration::from_millis(200));
-
-        assert!(platform.logged(expected_log), "expected a refusal mentioning {:?}", expected_log);
-        assert!(!marker.exists(), "the command must not have run");
-        assert!(server.requests_to("/api/events").iter().all(|batch| !batch.to_string().contains("ShellCommandExecuted")));
-
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn test_shell_command_signed_by_another_key_never_runs() {
-        assert_command_never_runs(
-            "shell-wrong-key",
-            |agent_id, marker| signed_shell_reply(&SigningKey::from_bytes(&[8u8; 32]), agent_id, &format!("touch {}", marker.display()), "runtime-wrong-key"),
-            "Signature verification failed",
-        );
-    }
-
-    #[test]
-    fn test_shell_command_issued_for_another_agent_never_runs() {
-        assert_command_never_runs(
-            "shell-other-agent",
-            |_, marker| signed_shell_reply(&deployment_key(), "some-other-agent", &format!("touch {}", marker.display()), "runtime-other-agent"),
-            "different agent",
-        );
-    }
-
-    #[test]
-    fn test_old_shell_command_signed_by_another_key_gets_no_answer() {
-        assert_command_never_runs(
-            "shell-old-wrong-key",
-            |agent_id, marker| {
-                signed_shell_reply_issued_at(
-                    &SigningKey::from_bytes(&[8u8; 32]),
-                    agent_id,
-                    &format!("touch {}", marker.display()),
-                    "runtime-old-wrong-key",
-                    unix_now() - 310,
-                )
-            },
-            "Signature verification failed",
-        );
-    }
-
-    #[test]
-    fn test_old_shell_command_issued_for_another_agent_gets_no_answer() {
-        assert_command_never_runs(
-            "shell-old-other-agent",
-            |_, marker| {
-                signed_shell_reply_issued_at(
-                    &deployment_key(),
-                    "some-other-agent",
-                    &format!("touch {}", marker.display()),
-                    "runtime-old-other-agent",
-                    unix_now() - 310,
-                )
-            },
-            "different agent",
-        );
-    }
-
-    fn recorded_without_an_answer(dir: &std::path::Path, nonce: &str) -> bool {
-        let Ok(raw) = std::fs::read_to_string(dir.join("accepted-commands.json")) else { return true };
-        let Ok(record) = serde_json::from_str::<serde_json::Value>(&raw) else { return true };
-        record.as_array().is_some_and(|commands| commands.iter().any(|command| command["nonce"] == nonce && command["answered"] == false))
-    }
-
-    #[test]
-    fn test_shell_command_refused_for_its_age_is_answered_once_and_never_run() {
-        let cases = [("too-old", -310i64, "Command expired (older than 5 minutes)"), ("ahead", 70, "Command timestamp is in the future")];
-        for (case, seconds_from_now, reason) in cases {
-            let name = format!("shell-age-{}", case);
-            let dir = state_dir(&name);
-            let marker = dir.join("command-ran");
-            let agent_id = ControlLink::open_with_key_id("http://unused".to_string(), &dir).unwrap().agent_id().to_string();
-            let issued_at = (unix_now() as i64 + seconds_from_now) as u64;
-            let reply = signed_shell_reply_issued_at(&deployment_key(), &agent_id, &format!("touch {}", marker.display()), &name, issued_at);
-            let taking_results = Arc::new(Mutex::new(false));
-            let gate = Arc::clone(&taking_results);
-            let server = StubServer::start(move |request| match (request.body.contains("Heartbeat"), *gate.lock().unwrap()) {
-                (true, false) => (200, reply.clone()),
-                (false, false) => (503, "{}".to_string()),
-                (_, true) => (200, "{}".to_string()),
-            });
-            let (runtime, platform) = runtime(&server, &dir);
-
-            runtime.tick();
-            assert!(wait_until(|| platform.logged(&format!("Shell command for session session-1 is answered and not run: {}", reason))));
-            assert!(wait_until(|| platform.logged("Shell command results are queued, 1 waiting: HTTP 503")));
-
-            runtime.tick();
-            let handed_out_again = format!("Shell command is not run: {}. It is not answered: Command was already accepted by this agent", reason);
-            assert!(wait_until(|| platform.logged(&handed_out_again)), "{:?}", platform.logs.lock().unwrap());
-
-            *taking_results.lock().unwrap() = true;
-            runtime.tick();
-            assert!(wait_until(|| !shell_results(&server, 200).is_empty()), "the command is answered");
-            assert!(wait_until(|| !recorded_without_an_answer(&dir, &name)));
-            let answers = shell_results(&server, 200);
-            assert_eq!(answers.len(), 1);
-            assert_eq!(answers[0]["command_id"], name.as_str());
-            assert_eq!(answers[0]["session_id"], "session-1");
-            assert_eq!(answers[0]["exit_code"], -1);
-            assert_eq!(answers[0]["stdout"], "");
-            assert_eq!(answers[0]["stderr"], format!("[NOT RUN] {}", reason));
-
-            assert_no_result_is_sent_after_another_heartbeat(&runtime, &server);
-            assert!(!marker.exists(), "the command must not have run");
-            assert!(!platform.logged("Shell command verification failed"));
-
-            std::fs::remove_dir_all(&dir).unwrap();
-        }
-    }
-
-    #[test]
-    fn test_agent_that_was_not_sealed_by_a_control_server_runs_no_command() {
-        let dir = state_dir("shell-unsealed");
-        let marker = dir.join("command-ran");
-        let agent_id = ControlLink::open_with_key_id("http://unused".to_string(), &dir).unwrap().agent_id().to_string();
-        let reply = signed_shell_reply(&deployment_key(), &agent_id, &format!("touch {}", marker.display()), "runtime-unsealed");
-        let server = StubServer::start(accept_everything);
-        let platform = Arc::new(TestPlatform::default());
-        let link = Arc::new(ControlLink::open_with_key_id(server.url.clone(), &dir).unwrap());
-        let runtime = Runtime::new(link, Arc::clone(&platform), host());
-
-        let reply: HeartbeatReply = serde_json::from_str(&reply).unwrap();
-        runtime.run_shell_command(reply.shell_command.unwrap());
-
-        assert!(platform.logged("not been patched"));
-        assert!(!marker.exists());
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -1303,377 +842,9 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    fn issue_shell_command(
-        name: &str,
-        command_text: &str,
-        answer_result: impl Fn(&Received) -> (u16, String) + Send + 'static,
-    ) -> (Arc<Runtime<Arc<TestPlatform>>>, StubServer, Arc<TestPlatform>, PathBuf) {
-        let dir = state_dir(name);
-        let agent_id = ControlLink::open_with_key_id("http://unused".to_string(), &dir).unwrap().agent_id().to_string();
-        let reply = signed_shell_reply(&deployment_key(), &agent_id, command_text, name);
-        let server = StubServer::start(move |request| {
-            if request.body.contains("Heartbeat") {
-                (200, reply.clone())
-            } else {
-                answer_result(request)
-            }
-        });
-        let (runtime, platform) = runtime(&server, &dir);
-
-        runtime.tick();
-
-        (runtime, server, platform, dir)
-    }
-
-    fn shell_results(server: &StubServer, answer: u16) -> Vec<serde_json::Value> {
-        server
-            .received
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|request| request.answer == answer && request.body.contains("ShellCommandExecuted"))
-            .map(|request| request.json()["events"][0]["ShellCommandExecuted"].clone())
-            .collect()
-    }
-
-    #[test]
-    fn test_shell_result_larger_than_a_batch_is_cut_to_one_request_and_keeps_its_exit_code() {
-        let (_, server, platform, dir) = issue_shell_command(
-            "shell-large-result",
-            "head -c 1100000 /dev/zero; head -c 1100000 /dev/zero >&2; exit 4",
-            refuse_above(MAX_EVENT_BATCH_BYTES),
-        );
-
-        assert!(wait_until(|| !shell_results(&server, 200).is_empty()), "the result is reported");
-        let executed = &shell_results(&server, 200)[0];
-        assert_eq!(executed["exit_code"], 4);
-        assert_eq!(executed["command_id"], "shell-large-result");
-        for stream in ["stdout", "stderr"] {
-            let output = executed[stream].as_str().unwrap();
-            assert!(output.starts_with(&"\0".repeat(174_000)), "{} carries half of what one request holds", stream);
-            assert!(output.ends_with(" BYTES TO FIT THE RESULT IN ONE REQUEST]"), "{} says that it was cut", stream);
-        }
-        assert!(answers(&server).iter().all(|answer| *answer == 200), "the result was never larger than the server reads: {:?}", answers(&server));
-        assert!(largest_request(&server) <= MAX_EVENT_BATCH_BYTES);
-        assert!(largest_request(&server) > MAX_EVENT_BATCH_BYTES - 64, "the request is filled up to the limit");
-        assert!(!platform.logged("discarded") && !platform.logged("queued"));
-        assert!(wait_until(|| recorded_as_answered(&dir, "shell-large-result")));
-
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn test_shell_result_refused_for_its_size_is_sent_again_with_less_output() {
-        let limit_of_a_proxy = 64 * 1024;
-        let (_, server, platform, dir) = issue_shell_command(
-            "shell-proxy-limit",
-            "head -c 300000 /dev/zero | tr '\\0' 'a'; echo problem >&2; exit 3",
-            refuse_above(limit_of_a_proxy),
-        );
-
-        assert!(wait_until(|| !shell_results(&server, 200).is_empty()), "the result is reported");
-        let executed = &shell_results(&server, 200)[0];
-        assert_eq!(executed["exit_code"], 3);
-        assert_eq!(executed["stderr"], "problem\n");
-        let stdout = executed["stdout"].as_str().unwrap();
-        assert!(stdout.starts_with(&"a".repeat(limit_of_a_proxy / 2)));
-        assert!(stdout.ends_with(" BYTES TO FIT THE RESULT IN ONE REQUEST]"));
-        assert_eq!(shell_results(&server, 413).len(), 3, "refused at 300 KB, 150 KB and 75 KB");
-        assert!(wait_until(|| platform.logged("Server answered HTTP 413 to the shell command result until it was cut to")));
-        assert!(!platform.logged("discarded") && !platform.logged("queued"));
-        assert!(wait_until(|| recorded_as_answered(&dir, "shell-proxy-limit")));
-
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    fn assert_no_result_is_sent_after_another_heartbeat(runtime: &Arc<Runtime<Arc<TestPlatform>>>, server: &StubServer) {
-        let sent = server.received.lock().unwrap().iter().filter(|request| request.body.contains("ShellCommandExecuted")).count();
-        let heartbeats = server.received.lock().unwrap().iter().filter(|request| request.body.contains("Heartbeat")).count();
-
-        runtime.tick();
-        thread::sleep(Duration::from_millis(200));
-
-        let received = server.received.lock().unwrap();
-        assert_eq!(received.iter().filter(|request| request.body.contains("Heartbeat")).count(), heartbeats + 1);
-        assert_eq!(received.iter().filter(|request| request.body.contains("ShellCommandExecuted")).count(), sent);
-    }
-
-    #[test]
-    fn test_shell_result_refused_for_its_size_without_output_is_discarded() {
-        let (runtime, server, platform, dir) =
-            issue_shell_command("shell-always-too-large", "head -c 10000 /dev/zero | tr '\\0' 'a'; exit 2", |_| (413, "{}".to_string()));
-
-        assert!(wait_until(|| platform.logged("Shell command result was discarded: HTTP 413 and no output left to cut")));
-        let refused = shell_results(&server, 413);
-        assert!(refused.len() > 2 && refused.len() < 16, "every attempt is half the one before: {}", refused.len());
-        let last = refused.last().unwrap();
-        assert_eq!(last["exit_code"], 2);
-        assert_eq!(last["stdout"], "\n[OUTPUT TRUNCATED AT 0 BYTES TO FIT THE RESULT IN ONE REQUEST]");
-        assert!(wait_until(|| recorded_as_answered(&dir, "shell-always-too-large")), "a discarded result is not answered again after a restart");
-        assert_no_result_is_sent_after_another_heartbeat(&runtime, &server);
-
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn test_shell_result_the_server_cannot_read_is_discarded() {
-        for status in [400, 422] {
-            let name = format!("shell-unreadable-{}", status);
-            let (runtime, server, platform, dir) = issue_shell_command(&name, "echo out; exit 1", move |_| (status, "{}".to_string()));
-
-            assert!(wait_until(|| platform.logged(&format!("Shell command result was discarded: HTTP {}", status))));
-            assert_eq!(shell_results(&server, status).len(), 1);
-            assert!(wait_until(|| recorded_as_answered(&dir, &name)));
-            assert_no_result_is_sent_after_another_heartbeat(&runtime, &server);
-            assert!(!platform.logged("queued"));
-
-            std::fs::remove_dir_all(&dir).unwrap();
-        }
-    }
-
-    #[test]
-    fn test_shell_result_the_server_did_not_take_is_sent_again_after_every_accepted_heartbeat() {
-        for status in [401, 403, 409, 500, 503, NO_ANSWER] {
-            let name = format!("shell-kept-{}", status);
-            let runs = std::env::temp_dir().join(format!("zedr-runtime-{}-{}-runs", std::process::id(), name));
-            let _ = std::fs::remove_file(&runs);
-            let taking_results = Arc::new(Mutex::new(false));
-            let gate = Arc::clone(&taking_results);
-            let (runtime, server, platform, dir) = issue_shell_command(
-                &name,
-                &format!("echo ran >> {}; echo out; exit 5", runs.display()),
-                move |_| if *gate.lock().unwrap() { (200, "{}".to_string()) } else { (status, "{}".to_string()) },
-            );
-
-            let seen_by_the_agent = if status == NO_ANSWER { 503 } else { status };
-            assert!(
-                wait_until(|| platform.logged(&format!("Shell command results are queued, 1 waiting: HTTP {}", seen_by_the_agent))),
-                "{:?}",
-                platform.logs.lock().unwrap()
-            );
-            assert_eq!(shell_results(&server, status).len(), 1);
-
-            runtime.tick();
-            assert!(wait_until(|| shell_results(&server, status).len() == 2), "the result is sent again after a heartbeat the server took");
-
-            *taking_results.lock().unwrap() = true;
-            runtime.tick();
-            assert!(wait_until(|| platform.logged("Shell command results are being delivered again")));
-            let delivered = shell_results(&server, 200);
-            assert_eq!(delivered.len(), 1);
-            assert_eq!(delivered[0]["command_id"], name.as_str());
-            assert_eq!(delivered[0]["exit_code"], 5);
-            assert_eq!(delivered[0]["stdout"], "out\n");
-
-            assert_no_result_is_sent_after_another_heartbeat(&runtime, &server);
-            assert_eq!(std::fs::read_to_string(&runs).unwrap(), "ran\n", "the command ran once, although every heartbeat handed it out again");
-            assert!(!platform.logged("discarded"));
-            assert!(recorded_as_answered(&dir, &name));
-
-            std::fs::remove_file(&runs).unwrap();
-            std::fs::remove_dir_all(&dir).unwrap();
-        }
-    }
-
-    #[test]
-    fn test_shell_result_waits_while_the_server_takes_no_heartbeat() {
-        for status in [401, 503, NO_ANSWER] {
-            let name = format!("shell-server-down-{}", status);
-            let dir = state_dir(&name);
-            let agent_id = ControlLink::open_with_key_id("http://unused".to_string(), &dir).unwrap().agent_id().to_string();
-            let reply = signed_shell_reply(&deployment_key(), &agent_id, "echo out; exit 6", &name);
-            let down = Arc::new(Mutex::new(false));
-            let switch = Arc::clone(&down);
-            let server = StubServer::start(move |request| {
-                let mut down = switch.lock().unwrap();
-                if *down {
-                    (status, "{}".to_string())
-                } else if request.body.contains("Heartbeat") && request.json()["seq"] == 1 {
-                    *down = true;
-                    (200, reply.clone())
-                } else {
-                    (200, "{}".to_string())
-                }
-            });
-            let (runtime, platform) = runtime(&server, &dir);
-
-            runtime.tick();
-            assert!(wait_until(|| platform.logged("Shell command results are queued, 1 waiting")));
-            assert_eq!(shell_results(&server, status).len(), 1);
-
-            for _ in 0..3 {
-                assert_no_result_is_sent_after_another_heartbeat(&runtime, &server);
-            }
-
-            *down.lock().unwrap() = false;
-            runtime.tick();
-            assert!(wait_until(|| shell_results(&server, 200).len() == 1), "the result arrives with the first heartbeat the server takes");
-            assert_eq!(shell_results(&server, 200)[0]["exit_code"], 6);
-            assert_eq!(shell_results(&server, 200)[0]["command_id"], name.as_str());
-            assert_eq!(shell_results(&server, status).len(), 1, "nothing was uploaded while the server was down");
-            assert!(wait_until(|| recorded_as_answered(&dir, &name)));
-
-            std::fs::remove_dir_all(&dir).unwrap();
-        }
-    }
-
-    #[test]
-    fn test_shell_result_waits_for_a_server_that_cannot_be_reached() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let unreachable = StubServer { url: format!("http://{}", listener.local_addr().unwrap()), received: Arc::new(Mutex::new(Vec::new())) };
-        drop(listener);
-        let dir = state_dir("shell-unreachable");
-        let (runtime, platform) = runtime(&unreachable, &dir);
-        runtime.queue_shell_result(not_started(0));
-
-        runtime.deliver_shell_results();
-        runtime.deliver_shell_results();
-
-        let waits: Vec<String> = platform.logs.lock().unwrap().iter().filter(|line| line.contains("are queued")).cloned().collect();
-        assert_eq!(waits.len(), 1, "a wait is logged once: {:?}", waits);
-        assert!(waits[0].starts_with("Shell command results are queued, 1 waiting: Request to /api/events failed"), "{}", waits[0]);
-        assert!(!platform.logged("discarded"));
-
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    fn not_started(number: usize) -> CommandResult {
-        let command = ShellCommand {
-            session_id: "session-1".to_string(),
-            agent_id: String::new(),
-            command_text: String::new(),
-            signature: Vec::new(),
-            issued_at: 0,
-            nonce: format!("command-{}", number),
-        };
-        CommandResult::failed(&command, "not started")
-    }
-
-    fn delivered_commands(server: &StubServer) -> Vec<String> {
-        shell_results(server, 200).iter().map(|result| result["command_id"].as_str().unwrap().to_string()).collect()
-    }
-
-    #[test]
-    fn test_shell_results_are_delivered_oldest_first_and_stop_at_the_one_the_server_does_not_take() {
-        let server = StubServer::start(|request| {
-            if request.body.contains("command-2") && !request.body.contains("command-2-retried") {
-                (503, "{}".to_string())
-            } else {
-                (200, "{}".to_string())
-            }
-        });
-        let dir = state_dir("shell-queue-order");
-        let (runtime, platform) = runtime(&server, &dir);
-        for number in 0..5 {
-            runtime.queue_shell_result(not_started(number));
-        }
-
-        runtime.deliver_shell_results();
-
-        assert_eq!(delivered_commands(&server), vec!["command-0", "command-1"]);
-        assert!(platform.logged("Shell command results are queued, 3 waiting: HTTP 503"));
-
-        runtime.deliver_shell_results();
-        assert_eq!(delivered_commands(&server), vec!["command-0", "command-1"], "the results behind it wait as well");
-        assert_eq!(shell_results(&server, 503).len(), 2);
-        assert_eq!(platform.logs.lock().unwrap().iter().filter(|line| line.contains("are queued")).count(), 1, "a wait is logged once");
-
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn test_more_shell_results_than_the_queue_holds_cost_the_oldest() {
-        let server = StubServer::start(accept_everything);
-        let dir = state_dir("shell-queue-full");
-        let (runtime, platform) = runtime(&server, &dir);
-        for number in 0..SHELL_RESULT_QUEUE_LIMIT + 2 {
-            runtime.queue_shell_result(not_started(number));
-        }
-
-        runtime.deliver_shell_results();
-
-        let dropped = platform.logs.lock().unwrap().iter().filter(|line| line.contains("Shell command result queue is full, dropped the oldest result")).count();
-        assert_eq!(dropped, 2);
-        let kept: Vec<String> = (2..SHELL_RESULT_QUEUE_LIMIT + 2).map(|number| format!("command-{}", number)).collect();
-        assert_eq!(delivered_commands(&server), kept);
-
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    fn recorded_as_answered(dir: &std::path::Path, nonce: &str) -> bool {
-        let Ok(raw) = std::fs::read_to_string(dir.join("accepted-commands.json")) else { return false };
-        let Ok(record) = serde_json::from_str::<serde_json::Value>(&raw) else { return false };
-        record.as_array().is_some_and(|commands| commands.iter().any(|command| command["nonce"] == nonce && command["answered"] == true))
-    }
-
     fn restart(server: &StubServer, dir: &std::path::Path, nonce: &str) -> (Arc<Runtime<Arc<TestPlatform>>>, Arc<TestPlatform>) {
         crate::forget_nonce_as_a_new_process_would(nonce);
         runtime(server, dir)
-    }
-
-    #[test]
-    fn test_shell_command_without_an_answer_is_answered_after_a_restart_and_never_run_again() {
-        let name = "shell-restart-unanswered";
-        let runs = std::env::temp_dir().join(format!("zedr-runtime-{}-{}-runs", std::process::id(), name));
-        let _ = std::fs::remove_file(&runs);
-        let taking_results = Arc::new(Mutex::new(false));
-        let gate = Arc::clone(&taking_results);
-        let (stopped, server, platform, dir) = issue_shell_command(
-            name,
-            &format!("echo ran >> {}; echo out; exit 0", runs.display()),
-            move |_| if *gate.lock().unwrap() { (200, "{}".to_string()) } else { (503, "{}".to_string()) },
-        );
-        assert!(wait_until(|| platform.logged("Shell command results are queued, 1 waiting")));
-        drop(stopped);
-        *taking_results.lock().unwrap() = true;
-
-        let (restarted, platform) = restart(&server, &dir, name);
-        assert!(platform.logged(&format!("Shell command {} of session session-1 had no answer when this agent stopped", name)));
-
-        restarted.tick();
-
-        assert!(wait_until(|| recorded_as_answered(&dir, name)), "the command is answered");
-        let answers = shell_results(&server, 200);
-        assert_eq!(answers.len(), 1);
-        assert_eq!(answers[0]["command_id"], name);
-        assert_eq!(answers[0]["session_id"], "session-1");
-        assert_eq!(answers[0]["exit_code"], -1);
-        assert_eq!(answers[0]["stdout"], "");
-        assert_eq!(answers[0]["stderr"], "[AGENT RESTARTED BEFORE THE RESULT WAS SENT, THE COMMAND MAY NOT HAVE FINISHED]");
-        assert!(wait_until(|| platform.logged("Shell command is not run: Command was already accepted by this agent")));
-
-        let (restarted_again, platform) = restart(&server, &dir, name);
-        assert!(!platform.logged("had no answer"));
-        assert_no_result_is_sent_after_another_heartbeat(&restarted_again, &server);
-        assert!(wait_until(|| platform.logged("Shell command is not run: Command was already accepted by this agent")));
-        assert_eq!(std::fs::read_to_string(&runs).unwrap(), "ran\n", "the command ran once, however often it was handed out");
-
-        std::fs::remove_file(&runs).unwrap();
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn test_shell_command_with_an_answer_is_left_alone_after_a_restart() {
-        let name = "shell-restart-answered";
-        let runs = std::env::temp_dir().join(format!("zedr-runtime-{}-{}-runs", std::process::id(), name));
-        let _ = std::fs::remove_file(&runs);
-        let (stopped, server, _, dir) =
-            issue_shell_command(name, &format!("echo ran >> {}; exit 3", runs.display()), accept_everything);
-        assert!(wait_until(|| recorded_as_answered(&dir, name)));
-        drop(stopped);
-
-        let (restarted, platform) = restart(&server, &dir, name);
-        assert!(!platform.logged("had no answer"));
-        assert_no_result_is_sent_after_another_heartbeat(&restarted, &server);
-
-        assert!(wait_until(|| platform.logged("Shell command is not run: Command was already accepted by this agent")));
-        let answers = shell_results(&server, 200);
-        assert_eq!(answers.len(), 1);
-        assert_eq!(answers[0]["exit_code"], 3);
-        assert_eq!(std::fs::read_to_string(&runs).unwrap(), "ran\n");
-
-        std::fs::remove_file(&runs).unwrap();
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     fn signed_upgrade(key: &SigningKey, agent_id: &str, nonce: &str) -> UpgradeCommand {
@@ -1702,11 +873,9 @@ mod tests {
         assert!(link.verify_upgrade_command_with_key(&trusted, &command).unwrap_err().contains("replay"));
         drop(link);
 
-        let (restarted, platform) = restart(&server, &dir, name);
+        let (restarted, _) = restart(&server, &dir, name);
         let refused = restarted.link.verify_upgrade_command_with_key(&trusted, &command).unwrap_err();
         assert!(refused.contains("already accepted by this agent"), "{}", refused);
-        assert!(!platform.logged("had no answer"), "an upgrade command is not answered like a shell command");
-        assert!(restarted.shell_results.lock().unwrap().queued.is_empty());
 
         let for_another_agent = signed_upgrade(&key, "another-agent", "upgrade-other-agent");
         assert!(restarted.link.verify_upgrade_command_with_key(&trusted, &for_another_agent).unwrap_err().contains("different agent"));
@@ -1724,11 +893,13 @@ mod tests {
         let name = "upgrade-record-corrupt";
         let dir = state_dir(name);
         std::fs::write(dir.join("accepted-commands.json"), "not a record").unwrap();
+        let server = StubServer::start(accept_everything);
         let key = deployment_key();
-        let link = ControlLink::open_with_key_id("http://unused".to_string(), &dir).unwrap();
-        let command = signed_upgrade(&key, link.agent_id(), name);
+        let (runtime, platform) = runtime(&server, &dir);
+        assert!(platform.logged("Upgrade commands are refused: Record of accepted commands is corrupt"));
 
-        let refused = link.verify_upgrade_command_with_key(&key.verifying_key(), &command).unwrap_err();
+        let command = signed_upgrade(&key, runtime.link.agent_id(), name);
+        let refused = runtime.link.verify_upgrade_command_with_key(&key.verifying_key(), &command).unwrap_err();
         assert!(refused.contains("Record of accepted commands is corrupt"), "{}", refused);
         assert_eq!(std::fs::read_to_string(dir.join("accepted-commands.json")).unwrap(), "not a record", "the record is left as it was");
 
@@ -1736,29 +907,15 @@ mod tests {
     }
 
     #[test]
-    fn test_shell_commands_are_refused_while_the_record_of_accepted_commands_cannot_be_read() {
-        let name = "shell-record-corrupt";
+    fn test_agent_that_was_not_sealed_by_a_control_server_accepts_no_upgrade_command() {
+        let name = "upgrade-unsealed";
         let dir = state_dir(name);
-        std::fs::write(dir.join("accepted-commands.json"), "not a record").unwrap();
-        let marker = dir.join("command-ran");
-        let agent_id = ControlLink::open_with_key_id("http://unused".to_string(), &dir).unwrap().agent_id().to_string();
-        let reply = signed_shell_reply(&deployment_key(), &agent_id, &format!("touch {}", marker.display()), name);
-        let server = StubServer::start(move |request| {
-            if request.body.contains("Heartbeat") {
-                (200, reply.clone())
-            } else {
-                (200, "{}".to_string())
-            }
-        });
-        let (runtime, platform) = runtime(&server, &dir);
-        assert!(platform.logged("Shell and upgrade commands are refused: Record of accepted commands is corrupt"));
+        let link = ControlLink::open_with_key_id("http://unused".to_string(), &dir).unwrap();
+        let command = signed_upgrade(&deployment_key(), link.agent_id(), name);
 
-        runtime.tick();
-
-        assert!(wait_until(|| platform.logged("Shell command is not run: Record of accepted commands is corrupt")));
-        thread::sleep(Duration::from_millis(200));
-        assert!(!marker.exists(), "the command must not have run");
-        assert!(shell_results(&server, 200).is_empty());
+        let refused = link.verify_upgrade_command(&command).unwrap_err();
+        assert!(refused.contains("not been patched"), "{}", refused);
+        assert!(!dir.join("accepted-commands.json").exists(), "a refused command is not recorded");
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

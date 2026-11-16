@@ -56,7 +56,7 @@ Every 30 seconds (configurable via `ZEDR_HEARTBEAT_INTERVAL` env var):
      ]
    }
    ```
-2. **Backend responds** with `200 OK` and, when one is pending, a signed `upgrade` or `shell_command`. Both carry `agent_id`, and the agent refuses a command issued for another agent.
+2. **Backend responds** with `200 OK` and, when one is pending, a signed `upgrade` command. It carries `agent_id`, and the agent refuses a command issued for another agent. An upgrade is the only command the control server can send ([ADR 030](../adr/030-no-remote-shell.md)).
 3. **Backend updates** `last_heartbeat`, sets the liveness state to `active` and closes open `silence` and `service_stopped` incidents.
 4. **On `401`** the agent registers again.
 

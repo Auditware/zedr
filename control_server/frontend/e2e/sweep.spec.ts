@@ -69,7 +69,7 @@ test('shell: rail, account, panes and every page', async ({ page }, info) => {
   await expect(page).toHaveURL(/q=install_key/)
   await page.getByLabel('Filter events').fill('')
 
-  for (const name of ['Events', 'Shell', 'Installers']) {
+  for (const name of ['Events', 'Installers']) {
     await page.getByRole('link', { name }).click()
     await expect(page).toHaveURL(new RegExp(`/${name.toLowerCase()}`))
     await settle(page, 900)
@@ -124,18 +124,18 @@ test('map: scroll pans, pinch zooms at the cursor, a dot opens the endpoint', as
   await run.shot('endpoint-opened')
 
   const panel = page.getByRole('complementary', { name: 'Details' })
-  const shellAction = panel.getByRole('link', { name: 'Shell' })
-  await expect(shellAction.getByText('Shell')).toBeVisible()
+  const eventsAction = panel.getByRole('link', { name: 'Events' })
+  await expect(eventsAction.getByText('Events')).toBeVisible()
   const edge = (await panel.boundingBox())!
   await drag(page, { x: edge.x - 6, y: edge.y + edge.height / 2 }, 140, 0)
-  await expect(shellAction.getByText('Shell')).toBeHidden()
-  await expect(shellAction.locator('svg')).toBeVisible()
+  await expect(eventsAction.getByText('Events')).toBeHidden()
+  await expect(eventsAction.locator('svg')).toBeVisible()
   await expect(panel.getByRole('button', { name: 'Upgrade' }).locator('svg')).toBeVisible()
   await run.shot('narrow-details-icons')
   const tight = (await panel.boundingBox())!
   expect(tight.width).toBeLessThan(edge.width)
   await drag(page, { x: tight.x - 6, y: tight.y + tight.height / 2 }, -140, 0)
-  await expect(shellAction.getByText('Shell')).toBeVisible()
+  await expect(eventsAction.getByText('Events')).toBeVisible()
 
   await page.getByTestId('activity-tracks').locator('[data-mark="incident"]').last().click()
   await expect(page).toHaveURL(/view=agent/)
@@ -377,51 +377,10 @@ test('heavy: a build server with hundreds of processes stays workable', async ({
   run.finish()
 })
 
-const SHELL_HOSTS: Record<string, string> = { desktop: 'ENG-WS-11', laptop: 'ENG-WS-12', pane: 'ENG-WS-13' }
-const SEEN_HOSTS: Record<string, string> = { desktop: 'FIN-LAPTOP-02', laptop: 'FIN-LAPTOP-03', pane: 'FIN-LAPTOP-04' }
-
-test('remote shell: pick an endpoint, run a command, end the session', async ({ page }, info) => {
-  const run = record(page, info, 'remote')
-  const host = SHELL_HOSTS[info.project.name]!
-  await signIn(page)
-  await page.getByRole('link', { name: 'Shell' }).click()
-  await page.getByRole('button', { name: 'Session', exact: true }).first().click()
-  const picker = page.getByPlaceholder('Host or address')
-  await expect(picker).toBeFocused()
-  await picker.fill(host)
-  await expect(page.getByRole('option')).toHaveCount(1)
-  await run.shot('pick-an-endpoint')
-  await picker.press('Enter')
-  await expect(page).toHaveURL(/session=[0-9a-f]{8}/)
-  await expect(page.getByText('signed session')).toBeVisible()
-
-  await page.locator('.xterm-screen').click()
-  await page.keyboard.type('whoami')
-  await page.keyboard.press('Enter')
-  await expect(page.getByText('1 waiting for agent')).toBeVisible()
-  await expect(page.getByText('waiting for agent')).toHaveCount(0, { timeout: 60_000 })
-  await expect(page.locator('.xterm-rows')).toContainText('nt authority')
-  await settle(page, 600)
-  await run.shot('command-ran')
-
-  await page.getByRole('button', { name: 'End', exact: true }).click()
-  await expect(page.getByText('ended', { exact: true }).first()).toBeVisible()
-  await expect(page.getByRole('button', { name: 'End', exact: true })).toHaveCount(0)
-  await run.shot('session-ended')
-  run.finish()
-})
-
 test('accounts: impersonate a read-only user, then manage the account', async ({ page }, info) => {
   const run = record(page, info, 'accounts')
   const name = `dana-${info.project.name}`
   await signIn(page)
-  await page.getByRole('link', { name: 'Shell' }).click()
-  await page.getByRole('button', { name: 'Session', exact: true }).first().click()
-  await page.getByPlaceholder('Host or address').fill(SEEN_HOSTS[info.project.name]!)
-  await page.getByPlaceholder('Host or address').press('Enter')
-  await expect(page.getByText('signed session')).toBeVisible()
-  await page.getByRole('button', { name: 'End', exact: true }).click()
-  await expect(page.getByRole('button', { name: 'End', exact: true })).toHaveCount(0)
   await page.getByRole('link', { name: 'Users' }).click()
   await expect(page).toHaveURL(/\/users/)
 
@@ -441,9 +400,6 @@ test('accounts: impersonate a read-only user, then manage the account', async ({
   await expect(banner).toBeVisible()
   await expect(page).toHaveURL(/\/endpoints/)
   await expect(page.getByRole('link', { name: 'Users' })).toHaveCount(0)
-  await page.getByRole('link', { name: 'Shell' }).click()
-  await expect(page.getByText('Commands and their output are shown to admins')).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Session', exact: true })).toHaveCount(0)
   for (const link of ['Events', 'Installers', 'Endpoints']) {
     await page.getByRole('link', { name: link }).click()
     await settle(page, 700)

@@ -23,9 +23,6 @@ This file documents the agent's technical capabilities per operating system
 ## Service Persistence
 
 - [ ] Run as system LaunchDaemon with root privileges, auto-start on boot, survive crashes
-- [ ] Secure Remote Shell Capability
-  - [ ] Signed command execution over HTTP
-  - [ ] Signed file retrieval
 
 ## EndpointSecurity
 
@@ -54,9 +51,6 @@ This file documents the agent's technical capabilities per operating system
 ## Service Persistence
 
 - [x] Run as Windows Service with NT/AUTHORITY privileges, auto-start on boot, survive crashes
-- [ ] Secure Remote Shell Capability
-  - [ ] Signed command execution over HTTP
-  - [ ] Signed file retrieval
 
 ## ETW (Event Tracing for Windows)
 
@@ -85,9 +79,6 @@ This file documents the agent's technical capabilities per operating system
   - [x] Run as systemd service as root, auto-start on boot, restart after a crash (`/install.sh`)
   - [x] Run in a container and as a Kubernetes DaemonSet (`deploy/agents`)
   - [x] Enroll, send signed heartbeats and report a stop apart from a shutdown
-- [ ] Secure Remote Shell Capability
-  - [x] Signed command execution over HTTP
-  - [ ] Signed file retrieval
 
 ## procfs
 

@@ -48,8 +48,6 @@ pub struct EventStats {
     pub heartbeat: i64,
     pub upgrade: i64,
     pub install: i64,
-    pub shell_session_created: i64,
-    pub shell_session_terminated: i64,
     pub incident: i64,
 }
 

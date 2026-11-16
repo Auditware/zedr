@@ -6,7 +6,6 @@ applyTo: "control_server/backend/**"
 
 - Provides a central control server to manage all deployed agents, view detections, and respond to incidents:
   - Cage network activity of the host system through the agent
-  - Provides remote shell access for up to 30 minutes at an approval window to the host system through the agent. Approval window must be authorized by 3 different signers from different login sessions
 - Communicates securely to a central control server, over encrypted, highest-of-integrity channels
 - Access to the central control server is protected with multi-factor authentication and role-based access control
 - Any event collected must reach the central control server within 30 seconds of occurrence

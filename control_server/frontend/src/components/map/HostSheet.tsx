@@ -1,6 +1,6 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
-import { ArrowUpCircle, Rows3, SquareTerminal } from 'lucide-react'
+import { ArrowUpCircle, Rows3 } from 'lucide-react'
 import { useState } from 'react'
 import { CloseIncident, IncidentCard } from '@/components/common/IncidentCard'
 import { CopyButton, FindingLine, SectionTitle, StateChip } from '@/components/ui/bits'
@@ -125,12 +125,6 @@ export function HostSheet({ agent, state, incidents, onProcess, onAutostart }: P
 
       <div className="@container mt-auto pt-5">
         <div className="grid auto-cols-fr grid-flow-col gap-2">
-          <Link to="/shell" search={{ agent: agent.id }} aria-label="Shell" title="Shell" className="min-w-0">
-            <Button variant="primary" tabIndex={-1} className={action}>
-              <SquareTerminal size={16} strokeWidth={1.75} className="shrink-0" aria-hidden />
-              <span className={actionLabel}>Shell</span>
-            </Button>
-          </Link>
           <Link to="/events" search={{ agent: agent.id }} aria-label="Events" title="Events" className="min-w-0">
             <Button tabIndex={-1} className={action}>
               <Rows3 size={16} strokeWidth={1.5} className="shrink-0" aria-hidden />

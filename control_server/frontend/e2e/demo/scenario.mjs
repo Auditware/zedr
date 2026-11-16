@@ -291,13 +291,3 @@ export function telemetry(endpoint, now, random) {
   }
   return events
 }
-
-export function shellOutput(endpoint, command) {
-  const normalized = command.trim().toLowerCase()
-  if (normalized === 'whoami') return 'nt authority\\system\r\n'
-  if (normalized === 'hostname') return `${endpoint.host}\r\n`
-  if (normalized === 'ipconfig') {
-    return `Ethernet adapter Ethernet:\r\n   IPv4 Address. . . . . . . . . . . : ${endpoint.ip}\r\n   Subnet Mask . . . . . . . . . . . : 255.255.255.0\r\n`
-  }
-  return null
-}

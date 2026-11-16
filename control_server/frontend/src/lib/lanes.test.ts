@@ -36,7 +36,7 @@ describe('buildLanes', () => {
   })
 
   it('keeps a lane for a category with nothing in the period', () => {
-    expect(lane('shell')).toMatchObject({ counts: [0, 0, 0, 0], total: 0, peak: 1 })
+    expect(lane('upgrade')).toMatchObject({ counts: [0, 0, 0, 0], total: 0, peak: 1 })
     expect(lanes.map((item) => item.id)).toEqual(CATEGORIES.map((category) => category.id))
   })
 

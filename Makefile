@@ -313,8 +313,8 @@ clean-vm-windows: ## Complete zedr cleanup on Windows VM with verification
 .PHONY: clean-db
 clean-db: ## Reset database for fresh agent testing
 	@echo "Resetting database for fresh agent testing..."
-	@cd control_server/backend && sqlite3 zedr.db "DELETE FROM agent_sessions; DELETE FROM incidents; DELETE FROM agent_installations; DELETE FROM upgrade_commands; DELETE FROM shell_commands; DELETE FROM shell_sessions; DELETE FROM agents; DELETE FROM events; DELETE FROM install_keys; DELETE FROM enrollment_tokens;"
-	@echo "✓ Database cleared of agent data, events, install keys, and shell data"
+	@cd control_server/backend && sqlite3 zedr.db "DELETE FROM agent_sessions; DELETE FROM incidents; DELETE FROM agent_installations; DELETE FROM upgrade_commands; DELETE FROM agents; DELETE FROM events; DELETE FROM install_keys; DELETE FROM enrollment_tokens;"
+	@echo "✓ Database cleared of agent data, events, and install keys"
 
 .PHONY: setup-tls
 setup-tls: ## Generate TLS certificates from ZEDR_SERVER_URL

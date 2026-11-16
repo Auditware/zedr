@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { Agent, Incident, ShellSession } from './api'
+import type { Agent, Incident } from './api'
 import { matchScore, search, type SearchSource } from './search'
 
 function agent(id: string, hostname: string, ip: string): Agent {
@@ -27,22 +27,10 @@ const incident: Incident = {
   closed_at: null,
 }
 
-const session: ShellSession = {
-  id: 'sess-0001',
-  agent_id: 'a1',
-  created_at: 0,
-  last_activity_at: 0,
-  expires_at: 500,
-  terminated_at: null,
-  created_by_user_id: null,
-}
-
 const source: SearchSource = {
   agents: [agent('a1', 'ENG-WS-12', '10.20.3.22'), agent('a2', 'HR-DESKTOP-03', '10.20.2.13'), agent('a3', 'ENG-WS-28', '10.20.3.38')],
   incidents: [incident],
-  sessions: [session],
   keys: [],
-  now: 100,
 }
 
 function headings(query: string): string[] {
@@ -76,7 +64,7 @@ describe('search', () => {
   it('offers actions on the endpoint that clearly matches', () => {
     const groups = search('eng-ws-12', source)
     const actions = groups.find((group) => group.heading === 'On ENG-WS-12')!
-    expect(actions.results.map((result) => result.target.kind)).toEqual(['shell', 'events'])
+    expect(actions.results.map((result) => result.target.kind)).toEqual(['events'])
   })
 
   it('matches a subnet and reports how many endpoints it holds', () => {
@@ -84,15 +72,8 @@ describe('search', () => {
     expect(subnets.results[0]).toMatchObject({ title: '10.20.3.0/24', meta: '2 endpoints' })
   })
 
-  it('finds an open incident by its type and a live shell session by host', () => {
+  it('finds an open incident by its type', () => {
     expect(headings('stopped')).toContain('Open incidents')
-    const sessions = search('eng-ws-12', source).find((group) => group.heading === 'Shell sessions')!
-    expect(sessions.results[0]!.target).toEqual({ kind: 'session', sessionId: 'sess-0001' })
-  })
-
-  it('leaves expired sessions out', () => {
-    const later = search('eng-ws-12', { ...source, now: 900 })
-    expect(later.some((group) => group.heading === 'Shell sessions')).toBe(false)
   })
 
   it('reaches pages and sign out by name', () => {

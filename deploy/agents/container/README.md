@@ -31,6 +31,4 @@ docker run -d --name zedr-agent --restart unless-stopped \
 
 For a control server with a private certificate authority, mount the CA file and point `SSL_CERT_FILE` at it.
 
-Remote shell commands run inside the container as root.
-
 Status: built and run on Docker Desktop for arm64 against a local control server, including a restart after the token was revoked. The `/run/systemd` mount was not exercised there, the Docker Desktop VM has no systemd.

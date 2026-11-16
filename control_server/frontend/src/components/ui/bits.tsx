@@ -20,16 +20,16 @@ export function Tip({ label, children }: { label: string; children: ReactNode })
   )
 }
 
-const DOT: Record<NodeState | 'shell', string> = {
+const DOT: Record<NodeState | 'accent', string> = {
   active: 'bg-node',
-  shell: 'bg-accent ring-[3px] ring-accent/20',
+  accent: 'bg-accent ring-[3px] ring-accent/20',
   stale: 'border-[1.5px] border-soft',
   suspect: 'border-2 border-warn',
   incident: 'bg-alert',
   stopped: 'border-[1.5px] border-faint bg-chip',
 }
 
-export function StateDot({ state, className }: { state: NodeState | 'shell'; className?: string }) {
+export function StateDot({ state, className }: { state: NodeState | 'accent'; className?: string }) {
   return <span aria-hidden className={cn('inline-block h-[9px] w-[9px] shrink-0 rounded-full', DOT[state], className)} />
 }
 

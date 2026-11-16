@@ -8,7 +8,7 @@ import { cn } from '@/lib/cn'
 import { span } from '@/lib/format'
 import { useLive } from '@/lib/live'
 import { nodeState } from '@/lib/map-layout'
-import { useAgents, useIncidents, useInstallKeys, useNow, useShellSessions } from '@/lib/queries'
+import { useAgents, useIncidents, useInstallKeys, useNow } from '@/lib/queries'
 import { search, type SearchTarget } from '@/lib/search'
 
 const key = 'rounded-md border border-line-strong px-1.5 py-px font-mono text-[10px] text-muted'
@@ -16,10 +16,8 @@ const key = 'rounded-md border border-line-strong px-1.5 py-px font-mono text-[1
 function AnythingSearch() {
   const navigate = useNavigate()
   const signOut = useSession((state) => state.signOut)
-  const now = useNow(10_000)
   const { data: agents } = useAgents()
   const { data: incidents } = useIncidents()
-  const { data: sessions } = useShellSessions()
   const { data: keys } = useInstallKeys()
   const inputRef = useRef<HTMLInputElement>(null)
   const [query, setQuery] = useState('')
@@ -38,11 +36,8 @@ function AnythingSearch() {
   }, [])
 
   const groups = useMemo(
-    () =>
-      open
-        ? search(query, { agents: agents ?? [], incidents: incidents ?? [], sessions: sessions ?? [], keys: keys ?? [], now })
-        : [],
-    [open, query, agents, incidents, sessions, keys, now],
+    () => (open ? search(query, { agents: agents ?? [], incidents: incidents ?? [], keys: keys ?? [] }) : []),
+    [open, query, agents, incidents, keys],
   )
 
   const flagged = useMemo(
@@ -64,12 +59,8 @@ function AnythingSearch() {
         return void navigate({ to: '/endpoints', search: { host: target.agentId } })
       case 'subnet':
         return void navigate({ to: '/endpoints', search: { group: 'subnet', pick: target.key } })
-      case 'shell':
-        return void navigate({ to: '/shell', search: { agent: target.agentId } })
       case 'events':
         return void navigate({ to: '/events', search: { agent: target.agentId } })
-      case 'session':
-        return void navigate({ to: '/shell', search: { session: target.sessionId } })
       case 'page':
         return void navigate({ to: target.to })
       case 'sign-out':

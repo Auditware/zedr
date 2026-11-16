@@ -1165,168 +1165,23 @@ async fn test_heartbeat_closes_silence_incident() {
     assert_eq!(liveness_state(&pool, "recovering-agent").await, "active");
 }
 
-#[tokio::test]
-async fn test_shell_result_cannot_be_forged_by_another_agent() {
-    let (app, pool) = create_test_app_with_pool().await;
-    let mut victim = enroll(&app, &pool, "victim-agent").await;
-    let mut attacker = enroll(&app, &pool, "attacker-agent").await;
-
-    let now = chrono::Utc::now().timestamp();
-    sqlx::query(
-        "INSERT INTO shell_sessions (id, agent_id, created_at, last_activity_at, expires_at, created_by_user_id)
-         VALUES ('session-1', 'victim-agent', ?, ?, ?, 'user-1')"
-    )
-    .bind(now).bind(now).bind(now + 1800)
-    .execute(&pool).await.unwrap();
-    sqlx::query(
-        "INSERT INTO shell_commands (id, session_id, command_text, signature, issued_at, nonce)
-         VALUES ('command-1', 'session-1', 'whoami', x'00', ?, 'nonce-1')"
-    )
-    .bind(now)
-    .execute(&pool).await.unwrap();
-
-    let forged = serde_json::json!([{
-        "ShellCommandExecuted": {
-            "timestamp": 1640995200, "session_id": "session-1", "command_id": "nonce-1",
-            "exit_code": 0, "stdout": "forged output", "stderr": "", "execution_time_ms": 1
-        }
-    }]);
-
-    let body = attacker.batch(forged.clone());
-    let (status, _) = send_signed(&app, &attacker, "/api/events", body).await;
-    assert_eq!(status, StatusCode::OK);
-    let stdout: Option<String> = sqlx::query_scalar("SELECT stdout FROM shell_commands WHERE id = 'command-1'")
-        .fetch_one(&pool).await.unwrap();
-    assert_eq!(stdout, None, "another agent must not be able to fill in the result");
-
-    let body = victim.batch(forged);
-    let (status, _) = send_signed(&app, &victim, "/api/events", body).await;
-    assert_eq!(status, StatusCode::OK);
-    let stdout: Option<String> = sqlx::query_scalar("SELECT stdout FROM shell_commands WHERE id = 'command-1'")
-        .fetch_one(&pool).await.unwrap();
-    assert_eq!(stdout.as_deref(), Some("forged output"));
-}
-
-#[tokio::test]
-async fn test_first_result_of_a_shell_command_is_kept() {
-    let (app, pool) = create_test_app_with_pool().await;
-    let mut agent = enroll(&app, &pool, "restarting-agent").await;
-
-    let now = chrono::Utc::now().timestamp();
-    sqlx::query(
-        "INSERT INTO shell_sessions (id, agent_id, created_at, last_activity_at, expires_at, created_by_user_id)
-         VALUES ('session-1', 'restarting-agent', ?, ?, ?, 'user-1')"
-    )
-    .bind(now).bind(now).bind(now + 1800)
-    .execute(&pool).await.unwrap();
-    sqlx::query(
-        "INSERT INTO shell_commands (id, session_id, command_text, signature, issued_at, nonce)
-         VALUES ('command-1', 'session-1', 'whoami', x'00', ?, 'nonce-1')"
-    )
-    .bind(now)
-    .execute(&pool).await.unwrap();
-
-    let result = |timestamp: i64, exit_code: i32, stdout: &str, stderr: &str| {
-        serde_json::json!([{
-            "ShellCommandExecuted": {
-                "timestamp": timestamp, "session_id": "session-1", "command_id": "nonce-1",
-                "exit_code": exit_code, "stdout": stdout, "stderr": stderr, "execution_time_ms": 1
-            }
-        }])
-    };
-    let stored = || async {
-        sqlx::query_as::<_, (Option<i64>, Option<i32>, Option<String>, Option<String>)>(
-            "SELECT executed_at, exit_code, stdout, stderr FROM shell_commands WHERE id = 'command-1'"
-        )
-        .fetch_one(&pool).await.unwrap()
-    };
-
-    let body = agent.batch(result(1640995200, 0, "zedr\\operator\n", ""));
-    let (status, _) = send_signed(&app, &agent, "/api/events", body).await;
-    assert_eq!(status, StatusCode::OK);
-    let first = (Some(1640995200), Some(0), Some("zedr\\operator\n".to_string()), Some(String::new()));
-    assert_eq!(stored().await, first);
-
-    let restart_note = "[AGENT RESTARTED BEFORE THE RESULT WAS SENT, THE COMMAND MAY NOT HAVE FINISHED]";
-    let body = agent.batch(result(1640995260, -1, "", restart_note));
-    let (status, _) = send_signed(&app, &agent, "/api/events", body).await;
-    assert_eq!(status, StatusCode::OK, "the agent is not asked to send it again");
-    assert_eq!(stored().await, first, "a later result does not take the place of the one that arrived first");
-
-    let arrivals: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM events WHERE agent_id = 'restarting-agent' AND event_type = 'shell_command_executed'"
-    )
-    .fetch_one(&pool).await.unwrap();
-    assert_eq!(arrivals, 2, "both arrivals stay in the event list");
-}
-
-async fn queue_shell_commands(pool: &SqlitePool, agent_id: &str, nonces: &[&str]) {
-    let now = chrono::Utc::now().timestamp();
-    sqlx::query(
-        "INSERT INTO shell_sessions (id, agent_id, created_at, last_activity_at, expires_at, created_by_user_id)
-         VALUES ('session-1', ?, ?, ?, ?, 'user-1')"
-    )
-    .bind(agent_id).bind(now).bind(now).bind(now + 1800)
-    .execute(pool).await.unwrap();
-
-    for (position, nonce) in nonces.iter().enumerate() {
-        sqlx::query(
-            "INSERT INTO shell_commands (id, session_id, command_text, signature, issued_at, nonce)
-             VALUES (?, 'session-1', 'whoami', x'00', ?, ?)"
-        )
-        .bind(format!("command-of-{}", nonce)).bind(now + position as i64).bind(nonce)
-        .execute(pool).await.unwrap();
-    }
-}
-
-async fn handed_out(app: &axum::Router, agent: &mut TestAgent) -> (Option<String>, Option<String>) {
+async fn handed_out(app: &axum::Router, agent: &mut TestAgent) -> Option<String> {
     let body = agent.heartbeat();
     let (status, json) = send_signed(app, agent, "/api/events", body).await;
     assert_eq!(status, StatusCode::OK);
-    let nonce_of = |command: &str| json[command]["nonce"].as_str().map(str::to_string);
-    (nonce_of("upgrade"), nonce_of("shell_command"))
+    json["upgrade"]["nonce"].as_str().map(str::to_string)
 }
 
-async fn let_time_pass_since_hand_out(pool: &SqlitePool, table: &str, seconds: i64) {
-    sqlx::query(&format!("UPDATE {} SET handed_out_at = handed_out_at - ? WHERE handed_out_at IS NOT NULL", table))
+async fn let_time_pass_since_hand_out(pool: &SqlitePool, seconds: i64) {
+    sqlx::query("UPDATE upgrade_commands SET handed_out_at = handed_out_at - ? WHERE handed_out_at IS NOT NULL")
         .bind(seconds)
         .execute(pool).await.unwrap();
 }
 
 #[tokio::test]
-async fn test_unanswered_shell_command_is_handed_out_again_only_after_a_wait() {
-    let (app, pool) = create_test_app_with_pool().await;
-    let mut agent = enroll(&app, &pool, "waiting-agent").await;
-    queue_shell_commands(&pool, "waiting-agent", &["nonce-1", "nonce-2"]).await;
-
-    assert_eq!(handed_out(&app, &mut agent).await, (None, Some("nonce-1".to_string())));
-    assert_eq!(handed_out(&app, &mut agent).await, (None, None), "neither the same command nor the one behind it");
-
-    let_time_pass_since_hand_out(&pool, "shell_commands", 118).await;
-    assert_eq!(handed_out(&app, &mut agent).await, (None, None), "two minutes have not passed");
-
-    let_time_pass_since_hand_out(&pool, "shell_commands", 2).await;
-    assert_eq!(handed_out(&app, &mut agent).await, (None, Some("nonce-1".to_string())), "the answer to the first hand-out may have been lost");
-    assert_eq!(handed_out(&app, &mut agent).await, (None, None), "the wait starts again");
-
-    let result = serde_json::json!([{
-        "ShellCommandExecuted": {
-            "timestamp": 1640995200, "session_id": "session-1", "command_id": "nonce-1",
-            "exit_code": 0, "stdout": "", "stderr": "", "execution_time_ms": 1
-        }
-    }]);
-    let body = agent.batch(result);
-    let (status, _) = send_signed(&app, &agent, "/api/events", body).await;
-    assert_eq!(status, StatusCode::OK);
-
-    assert_eq!(handed_out(&app, &mut agent).await, (None, Some("nonce-2".to_string())), "the next command goes out once the one before it has an answer");
-}
-
-#[tokio::test]
-async fn test_pending_upgrade_is_handed_out_again_only_after_a_wait_and_holds_shell_commands_back() {
+async fn test_pending_upgrade_is_handed_out_again_only_after_a_wait() {
     let (app, pool) = create_test_app_with_pool().await;
     let mut agent = enroll(&app, &pool, "upgrading-agent").await;
-    queue_shell_commands(&pool, "upgrading-agent", &["nonce-1"]).await;
     let now = chrono::Utc::now().timestamp();
     sqlx::query(
         "INSERT INTO upgrade_commands (id, agent_id, target_version, status, created_at, signature, issued_at, nonce)
@@ -1335,14 +1190,15 @@ async fn test_pending_upgrade_is_handed_out_again_only_after_a_wait_and_holds_sh
     .bind(now).bind(now)
     .execute(&pool).await.unwrap();
 
-    assert_eq!(handed_out(&app, &mut agent).await, (Some("upgrade-nonce-1".to_string()), None));
-    assert_eq!(handed_out(&app, &mut agent).await, (None, None), "no shell command while the upgrade has no answer");
+    assert_eq!(handed_out(&app, &mut agent).await, Some("upgrade-nonce-1".to_string()));
+    assert_eq!(handed_out(&app, &mut agent).await, None, "the same command is not handed out with the next heartbeat");
 
-    let_time_pass_since_hand_out(&pool, "upgrade_commands", 118).await;
-    assert_eq!(handed_out(&app, &mut agent).await, (None, None), "two minutes have not passed");
+    let_time_pass_since_hand_out(&pool, 118).await;
+    assert_eq!(handed_out(&app, &mut agent).await, None, "two minutes have not passed");
 
-    let_time_pass_since_hand_out(&pool, "upgrade_commands", 2).await;
-    assert_eq!(handed_out(&app, &mut agent).await, (Some("upgrade-nonce-1".to_string()), None));
+    let_time_pass_since_hand_out(&pool, 2).await;
+    assert_eq!(handed_out(&app, &mut agent).await, Some("upgrade-nonce-1".to_string()), "the answer to the first hand-out may have been lost");
+    assert_eq!(handed_out(&app, &mut agent).await, None, "the wait starts again");
 
     let refused = serde_json::json!([{
         "Upgrade": {
@@ -1354,51 +1210,42 @@ async fn test_pending_upgrade_is_handed_out_again_only_after_a_wait_and_holds_sh
     let (status, _) = send_signed(&app, &agent, "/api/events", body).await;
     assert_eq!(status, StatusCode::OK);
 
-    assert_eq!(handed_out(&app, &mut agent).await, (None, Some("nonce-1".to_string())), "the shell command goes out once the upgrade has an answer");
+    let_time_pass_since_hand_out(&pool, 120).await;
+    assert_eq!(handed_out(&app, &mut agent).await, None, "a command with an answer is not handed out again");
 }
 
 #[tokio::test]
-async fn test_delivered_shell_command_is_signed_for_its_agent() {
+async fn test_delivered_upgrade_command_is_signed_for_its_agent() {
     let (app, pool) = create_test_app_with_pool().await;
     let mut agent = enroll(&app, &pool, "commanded-agent").await;
-    let token = admin_token("admin");
+    insert_install_key(&pool, "zedr_upgrade_key", 3600).await;
 
-    let response = app.clone().oneshot(
-        Request::builder().method("POST").uri("/api/admin/shell-sessions")
-            .header("content-type", "application/json")
-            .header("authorization", format!("Bearer {}", token))
-            .body(Body::from(r#"{"agent_id":"commanded-agent"}"#)).unwrap(),
-    ).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
-    let session: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-    let session_id = session["session_id"].as_str().unwrap().to_string();
-
-    let response = app.clone().oneshot(
-        Request::builder().method("POST").uri(format!("/api/admin/shell-sessions/{}/commands", session_id))
-            .header("content-type", "application/json")
-            .header("authorization", format!("Bearer {}", token))
-            .body(Body::from(r#"{"command_text":"Write-Output \"hi\""}"#)).unwrap(),
-    ).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/api/admin/upgrades",
+        Some(&admin_token("admin")),
+        Some(serde_json::json!({ "agent_id": "commanded-agent", "install_key_id": "id-zedr_upgrade_key", "target_version": "0.2.0" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
 
     let body = agent.heartbeat();
     let (status, json) = send_signed(&app, &agent, "/api/events", body).await;
     assert_eq!(status, StatusCode::OK);
 
-    let command = &json["shell_command"];
+    let command = &json["upgrade"];
     assert_eq!(command["agent_id"], "commanded-agent");
-    assert_eq!(command["session_id"], session_id.as_str());
+    assert_eq!(command["target_version"], "0.2.0");
 
     let signature_bytes: Vec<u8> = command["signature"].as_array().unwrap().iter().map(|b| b.as_u64().unwrap() as u8).collect();
     let signature = ed25519_dalek::Signature::from_slice(&signature_bytes).unwrap();
     let seed: [u8; 32] = hex::decode(TEST_SIGNING_KEY_HEX).unwrap().try_into().unwrap();
     let server_key = SigningKey::from_bytes(&seed).verifying_key();
 
-    let signed_for = |agent_id: &str| zedr_protocol::shell_command_signing_bytes(
+    let signed_for = |agent_id: &str| zedr_protocol::upgrade_command_signing_bytes(
         agent_id,
-        &session_id,
-        command["command_text"].as_str().unwrap(),
+        command["target_version"].as_str().unwrap(),
         command["nonce"].as_str().unwrap(),
         command["issued_at"].as_u64().unwrap(),
     ).unwrap();
@@ -1533,10 +1380,6 @@ async fn test_user_role_is_read_only() {
 
     let forbidden = [
         ("POST", "/api/admin/installers/generate", Some(serde_json::json!({}))),
-        ("POST", "/api/admin/shell-sessions", Some(serde_json::json!({ "agent_id": "rbac-agent" }))),
-        ("POST", "/api/admin/shell-sessions/any/commands", Some(serde_json::json!({ "command_text": "whoami" }))),
-        ("GET", "/api/admin/shell-sessions/any/commands", None),
-        ("DELETE", "/api/admin/shell-sessions/any", None),
         ("POST", "/api/admin/upgrades", Some(serde_json::json!({ "agent_id": "rbac-agent", "install_key_id": "k", "target_version": "0.2.0" }))),
         ("GET", "/api/admin/users", None),
         ("POST", "/api/admin/users", Some(serde_json::json!({ "username": "x", "password": "Str0ng!Passw0rd", "role": "admin" }))),
@@ -1549,8 +1392,8 @@ async fn test_user_role_is_read_only() {
         assert_eq!(status, StatusCode::FORBIDDEN, "{} {} must need the admin role", method, uri);
     }
 
-    let sessions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM shell_sessions").fetch_one(&pool).await.unwrap();
-    assert_eq!(sessions, 0);
+    let created: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE username = 'x'").fetch_one(&pool).await.unwrap();
+    assert_eq!(created, 0);
 }
 
 #[tokio::test]
@@ -1559,22 +1402,21 @@ async fn test_admin_actions_are_audited_in_a_verifiable_chain() {
     enroll(&app, &pool, "audited-agent").await;
     let admin = admin_token("admin");
 
-    call(&app, "POST", "/api/admin/installers/generate", Some(&admin), Some(serde_json::json!({}))).await;
-    let (_, session) = call(&app, "POST", "/api/admin/shell-sessions", Some(&admin), Some(serde_json::json!({ "agent_id": "audited-agent" }))).await;
-    let session_id = session["session_id"].as_str().unwrap();
-    call(&app, "POST", &format!("/api/admin/shell-sessions/{}/commands", session_id), Some(&admin), Some(serde_json::json!({ "command_text": "whoami" }))).await;
-    call(&app, "DELETE", &format!("/api/admin/shell-sessions/{}", session_id), Some(&admin), None).await;
+    let (_, install_key) = call(&app, "POST", "/api/admin/installers/generate", Some(&admin), Some(serde_json::json!({}))).await;
+    let (_, api_key) = call(&app, "POST", "/api/admin/api-keys", Some(&admin), Some(serde_json::json!({ "name": "ci" }))).await;
+    call(&app, "POST", "/api/admin/upgrades", Some(&admin), Some(serde_json::json!({ "agent_id": "audited-agent", "install_key_id": install_key["id"], "target_version": "0.2.0" }))).await;
+    call(&app, "DELETE", &format!("/api/admin/api-keys/{}", api_key["id"].as_str().unwrap()), Some(&admin), None).await;
 
     let (status, audit) = call(&app, "GET", "/api/admin/audit", Some(&admin), None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(audit["chain_intact"], true);
 
     let actions: Vec<&str> = audit["entries"].as_array().unwrap().iter().map(|e| e["action"].as_str().unwrap()).collect();
-    assert_eq!(actions, vec!["shell.session.terminate", "shell.command", "shell.session.create", "install_key.generate"]);
+    assert_eq!(actions, vec!["api_key.revoke", "upgrade.issue", "api_key.create", "install_key.generate"]);
     assert!(audit["entries"].as_array().unwrap().iter().all(|e| e["actor"] == "tester"));
-    assert!(audit["entries"][1]["detail"].as_str().unwrap().contains("whoami"));
+    assert!(audit["entries"][1]["detail"].as_str().unwrap().contains("0.2.0"));
 
-    sqlx::query("UPDATE audit_log SET detail = '{\"command_text\":\"harmless\"}' WHERE action = 'shell.command'")
+    sqlx::query("UPDATE audit_log SET detail = '{\"target_version\":\"0.1.0\"}' WHERE action = 'upgrade.issue'")
         .execute(&pool)
         .await
         .unwrap();

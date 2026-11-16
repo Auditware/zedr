@@ -11,7 +11,6 @@ PoC phase describes the preliminary ground work to
 - [x] Control server upgrade logs (push, old service, new service)
 - [x] Proper testing of crucial components and enforcement through pre-commit hooks that calls testing for changed code portions
 - [x] Agent<->Server enforced encrypted communication
-- [ ] Secured and Signed Remote Shell Access with expiring sessions
 
 # Agent trust, console and deployment
 
@@ -42,16 +41,9 @@ PoC phase describes the preliminary ground work to
 - [ ] Keep unsent events on disk, and give stored events a retention limit on the control server
 - [x] Event batches filled by encoded size up to a limit the control server states, and a refused batch narrowed down to the event the server refuses (ADR 024)
 - [ ] Tell the control server how many events an agent discarded or dropped, today only the agent's log says so
-- [x] Results of remote shell commands that are larger than one event batch are cut by encoded size until they fit, and keep their exit code (ADR 027)
-- [x] Results of remote shell commands that the control server did not take are kept and sent again after every heartbeat it accepts (ADR 028)
-- [x] Shell commands recorded on disk before they run, so that a restarted agent does not run one again, and commands a restart cut off answered when the agent starts (ADR 029)
-- [x] Control server keeps the first result it stores for a shell command, a later one is accepted and left out (ADR 029)
-- [x] Upgrade commands recorded on disk like shell commands, and a command without an answer handed out again only after two minutes (ADR 029)
-- [x] Shell command the agent refuses for its age answered with the reason, and not run (ADR 029)
-- [ ] Decide what happens to a shell command the agent refuses for its signature, it gets no answer and holds back the commands behind it until the session ends
+- [x] Upgrade commands recorded on disk before the agent acts on them, so that a restarted agent does not accept one again, and a command without an answer handed out again only after two minutes (ADR 029)
 - [ ] Run an upgrade on Windows through the record of accepted commands, that path was only type-checked
-- [ ] Keep the results of remote shell commands that wait for the control server on disk, and send `ShellSessionTerminated` again as well, today a waiting result is lost when the agent restarts
-- [ ] Run the refactored Windows agent on Windows, the move of its server link, heartbeat loop and shell into `agent/shared` was only type-checked from macOS
+- [ ] Run the refactored Windows agent on Windows, the move of its server link and heartbeat loop into `agent/shared` was only type-checked from macOS
 - [ ] Console: run the browser journeys (`npm run sweep`) in CI, incident acknowledgement
 - [x] Console: every view has a picture of its own, and the Events lanes are counted by the server per time bucket (ADR 018)
 - [ ] Revoke an install key from the console, the key has a `revoked_at` and no route sets it
@@ -77,7 +69,6 @@ PoC phase describes the preliminary ground work to
 - [ ] Installed packages on rpm hosts (RHEL, Fedora, Amazon Linux, SUSE), on Windows and on macOS, and packages of languages such as pip and npm
 - [ ] Listening services per endpoint
 - [ ] Run the investigation against a real Linux agent, it has only seen simulated process, network and file events
-- [ ] Three signer approval for shell sessions
 - [ ] Refresh token rotation and a mandatory second factor for admins
 
 # Deferred

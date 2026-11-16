@@ -702,10 +702,6 @@ export interface components {
             /** Format: int64 */
             process: number;
             /** Format: int64 */
-            shell_session_created: number;
-            /** Format: int64 */
-            shell_session_terminated: number;
-            /** Format: int64 */
             upgrade: number;
         };
         EventsQuery: {
@@ -756,7 +752,6 @@ export interface components {
             timestamp: number;
         };
         HeartbeatResponse: {
-            shell_command?: null | components["schemas"]["ShellCommand"];
             upgrade?: null | components["schemas"]["UpgradeCommand"];
         };
         HistogramQuery: {
@@ -971,43 +966,6 @@ export interface components {
             current_password?: string | null;
             password: string;
         };
-        /** @description Shell command from server to agent */
-        ShellCommand: {
-            agent_id: string;
-            command_text: string;
-            /** Format: int64 */
-            issued_at: number;
-            nonce: string;
-            session_id: string;
-            signature: number[];
-        };
-        /** @description Shell command executed event */
-        ShellCommandExecutedEvent: {
-            command_id: string;
-            /** Format: int64 */
-            execution_time_ms: number;
-            /** Format: int32 */
-            exit_code: number;
-            session_id: string;
-            stderr: string;
-            stdout: string;
-            /** Format: int64 */
-            timestamp: number;
-        };
-        /** @description Shell session created event */
-        ShellSessionCreatedEvent: {
-            session_id: string;
-            /** Format: int64 */
-            timestamp: number;
-        };
-        /** @description Shell session terminated event */
-        ShellSessionTerminatedEvent: {
-            executed_commands: string[];
-            reason: string;
-            session_id: string;
-            /** Format: int64 */
-            timestamp: number;
-        };
         /**
          * @description Why the agent is stopping
          * @enum {string}
@@ -1026,12 +984,6 @@ export interface components {
             Upgrade: components["schemas"]["UpgradeEvent"];
         } | {
             Install: components["schemas"]["InstallEvent"];
-        } | {
-            ShellSessionCreated: components["schemas"]["ShellSessionCreatedEvent"];
-        } | {
-            ShellCommandExecuted: components["schemas"]["ShellCommandExecutedEvent"];
-        } | {
-            ShellSessionTerminated: components["schemas"]["ShellSessionTerminatedEvent"];
         } | {
             AgentStopping: components["schemas"]["AgentStoppingEvent"];
         } | {

@@ -11,7 +11,6 @@ import { Endpoints } from '@/pages/Endpoints'
 import { Installers } from '@/pages/Installers'
 import { Login } from '@/pages/Login'
 import { Settings } from '@/pages/Settings'
-import { Shell } from '@/pages/Shell'
 import { Users } from '@/pages/Users'
 
 function text(value: unknown): string | undefined {
@@ -106,16 +105,6 @@ const huntRoute = createRoute({
   validateSearch: (search: Record<string, unknown>): { q?: string; host?: string } => ({ q: text(search.q), host: text(search.host) }),
 })
 
-const shellRoute = createRoute({
-  getParentRoute: () => appRoute,
-  path: '/shell',
-  component: Shell,
-  validateSearch: (search: Record<string, unknown>): { session?: string; agent?: string } => ({
-    session: text(search.session),
-    agent: text(search.agent),
-  }),
-})
-
 const installersRoute = createRoute({
   getParentRoute: () => appRoute,
   path: '/installers',
@@ -140,7 +129,6 @@ const routeTree = rootRoute.addChildren([
     endpointsRoute,
     eventsRoute,
     huntRoute,
-    shellRoute,
     installersRoute,
     usersRoute,
     settingsRoute,

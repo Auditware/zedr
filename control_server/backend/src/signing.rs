@@ -59,12 +59,6 @@ impl SigningService {
             .map_err(AppError::InternalError)?;
         Ok(self.signing_key.sign(&signed_bytes))
     }
-
-    pub fn sign_shell_command(&self, agent_id: &str, session_id: &str, command_text: &str, nonce: &str, issued_at: u64) -> Result<Signature> {
-        let signed_bytes = zedr_protocol::shell_command_signing_bytes(agent_id, session_id, command_text, nonce, issued_at)
-            .map_err(AppError::InternalError)?;
-        Ok(self.signing_key.sign(&signed_bytes))
-    }
 }
 
 pub fn sha256(data: &[u8]) -> [u8; 32] {

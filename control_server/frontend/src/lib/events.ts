@@ -2,19 +2,13 @@ import type { ApiEvent, AuditEntry } from './api'
 import { tone } from '@/lib/palette'
 import { baseName } from './images'
 
-export type Category = 'heartbeat' | 'lifecycle' | 'incident' | 'shell' | 'upgrade' | 'identity' | 'telemetry' | 'audit'
+export type Category = 'heartbeat' | 'lifecycle' | 'incident' | 'upgrade' | 'identity' | 'telemetry' | 'audit'
 
 export const CATEGORIES: { id: Category; label: string; color: string; types: string[] }[] = [
   { id: 'heartbeat', label: 'Heartbeat', color: tone('faint'), types: ['heartbeat'] },
   { id: 'incident', label: 'Incident', color: tone('alert'), types: ['incident_opened', 'incident_closed', 'detection'] },
   { id: 'lifecycle', label: 'Lifecycle', color: tone('soft'), types: ['install', 'agent_stopping'] },
   { id: 'identity', label: 'Identity', color: tone('warn'), types: ['enrollment_rejected', 'identity_rotated'] },
-  {
-    id: 'shell',
-    label: 'Shell',
-    color: tone('steel'),
-    types: ['shell_session_created', 'shell_session_terminated', 'shell_command_queued', 'shell_command_executed'],
-  },
   { id: 'upgrade', label: 'Upgrade', color: tone('mauve'), types: ['upgrade'] },
   { id: 'telemetry', label: 'Telemetry', color: tone('sage'), types: ['process', 'file', 'network', 'persistence', 'package'] },
   { id: 'audit', label: 'Audit', color: tone('accent'), types: ['audit'] },
@@ -67,14 +61,6 @@ export function summarize(event: Pick<ApiEvent, 'event_type' | 'data'>): string 
       return text(data.reason)
     case 'identity_rotated':
       return text(data.hostname) || 'pinned key replaced'
-    case 'shell_command_queued':
-      return text(data.command_text)
-    case 'shell_command_executed':
-      return `exit ${text(data.exit_code)} · ${text(data.execution_time_ms)} ms`
-    case 'shell_session_created':
-      return text(data.requesting_user)
-    case 'shell_session_terminated':
-      return text(data.reason)
     case 'upgrade':
       return [text(data.from_version), text(data.to_version) || text(data.target_version)].filter(Boolean).join(' → ') +
         (text(data.status) ? ` ${text(data.status)}` : '')
@@ -127,7 +113,6 @@ export function incidentTitle(incident: IncidentLike): string {
 export function auditTone(action: string): string {
   if (action.includes('failed') || action.includes('rejected') || action.includes('delete') || action.includes('disable')) return tone('alert')
   if (action.startsWith('signing_key') || action.startsWith('mfa') || action.startsWith('user.') || action.startsWith('view.')) return tone('warn')
-  if (action.startsWith('shell')) return tone('steel')
   if (action.startsWith('login')) return tone('node')
   return tone('soft')
 }

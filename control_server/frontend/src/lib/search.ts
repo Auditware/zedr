@@ -1,14 +1,12 @@
-import type { Agent, Incident, InstallKey, ShellSession } from './api'
+import type { Agent, Incident, InstallKey } from './api'
 import { incidentTitle } from './events'
 import { shortId, subnet } from './format'
 
 export type SearchTarget =
   | { kind: 'endpoint'; agentId: string }
   | { kind: 'subnet'; key: string }
-  | { kind: 'shell'; agentId: string }
   | { kind: 'events'; agentId: string }
-  | { kind: 'session'; sessionId: string }
-  | { kind: 'page'; to: '/endpoints' | '/hunt' | '/events' | '/shell' | '/installers' | '/users' | '/settings' }
+  | { kind: 'page'; to: '/endpoints' | '/hunt' | '/events' | '/installers' | '/users' | '/settings' }
   | { kind: 'sign-out' }
 
 export type SearchResult = {
@@ -25,16 +23,13 @@ export type SearchGroup = { heading: string; results: SearchResult[] }
 export type SearchSource = {
   agents: Agent[]
   incidents: Incident[]
-  sessions: ShellSession[]
   keys: InstallKey[]
-  now: number
 }
 
 const PAGES: { to: Extract<SearchTarget, { kind: 'page' }>['to']; label: string; words: string }[] = [
   { to: '/endpoints', label: 'Endpoints', words: 'endpoints map hosts incidents' },
   { to: '/hunt', label: 'Hunt', words: 'hunt query search threat' },
   { to: '/events', label: 'Events', words: 'events stream log audit' },
-  { to: '/shell', label: 'Shell', words: 'shell terminal sessions command' },
   { to: '/installers', label: 'Installers', words: 'installers install keys enroll' },
   { to: '/users', label: 'Users', words: 'users accounts roles impersonate' },
   { to: '/settings', label: 'Settings', words: 'settings users two-factor api keys' },
@@ -116,7 +111,6 @@ export function search(query: string, source: SearchSource): SearchGroup[] {
   const top = endpoints[0]
   if (top && (endpoints.length === 1 || top.hostname.toLowerCase() === needle)) {
     add(`On ${top.hostname}`, [
-      { id: `shell:${top.id}`, title: 'Open a shell', meta: '', mono: false, target: { kind: 'shell', agentId: top.id } },
       { id: `events:${top.id}`, title: 'Show its events', meta: '', mono: false, target: { kind: 'events', agentId: top.id } },
     ])
   }
@@ -145,22 +139,6 @@ export function search(query: string, source: SearchSource): SearchGroup[] {
         best([hostOf(incident.agent_id), incident.incident_type, incidentTitle(incident)], needle),
       4,
     ).map(incidentResult),
-  )
-
-  add(
-    'Shell sessions',
-    ranked(
-      source.sessions.filter((session) => session.terminated_at == null && session.expires_at > source.now),
-      (session) => best([hostOf(session.agent_id), session.id], needle),
-      3,
-    ).map((session) => ({
-      id: `session:${session.id}`,
-      title: hostOf(session.agent_id),
-      meta: `session ${shortId(session.id)}`,
-      mono: true,
-      agentId: session.agent_id,
-      target: { kind: 'session', sessionId: session.id },
-    })),
   )
 
   add(

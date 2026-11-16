@@ -1,5 +1,4 @@
 use std::path::Path;
-use std::process::Command;
 use std::sync::{mpsc, Arc};
 use std::thread;
 
@@ -26,12 +25,6 @@ struct LinuxPlatform {
 impl Platform for LinuxPlatform {
     fn log(&self, message: &str) {
         log(message);
-    }
-
-    fn shell_invocation(&self, command_text: &str) -> Command {
-        let mut command = Command::new("/bin/sh");
-        command.arg("-c").arg(command_text);
-        command
     }
 
     fn upgrade(&self, command: UpgradeCommand) {

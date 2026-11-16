@@ -7,7 +7,7 @@ import { fitView, STATE_LABEL, type Layout, type NodeState, type View } from '@/
 import { toneNumber, type Tone } from '@/lib/palette'
 import { wheelIntent, zoomAt } from '@/lib/pan-zoom'
 
-export type MapNode = { id: string; label: string; state: NodeState; shell: boolean }
+export type MapNode = { id: string; label: string; state: NodeState }
 
 type Item = { node: MapNode; dot: Sprite; aura: Sprite | null; x: number; y: number; tx: number; ty: number }
 
@@ -307,13 +307,8 @@ export function EndpointMap({
           item.dot.alpha = dim ? 0.28 : 1
           if (item.aura) {
             item.aura.position.set(item.x, item.y)
-            if (item.node.state === 'incident') {
-              item.aura.scale.set(base * (1 + (still ? 0.8 : beat * 2.6)))
-              item.aura.alpha = (still ? 0.25 : 0.55 * (1 - beat)) * (dim ? 0.4 : 1)
-            } else {
-              item.aura.scale.set(base * 2.1)
-              item.aura.alpha = dim ? 0.08 : 0.22
-            }
+            item.aura.scale.set(base * (1 + (still ? 0.8 : beat * 2.6)))
+            item.aura.alpha = (still ? 0.25 : 0.55 * (1 - beat)) * (dim ? 0.4 : 1)
           }
         }
         const selected = scene.selected ? scene.items.get(scene.selected) : undefined
@@ -370,9 +365,9 @@ export function EndpointMap({
 
       const style = STYLE[node.state]
       item.dot.texture = style.hollow ? scene.ring : scene.disc
-      item.dot.tint = toneNumber(node.shell && node.state === 'active' ? 'accent' : style.tone)
+      item.dot.tint = toneNumber(style.tone)
 
-      const wantsAura = node.state === 'incident' || node.shell
+      const wantsAura = node.state === 'incident'
       if (wantsAura && !item.aura) {
         item.aura = new scene.SpriteClass(scene.disc)
         item.aura.anchor.set(0.5)
@@ -381,7 +376,7 @@ export function EndpointMap({
         item.aura.destroy()
         item.aura = null
       }
-      if (item.aura) item.aura.tint = toneNumber(node.state === 'incident' ? 'alert' : 'accent')
+      if (item.aura) item.aura.tint = toneNumber('alert')
     }
 
     for (const [id, item] of scene.items) {
@@ -438,7 +433,7 @@ export function EndpointMap({
           }}
         >
           <span className="font-mono text-xs text-text">{hovered.label}</span>
-          <span className="ml-2 text-[11px] text-muted">{hovered.shell ? 'Shell open' : STATE_LABEL[hovered.state]}</span>
+          <span className="ml-2 text-[11px] text-muted">{STATE_LABEL[hovered.state]}</span>
         </div>
       ) : null}
       <ZoomControls

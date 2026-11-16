@@ -6,7 +6,7 @@ describe('event categories', () => {
     const all = CATEGORIES.flatMap((category) => category.types)
     expect(new Set(all).size).toBe(all.length)
     expect(categoryOf('incident_opened').id).toBe('incident')
-    expect(categoryOf('shell_command_executed').id).toBe('shell')
+    expect(categoryOf('upgrade').id).toBe('upgrade')
     expect(categoryOf('heartbeat').id).toBe('heartbeat')
   })
 
@@ -32,9 +32,8 @@ describe('summarize', () => {
   it('shows the field an analyst needs per event type', () => {
     expect(summarize({ event_type: 'agent_stopping', data: '{"reason":"ServiceStop"}' })).toBe('ServiceStop')
     expect(summarize({ event_type: 'incident_opened', data: '{"incident_type":"replay"}' })).toBe('replay')
-    expect(summarize({ event_type: 'shell_command_queued', data: '{"command_text":"whoami"}' })).toBe('whoami')
-    expect(summarize({ event_type: 'shell_command_executed', data: '{"exit_code":1,"execution_time_ms":42}' })).toBe(
-      'exit 1 · 42 ms',
+    expect(summarize({ event_type: 'upgrade', data: '{"from_version":"0.1.0","to_version":"0.2.0","status":"Failed"}' })).toBe(
+      '0.1.0 → 0.2.0 Failed',
     )
     expect(summarize({ event_type: 'network', data: '{"action":"Connect","dest_ip":"10.0.0.9","dest_port":443}' })).toBe(
       'Connect 10.0.0.9:443',
