@@ -16,6 +16,7 @@ pub const MAX_EVENT_BATCH_BYTES: usize = 2 * 1024 * 1024;
 const UPGRADE_COMMAND_PURPOSE: &str = "zedr-upgrade-command-v1";
 const WINDOW_ACK_PURPOSE: &str = "zedr-window-ack-v1";
 const CHAIN_POSITION_PURPOSE: &str = "zedr-chain-position-v1";
+const WINDOW_REFUSAL_PURPOSE: &str = "zedr-window-refusal-v1";
 
 /// Agent registration request
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -489,6 +490,36 @@ pub fn chain_position_signing_bytes(agent_id: &str, session: u64, seq: u64, next
         .map_err(|e| format!("Failed to encode chain position: {}", e))
 }
 
+/// The control server's answer to a window it will not take: where its copy of the agent's chain stands.
+/// It is signed for the one request it answers, so nobody else can make an agent start over, and never from an old position
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
+pub struct WindowRefusal {
+    pub epoch: u64,
+    pub next_window: u64,
+    pub next_index: u64,
+    pub head: String,
+    pub signature: Vec<u8>,
+}
+
+#[derive(Serialize)]
+struct WindowRefusalPayload<'a> {
+    purpose: &'a str,
+    agent_id: &'a str,
+    session: u64,
+    seq: u64,
+    epoch: u64,
+    next_window: u64,
+    next_index: u64,
+    head: &'a str,
+}
+
+/// Exact bytes signed by the server and verified by the agent for a refused window
+pub fn window_refusal_signing_bytes(agent_id: &str, session: u64, seq: u64, epoch: u64, next_window: u64, next_index: u64, head: &str) -> Result<Vec<u8>, String> {
+    serde_json::to_vec(&WindowRefusalPayload { purpose: WINDOW_REFUSAL_PURPOSE, agent_id, session, seq, epoch, next_window, next_index, head })
+        .map_err(|e| format!("Failed to encode window refusal: {}", e))
+}
+
 /// A proof that the rules ran over a run of sealed windows, the receipt in base64
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
@@ -779,6 +810,18 @@ mod tests {
         assert_ne!(bytes, chain_position_signing_bytes("agent-2", 3, 9, 5, 40, &head).unwrap());
         assert_ne!(bytes, chain_position_signing_bytes("agent-1", 3, 9, 6, 40, &head).unwrap());
         assert_ne!(bytes, window_ack_signing_bytes("agent-1", 5, 40, &head).unwrap(), "a position is never an acknowledgement");
+    }
+
+    #[test]
+    fn test_window_refusal_signing_bytes_bind_the_request_they_answer() {
+        let head = "ab".repeat(32);
+        let bytes = window_refusal_signing_bytes("agent-1", 3, 9, 2, 5, 40, &head).unwrap();
+        assert_ne!(bytes, window_refusal_signing_bytes("agent-1", 3, 10, 2, 5, 40, &head).unwrap(), "a refusal signed for an earlier request is not valid for this one");
+        assert_ne!(bytes, window_refusal_signing_bytes("agent-1", 4, 9, 2, 5, 40, &head).unwrap());
+        assert_ne!(bytes, window_refusal_signing_bytes("agent-2", 3, 9, 2, 5, 40, &head).unwrap());
+        assert_ne!(bytes, window_refusal_signing_bytes("agent-1", 3, 9, 3, 5, 40, &head).unwrap(), "the epoch is signed too");
+        assert_ne!(bytes, window_refusal_signing_bytes("agent-1", 3, 9, 2, 6, 40, &head).unwrap());
+        assert_ne!(bytes, window_ack_signing_bytes("agent-1", 5, 40, &head).unwrap(), "a refusal is never an acknowledgement");
     }
 
     #[test]
