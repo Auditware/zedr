@@ -6,8 +6,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use zedr_ledger::{Hash, WindowHeader};
 use zedr_protocol::{
-    bytes_to_base64, chain_position_signing_bytes, hash_from_hex, hash_to_hex, window_ack_signing_bytes, AgentRegistration, AgentStoppingEvent,
-    ChainPosition, EventBatch, ProofSubmission, SealedEvent, SealedWindowAck, SealedWindowHeader, StopReason, SystemEvent, UpgradeCommand,
+    bytes_to_base64, hash_from_hex, hash_to_hex, window_ack_signing_bytes, window_refusal_signing_bytes, AgentRegistration, AgentStoppingEvent,
+    EventBatch, ProofSubmission, SealedEvent, SealedWindowAck, SealedWindowHeader, StopReason, SystemEvent, UpgradeCommand, WindowRefusal,
     SIGNATURE_HEADER,
 };
 
@@ -25,9 +25,10 @@ pub struct HostDescription {
     pub agent_version: String,
 }
 
-/// Where the control server's copy of this agent's chain stands, as it signed it in answer to one window
+/// Where the control server's copy of this agent's chain stands, as it signed it in answer to one window it did not take
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerPosition {
+    pub epoch: u64,
     pub next_window: u64,
     pub next_index: u64,
     pub head: Hash,
@@ -37,8 +38,6 @@ pub struct ServerPosition {
 pub enum WindowDelivery {
     Accepted,
     Refused(ServerPosition),
-    /// The control server read the window and will not take it as it is, sending it again changes nothing
-    Unacceptable,
 }
 
 struct Answered {
@@ -59,30 +58,31 @@ pub struct ControlLink {
 impl ControlLink {
     pub fn open(server_url: String, state_dir: &Path, agent_id: String) -> Result<Self, String> {
         let identity = Identity::load_or_create(state_dir)?;
-        Ok(Self::with_identity(server_url, state_dir, agent_id, identity))
+        Ok(Self::with_identity(server_url, state_dir, agent_id, identity, crate::signing_public_key()))
     }
 
     pub fn open_with_key_id(server_url: String, state_dir: &Path) -> Result<Self, String> {
         let identity = Identity::load_or_create(state_dir)?;
         let agent_id = identity.key_fingerprint();
-        Ok(Self::with_identity(server_url, state_dir, agent_id, identity))
+        Ok(Self::with_identity(server_url, state_dir, agent_id, identity, crate::signing_public_key()))
     }
 
-    fn with_identity(server_url: String, state_dir: &Path, agent_id: String, identity: Identity) -> Self {
+    /// For tools and tests only: a link that trusts the deployment key it is given, where an agent trusts the one patched into its binary
+    pub fn open_trusting(server_url: String, state_dir: &Path, agent_id: Option<String>, deployment_key: VerifyingKey) -> Result<Self, String> {
+        let identity = Identity::load_or_create(state_dir)?;
+        let agent_id = agent_id.unwrap_or_else(|| identity.key_fingerprint());
+        Ok(Self::with_identity(server_url, state_dir, agent_id, identity, Ok(deployment_key)))
+    }
+
+    fn with_identity(server_url: String, state_dir: &Path, agent_id: String, identity: Identity, deployment_key: Result<VerifyingKey, String>) -> Self {
         Self {
             server_url,
             state_dir: state_dir.to_path_buf(),
             agent_id,
             identity: Mutex::new(identity),
             accepted_commands: Mutex::new(CommandJournal::open(state_dir)),
-            deployment_key: crate::signing_public_key(),
+            deployment_key,
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn trusting(mut self, deployment_key: VerifyingKey) -> Self {
-        self.deployment_key = Ok(deployment_key);
-        self
     }
 
     pub fn agent_id(&self) -> &str {
@@ -172,8 +172,8 @@ impl ControlLink {
         Ledger::open(&self.state_dir.join(LEDGER_DIR), identity.key_hash(), identity.ledger_key(), now)
     }
 
-    /// Hands one sealed window to the control server. Only an answer signed by the deployment moves the chain,
-    /// its acknowledgement of exactly this window or the position its copy of the chain stands at instead
+    /// Hands one sealed window to the control server. Only an answer signed by the deployment counts: its acknowledgement
+    /// of exactly this window, or its refusal of this very request with the position its copy of the chain stands at
     pub fn send_window(&self, window: &SealedWindow, proving: bool, timeout_secs: u64) -> Result<WindowDelivery, String> {
         let deployment_key = self.deployment_key.as_ref().map_err(String::clone)?;
         let sent = &window.header;
@@ -198,19 +198,19 @@ impl ControlLink {
                 }
                 Ok(WindowDelivery::Accepted)
             }
-            409 => {
-                let position: ChainPosition = serde_json::from_slice(body)
-                    .map_err(|e| format!("HTTP 409 without a chain position: {}", e))?;
-                let signed = chain_position_signing_bytes(&self.agent_id, answered.session, answered.seq, position.next_window, position.next_index, &position.head)?;
-                verify_answer(deployment_key, &signed, &position.signature, "Chain position")?;
+            status @ (409 | 422) => {
+                let refusal: WindowRefusal = serde_json::from_slice(body)
+                    .map_err(|e| format!("HTTP {} without a signed refusal: {}", status, e))?;
+                let signed = window_refusal_signing_bytes(&self.agent_id, answered.session, answered.seq, refusal.epoch, refusal.next_window, refusal.next_index, &refusal.head)?;
+                verify_answer(deployment_key, &signed, &refusal.signature, "Window refusal")?;
 
                 Ok(WindowDelivery::Refused(ServerPosition {
-                    next_window: position.next_window,
-                    next_index: position.next_index,
-                    head: hash_from_hex(&position.head)?,
+                    epoch: refusal.epoch,
+                    next_window: refusal.next_window,
+                    next_index: refusal.next_index,
+                    head: hash_from_hex(&refusal.head)?,
                 }))
             }
-            422 => Ok(WindowDelivery::Unacceptable),
             status => Err(format!("HTTP {}", status)),
         }
     }

@@ -23,6 +23,8 @@ const DEFAULT_PACKAGE_INTERVAL_SECS: u64 = 300;
 const DEFAULT_PROOF_EVENTS: u64 = 2000;
 const PROOF_RETRY_AFTER: Duration = Duration::from_secs(600);
 const PROOFS_DIR: &str = "proofs";
+const REFUSAL_WAIT_START: Duration = Duration::from_secs(60);
+const REFUSAL_WAIT_LIMIT: Duration = Duration::from_secs(3600);
 const REGISTRATION_RETRY_START: Duration = Duration::from_secs(30);
 const REGISTRATION_RETRY_LIMIT: Duration = Duration::from_secs(600);
 
@@ -69,6 +71,45 @@ struct HeartbeatReply {
 struct RegistrationRetry {
     not_before: Instant,
     delay: Duration,
+}
+
+/// How long windows are kept back after the control server refused one, twice as long after every further refusal in a row
+#[derive(Clone, Copy)]
+struct RefusalWait {
+    first: Duration,
+    limit: Duration,
+}
+
+struct Refusals {
+    wait: RefusalWait,
+    next: Duration,
+    held: Option<(Instant, String)>,
+}
+
+impl Refusals {
+    fn new(wait: RefusalWait) -> Self {
+        Self { wait, next: wait.first, held: None }
+    }
+
+    /// Keeps windows back from now on, and returns what there is to say about it until they are sent again
+    fn refused(&mut self, now: Instant, window: u64, stands_at: u64) -> String {
+        let said = format!("Server refused window {}, starting over at its window {} and sending again in {}s", window, stands_at, self.next.as_secs());
+        self.held = Some((now + self.next, said.clone()));
+        self.next = (self.next * 2).min(self.wait.limit);
+        said
+    }
+
+    fn accepted(&mut self) {
+        self.next = self.wait.first;
+        self.held = None;
+    }
+
+    /// Why no window is sent now: the wait after a refusal is not over, or it is and nothing was sealed since.
+    /// The refusal stands until a window is taken
+    fn holding(&self, now: Instant, waiting: u64) -> Option<String> {
+        let (until, said) = self.held.as_ref()?;
+        (now < *until || waiting == 0).then(|| said.clone())
+    }
 }
 
 /// The prover if one is installed, how many events one proof may cover and how long a failed one waits
@@ -232,10 +273,10 @@ impl<P: Platform> Runtime<P> {
     }
 
     pub fn start_sensor<S: Source>(self: &Arc<Self>, source: S, intervals: SensorIntervals) {
-        self.start_sensor_proving(source, intervals, ProverSettings::from_environment());
+        self.start_sensor_with(source, intervals, ProverSettings::from_environment(), RefusalWait { first: REFUSAL_WAIT_START, limit: REFUSAL_WAIT_LIMIT });
     }
 
-    fn start_sensor_proving<S: Source>(self: &Arc<Self>, source: S, intervals: SensorIntervals, prover: ProverSettings) {
+    fn start_sensor_with<S: Source>(self: &Arc<Self>, source: S, intervals: SensorIntervals, prover: ProverSettings, refusal_wait: RefusalWait) {
         let (stop_tx, stop_rx) = mpsc::channel();
         match self.sensor_stop.lock() {
             Ok(mut sensor_stop) => *sensor_stop = Some(stop_tx),
@@ -247,10 +288,17 @@ impl<P: Platform> Runtime<P> {
 
         let runtime = Arc::clone(self);
         let sensor = Sensor::new(source, std::process::id(), intervals.persistence.as_secs(), intervals.packages.as_secs());
-        thread::spawn(move || runtime.run_sensor(sensor, intervals.poll, stop_rx, prover));
+        thread::spawn(move || runtime.run_sensor(sensor, intervals.poll, stop_rx, prover, refusal_wait));
     }
 
-    fn run_sensor<S: Source>(&self, mut sensor: Sensor<S>, interval: Duration, stop: mpsc::Receiver<mpsc::Sender<()>>, prover: ProverSettings) {
+    fn run_sensor<S: Source>(
+        &self,
+        mut sensor: Sensor<S>,
+        interval: Duration,
+        stop: mpsc::Receiver<mpsc::Sender<()>>,
+        prover: ProverSettings,
+        refusal_wait: RefusalWait,
+    ) {
         let mut ledger = match self.link.open_ledger(unix_now()) {
             Ok(ledger) => ledger,
             Err(e) => {
@@ -260,6 +308,7 @@ impl<P: Platform> Runtime<P> {
         };
         let mut prover = Prover::new(prover, ledger.dir());
         let proving = prover.settings.program.is_some();
+        let mut refusals = Refusals::new(refusal_wait);
         let mut reported_errors = Vec::new();
         let mut reported_sealing = Ok(());
         let mut reported_delivery = Ok(());
@@ -301,7 +350,7 @@ impl<P: Platform> Runtime<P> {
             }
 
             let timeout_secs = if stopping.is_some() { STOP_FLUSH_SECS } else { EVENT_TIMEOUT_SECS };
-            let delivery = self.deliver(&mut ledger, &mut prover, proving, timeout_secs);
+            let delivery = self.deliver(&mut ledger, &mut prover, &mut refusals, proving, timeout_secs);
             if delivery != reported_delivery {
                 match &delivery {
                     Ok(()) => self.platform.log("Sensor windows are being delivered again"),
@@ -371,20 +420,24 @@ impl<P: Platform> Runtime<P> {
         Ok(())
     }
 
-    fn deliver(&self, ledger: &mut Ledger, prover: &mut Prover, proving: bool, timeout_secs: u64) -> Result<(), String> {
+    /// Sends the sealed windows in order until one is not taken. A refusal the deployment signed moves the ledger onto
+    /// the position it names, and windows are then kept back for a while, so a server that refuses everything is not sent everything again at once
+    fn deliver(&self, ledger: &mut Ledger, prover: &mut Prover, refusals: &mut Refusals, proving: bool, timeout_secs: u64) -> Result<(), String> {
+        if let Some(refused) = refusals.holding(Instant::now(), ledger.undelivered()) {
+            return Err(refused);
+        }
+
         while let Some(window) = ledger.next_undelivered()? {
             match self.link.send_window(&window, proving, timeout_secs)? {
-                WindowDelivery::Accepted => ledger.delivered(window.header.window, proving)?,
-                WindowDelivery::Refused(position) => {
-                    self.platform.log(&format!(
-                        "Server holds another chain for this agent, starting over at window {} and reporting everything again",
-                        position.next_window
-                    ));
-                    prover.discard();
-                    ledger.rebase(position.next_window, position.next_index, position.head, unix_now())?;
+                WindowDelivery::Accepted => {
+                    refusals.accepted();
+                    ledger.delivered(window.header.window, proving)?;
                 }
-                WindowDelivery::Unacceptable => {
-                    ledger.give_up_undelivered(&format!("the control server answered HTTP 422 to window {}", window.header.window))?;
+                WindowDelivery::Refused(position) => {
+                    let refused = refusals.refused(Instant::now(), window.header.window, position.next_window);
+                    prover.discard();
+                    ledger.rebase(position.epoch, position.next_window, position.next_index, position.head, unix_now())?;
+                    return Err(refused);
                 }
             }
         }
@@ -511,8 +564,8 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use zedr_ledger::{leaf, seal, Hash};
     use zedr_protocol::{
-        bytes_from_base64, chain_position_signing_bytes, hash_from_hex, hash_to_hex, window_ack_signing_bytes, ChainPosition, ProcessAction, ProcessEvent,
-        SealedWindow, SealedWindowAck, SIGNATURE_HEADER,
+        bytes_from_base64, hash_from_hex, hash_to_hex, window_ack_signing_bytes, window_refusal_signing_bytes, ProcessAction, ProcessEvent, SealedWindow,
+        SealedWindowAck, WindowRefusal, SIGNATURE_HEADER,
     };
 
     struct Received {
@@ -520,6 +573,7 @@ mod tests {
         signature: Option<String>,
         body: String,
         answer: u16,
+        at: Instant,
     }
 
     impl Received {
@@ -606,7 +660,7 @@ mod tests {
 
         let mut body = vec![0u8; content_length];
         reader.read_exact(&mut body).unwrap();
-        Received { path, signature, body: String::from_utf8(body).unwrap(), answer: 0 }
+        Received { path, signature, body: String::from_utf8(body).unwrap(), answer: 0, at: Instant::now() }
     }
 
     #[derive(Default)]
@@ -652,7 +706,7 @@ mod tests {
 
     fn runtime(server: &StubServer, dir: &std::path::Path) -> (Arc<Runtime<Arc<TestPlatform>>>, Arc<TestPlatform>) {
         let platform = Arc::new(TestPlatform::default());
-        let link = Arc::new(ControlLink::open_with_key_id(server.url.clone(), dir).unwrap().trusting(deployment_key().verifying_key()));
+        let link = Arc::new(ControlLink::open_trusting(server.url.clone(), dir, None, deployment_key().verifying_key()).unwrap());
         (Arc::new(Runtime::new(link, Arc::clone(&platform), host())), platform)
     }
 
@@ -669,6 +723,17 @@ mod tests {
     fn acknowledge(request: &Received) -> (u16, String) {
         let window = sent_window(request);
         signed_ack(&deployment_key(), &window.agent_id, window.header.window, window.header.first_index + u64::from(window.header.count), &window.header.head)
+    }
+
+    /// What a control server answers to a window it does not take: where its copy of the chain stands, signed for the request with this sequence number
+    fn signed_refusal(key: &SigningKey, status: u16, window: &SealedWindow, seq: u64, (epoch, next_window, next_index, head): (u64, u64, u64, &str)) -> (u16, String) {
+        let signed = window_refusal_signing_bytes(&window.agent_id, window.session, seq, epoch, next_window, next_index, head).unwrap();
+        let refusal = WindowRefusal { epoch, next_window, next_index, head: head.to_string(), signature: key.sign(&signed).to_bytes().to_vec() };
+        (status, serde_json::to_string(&refusal).unwrap())
+    }
+
+    fn where_it_starts(window: &SealedWindow) -> (u64, u64, u64, &str) {
+        (window.header.epoch, window.header.window, window.header.first_index, &window.header.prev_head)
     }
 
     fn accept_everything(request: &Received) -> (u16, String) {
@@ -906,8 +971,12 @@ mod tests {
         ProverSettings { program: Some(program), max_events: 2000, retry_after: Duration::from_secs(1) }
     }
 
+    fn short_refusal_wait() -> RefusalWait {
+        RefusalWait { first: Duration::from_millis(50), limit: Duration::from_millis(50) }
+    }
+
     fn start(runtime: &Arc<Runtime<Arc<TestPlatform>>>, source: &ScriptedSource) {
-        runtime.start_sensor_proving(source.clone(), every_50_milliseconds(), no_prover());
+        runtime.start_sensor_with(source.clone(), every_50_milliseconds(), no_prover(), short_refusal_wait());
     }
 
     fn stop(runtime: &Runtime<Arc<TestPlatform>>, dir: &std::path::Path) {
@@ -1080,7 +1149,7 @@ mod tests {
 
     #[test]
     fn test_window_the_server_does_not_take_stays_on_disk_and_is_offered_again() {
-        for status in [400, 401, 403, 409, 413, 500, 503] {
+        for status in [400, 401, 403, 409, 413, 422, 500, 503] {
             let server = StubServer::start(move |_| (status, "{}".to_string()));
             let dir = state_dir(&format!("sensor-kept-{}", status));
             let (runtime, platform) = runtime(&server, &dir);
@@ -1191,7 +1260,7 @@ mod tests {
     }
 
     #[test]
-    fn test_signed_chain_position_makes_the_agent_start_over_from_it_and_one_signed_for_another_request_does_not() {
+    fn test_signed_refusal_makes_the_agent_start_over_where_the_server_stands_and_one_signed_for_another_request_does_not() {
         let head = "07".repeat(32);
         let for_this_request = Arc::new(Mutex::new(false));
         let (gate, signed_head) = (Arc::clone(&for_this_request), head.clone());
@@ -1204,40 +1273,186 @@ mod tests {
                 return acknowledge(request);
             }
             let seq = if *gate.lock().unwrap() { window.seq } else { window.seq - 1 };
-            let signed = chain_position_signing_bytes(&window.agent_id, window.session, seq, 40, 900, &signed_head).unwrap();
-            let position = ChainPosition { next_window: 40, next_index: 900, head: signed_head.clone(), signature: deployment_key().sign(&signed).to_bytes().to_vec() };
-            (409, serde_json::to_string(&position).unwrap())
+            signed_refusal(&deployment_key(), 409, &window, seq, (57, 40, 900, &signed_head))
         });
         let dir = state_dir("sensor-rebase");
         let (runtime, platform) = runtime(&server, &dir);
         let source = ScriptedSource::with(3);
         source.run(900, 3, SHELL, &FETCH_AND_RUN);
 
-        let started_at = unix_now();
         start(&runtime, &source);
-        assert!(wait_until(|| platform.logged("Sensor windows are queued, 1 waiting: Chain position is not signed by this deployment")), "a position signed for an earlier request moves nothing");
+        assert!(wait_until(|| platform.logged("Sensor windows are queued, 1 waiting: Window refusal is not signed by this deployment")), "a refusal signed for an earlier request moves nothing");
         assert!(wait_until(|| offered(&server).len() >= 3));
-        assert!(offered(&server).iter().all(|(_, window)| window.header.window == 0) && window_file(&dir, 0).exists());
+        assert!(offered(&server).iter().all(|(_, window)| window.header.window == 0 && window.header.epoch == 1) && window_file(&dir, 0).exists());
 
         *for_this_request.lock().unwrap() = true;
         assert!(wait_until(|| !taken(&server).is_empty()));
         let window = taken(&server).remove(0);
         assert!(window.header.fresh && window.header.gap);
         assert_eq!(
-            (window.header.window, window.header.first_index, window.header.count, &window.header.prev_head),
-            (40, 900, 4, &head),
-            "the sensor reported everything again, from where the server stands"
+            (window.header.epoch, window.header.window, window.header.first_index, window.header.count, &window.header.prev_head),
+            (58, 40, 900, 4, &head),
+            "the sensor reported everything again, from where the server stands and in an epoch later than the one it holds"
         );
-        assert!(window.header.epoch >= started_at, "in an epoch later than any the server can hold of this agent");
         assert_eq!(
             opened(&agent_hash(&dir), &window),
             BTreeMap::from([(902, started(3, 2, "/usr/bin/program-3", &["--token=secret-3"])), (903, started(900, 3, SHELL, &FETCH_AND_RUN))]),
             "the rules started over and found it again"
         );
-        assert!(platform.logged("Server holds another chain for this agent, starting over at window 40"));
+        assert!(platform.logged("Sensor windows are queued, 0 waiting: Server refused window 0, starting over at its window 40 and sending again in 0s"));
+        assert!(wait_until(|| platform.logged("Sensor windows are being delivered again")));
         assert!(!window_file(&dir, 0).exists(), "the window the server refused is gone");
 
         stop(&runtime, &dir);
+    }
+
+    #[derive(Clone, Copy)]
+    enum Malformed {
+        Unsigned,
+        ByAnotherKey,
+        Signed,
+        Taken,
+    }
+
+    #[test]
+    fn test_signed_refusal_of_a_malformed_window_is_followed_like_any_other_and_an_unsigned_one_changes_nothing() {
+        let kind = Arc::new(Mutex::new(Malformed::Unsigned));
+        let answer = Arc::clone(&kind);
+        let server = StubServer::start(move |request| {
+            if request.path != "/api/windows" {
+                return (200, "{}".to_string());
+            }
+            let window = sent_window(request);
+            let mut answer = answer.lock().unwrap();
+            match *answer {
+                Malformed::Unsigned => (422, r#"{"error":"Window 0 root does not match its leaves"}"#.to_string()),
+                Malformed::ByAnotherKey => signed_refusal(&SigningKey::from_bytes(&[8u8; 32]), 422, &window, window.seq, where_it_starts(&window)),
+                Malformed::Signed => {
+                    *answer = Malformed::Taken;
+                    signed_refusal(&deployment_key(), 422, &window, window.seq, where_it_starts(&window))
+                }
+                Malformed::Taken => acknowledge(request),
+            }
+        });
+        let dir = state_dir("sensor-malformed");
+        let (runtime, platform) = runtime(&server, &dir);
+        let source = ScriptedSource::with(3);
+        source.run(900, 3, SHELL, &FETCH_AND_RUN);
+
+        start(&runtime, &source);
+        assert!(wait_until(|| platform.logged("Sensor windows are queued, 1 waiting: HTTP 422 without a signed refusal")));
+        *kind.lock().unwrap() = Malformed::ByAnotherKey;
+        assert!(wait_until(|| platform.logged("Sensor windows are queued, 1 waiting: Window refusal is not signed by this deployment")));
+        let refused = offered(&server);
+        assert!(refused.len() >= 2 && refused.iter().all(|(answer, window)| *answer == 422 && (window.header.window, window.header.epoch, window.header.gap) == (0, 1, false)), "the window is offered again as it is");
+        assert!(window_file(&dir, 0).exists());
+
+        *kind.lock().unwrap() = Malformed::Signed;
+        assert!(wait_until(|| !taken(&server).is_empty()));
+        let window = taken(&server).remove(0);
+        assert!(window.header.fresh && window.header.gap);
+        assert_eq!(
+            (window.header.epoch, window.header.window, window.header.first_index, window.header.count, &window.header.prev_head),
+            (2, 0, 0, 4, &refused[0].1.header.prev_head),
+            "the chain continues where the server stands, and the sensor reported everything again"
+        );
+        assert_eq!(window.releases.len(), 1, "the rules started over and found it again");
+
+        source.run(901, 2, SHELL, &FETCH_AND_RUN);
+        assert!(wait_until(|| taken(&server).len() == 2), "telemetry goes on");
+        let next = taken(&server).remove(1);
+        assert_eq!((next.header.window, next.header.fresh, &next.header.prev_head), (1, false, &window.header.head));
+
+        stop(&runtime, &dir);
+    }
+
+    #[test]
+    fn test_wait_after_a_refusal_doubles_up_to_its_limit_and_starts_over_after_an_accepted_window() {
+        let mut refusals = Refusals::new(RefusalWait { first: REFUSAL_WAIT_START, limit: REFUSAL_WAIT_LIMIT });
+        let mut now = Instant::now();
+        assert_eq!(refusals.holding(now, 1), None);
+
+        for seconds in [60, 120, 240, 480, 960, 1920, 3600, 3600] {
+            let said = refusals.refused(now, 7, 5);
+            assert_eq!(said, format!("Server refused window 7, starting over at its window 5 and sending again in {}s", seconds));
+            assert_eq!(refusals.holding(now + Duration::from_secs(seconds - 1), 1), Some(said.clone()));
+            now += Duration::from_secs(seconds);
+            assert_eq!(refusals.holding(now, 0), Some(said), "with nothing to send the refusal is still the last word");
+            assert_eq!(refusals.holding(now, 1), None, "a window is sent again once the wait is over");
+        }
+
+        refusals.accepted();
+        assert_eq!(refusals.holding(now, 0), None);
+        assert!(refusals.refused(now, 8, 8).ends_with("sending again in 60s"));
+    }
+
+    #[test]
+    fn test_windows_are_kept_back_longer_after_every_refusal_in_a_row_and_an_accepted_one_ends_that() {
+        let refusing = Arc::new(Mutex::new(3));
+        let left = Arc::clone(&refusing);
+        let server = StubServer::start(move |request| {
+            if request.path != "/api/windows" {
+                return (200, "{}".to_string());
+            }
+            let mut left = left.lock().unwrap();
+            if *left == 0 {
+                return acknowledge(request);
+            }
+            *left -= 1;
+            let window = sent_window(request);
+            signed_refusal(&deployment_key(), 409, &window, window.seq, where_it_starts(&window))
+        });
+        let dir = state_dir("sensor-refused");
+        let (runtime, platform) = runtime(&server, &dir);
+        let source = ScriptedSource::with(3);
+        source.run(900, 3, SHELL, &FETCH_AND_RUN);
+        let first = Duration::from_millis(150);
+        let asked = || -> Vec<(u16, Instant)> { server.received.lock().unwrap().iter().filter(|request| request.path == "/api/windows").map(|request| (request.answer, request.at)).collect() };
+
+        runtime.start_sensor_with(source.clone(), every_50_milliseconds(), no_prover(), RefusalWait { first, limit: Duration::from_secs(60) });
+        assert!(wait_until(|| taken(&server).len() == 1));
+        let requests = asked();
+        assert_eq!(requests.iter().map(|(answer, _)| *answer).collect::<Vec<_>>(), vec![409, 409, 409, 200], "a refused window is not sent again, the next one is");
+        let waited: Vec<Duration> = requests.windows(2).map(|pair| pair[1].1 - pair[0].1).collect();
+        assert!(waited[0] >= first && waited[1] >= first * 2 && waited[2] >= first * 4, "every refusal in a row keeps windows back twice as long: {:?}", waited);
+        assert_eq!(offered(&server).iter().map(|(_, window)| (window.header.epoch, window.header.window)).collect::<Vec<_>>(), vec![(1, 0), (2, 0), (3, 0), (4, 0)]);
+        assert!(platform.logged("Server refused window 0, starting over at its window 0"));
+        assert!(wait_until(|| platform.logged("Sensor windows are being delivered again")));
+
+        *refusing.lock().unwrap() = 1;
+        source.run(901, 2, SHELL, &FETCH_AND_RUN);
+        assert!(wait_until(|| taken(&server).len() == 2));
+        let requests = asked();
+        assert_eq!(requests[4..].iter().map(|(answer, _)| *answer).collect::<Vec<_>>(), vec![409, 200]);
+        let waited = requests[5].1 - requests[4].1;
+        assert!(waited >= first && waited < first * 8, "after an accepted window the wait is the first one again: {:?}", waited);
+
+        stop(&runtime, &dir);
+    }
+
+    #[test]
+    fn test_agents_open_their_link_on_the_key_in_their_binary_and_never_on_one_they_are_given() {
+        let agents = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        for platform in ["linux", "macos", "windows"] {
+            for source in std::fs::read_dir(agents.join(platform).join("src")).unwrap() {
+                let source = source.unwrap().path();
+                assert!(!std::fs::read_to_string(&source).unwrap().contains("open_trusting"), "{} opens a link that trusts a key it is given", source.display());
+            }
+        }
+
+        let server = StubServer::start(accept_everything);
+        let dir = state_dir("link-unpatched");
+        let opened_by_agents = [ControlLink::open_with_key_id(server.url.clone(), &dir).unwrap(), ControlLink::open(server.url.clone(), &dir, "agent-a".to_string()).unwrap()];
+        for link in opened_by_agents {
+            let mut ledger = link.open_ledger(1_000).unwrap();
+            ledger.seal_now(1_001).unwrap();
+            let window = ledger.next_undelivered().unwrap().unwrap();
+            let refused = link.send_window(&window, false, EVENT_TIMEOUT_SECS).unwrap_err();
+            assert!(refused.contains("not been patched"), "{}", refused);
+        }
+        assert!(server.received.lock().unwrap().is_empty(), "a link that trusts no key sends no window");
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1267,46 +1482,6 @@ mod tests {
     }
 
     #[test]
-    fn test_window_the_server_calls_unacceptable_is_given_up_and_the_chain_continues_from_the_same_position() {
-        let refusals = Arc::new(Mutex::new(1));
-        let left = Arc::clone(&refusals);
-        let server = StubServer::start(move |request| {
-            let mut left = left.lock().unwrap();
-            if request.path == "/api/windows" && *left > 0 {
-                *left -= 1;
-                return (422, r#"{"error":"Window 0 root does not match its leaves"}"#.to_string());
-            }
-            accept_everything(request)
-        });
-        let dir = state_dir("sensor-unacceptable");
-        let (runtime, platform) = runtime(&server, &dir);
-        let source = ScriptedSource::with(3);
-        source.run(900, 3, SHELL, &FETCH_AND_RUN);
-
-        start(&runtime, &source);
-        assert!(wait_until(|| !taken(&server).is_empty()));
-        let offered = offered(&server);
-        let (refused, window) = (&offered[0].1, &offered[1].1);
-        assert_eq!((offered[0].0, refused.header.window, refused.header.gap), (422, 0, false));
-        assert_eq!(offered[1].0, 200, "it is not offered a second time");
-        assert!(window.header.fresh && window.header.gap);
-        assert_eq!(
-            (window.header.epoch, window.header.window, window.header.first_index, window.header.count, &window.header.prev_head),
-            (2, 0, 0, 4, &refused.header.prev_head),
-            "the chain continues where the server stands, and the sensor reported everything again"
-        );
-        assert_eq!(window.releases.len(), 1, "the rules started over and found it again");
-        assert!(platform.logged("Sensor: Gave up 1 sealed windows and continue at window 0 with a gap: the control server answered HTTP 422 to window 0"));
-
-        source.run(901, 2, SHELL, &FETCH_AND_RUN);
-        assert!(wait_until(|| taken(&server).len() == 2), "telemetry goes on");
-        let next = taken(&server).remove(1);
-        assert_eq!((next.header.window, next.header.fresh, &next.header.prev_head), (1, false, &window.header.head));
-
-        stop(&runtime, &dir);
-    }
-
-    #[test]
     fn test_backlog_the_server_never_takes_stays_bounded_and_the_chain_continues_where_the_server_stands() {
         let answering = Arc::new(Mutex::new(true));
         let gate = Arc::clone(&answering);
@@ -1315,16 +1490,17 @@ mod tests {
         let (runtime, _) = runtime(&server, &dir);
         let mut ledger = runtime.link.open_ledger(1_000).unwrap().keeping_undelivered(3);
         let mut prover = Prover::new(no_prover(), ledger.dir());
+        let mut refusals = Refusals::new(short_refusal_wait());
         let finding = |pid: u32| vec![SystemEvent::from(started(pid, 1, SHELL, &FETCH_AND_RUN))];
 
         runtime.commit(&mut ledger, finding(900), 1_000, false).unwrap();
-        assert_eq!(runtime.deliver(&mut ledger, &mut prover, false, EVENT_TIMEOUT_SECS), Ok(()));
+        assert_eq!(runtime.deliver(&mut ledger, &mut prover, &mut refusals, false, EVENT_TIMEOUT_SECS), Ok(()));
         let acknowledged = taken(&server).remove(0);
 
         *answering.lock().unwrap() = false;
         for pid in 901..=910 {
             runtime.commit(&mut ledger, finding(pid), 1_000, false).unwrap();
-            assert!(runtime.deliver(&mut ledger, &mut prover, false, EVENT_TIMEOUT_SECS).is_err() || ledger.undelivered() == 0);
+            assert!(runtime.deliver(&mut ledger, &mut prover, &mut refusals, false, EVENT_TIMEOUT_SECS).is_err() || ledger.undelivered() == 0);
             assert!(sealed_files(&dir) <= 3, "what waits for the server stays bounded");
         }
         let notices = ledger.take_notices();
@@ -1333,7 +1509,7 @@ mod tests {
         assert_eq!((ledger.undelivered(), taken(&server).len()), (2, 1));
 
         *answering.lock().unwrap() = true;
-        assert_eq!(runtime.deliver(&mut ledger, &mut prover, false, EVENT_TIMEOUT_SECS), Ok(()));
+        assert_eq!(runtime.deliver(&mut ledger, &mut prover, &mut refusals, false, EVENT_TIMEOUT_SECS), Ok(()));
         let windows = taken(&server);
         assert!(windows[1].header.fresh && windows[1].header.gap);
         assert_eq!(
@@ -1440,7 +1616,7 @@ printf 'receipt of the stand-in' > "$3""#,
         let source = ScriptedSource::with(3);
         source.run(900, 3, SHELL, &FETCH_AND_RUN);
 
-        runtime.start_sensor_proving(source.clone(), every_50_milliseconds(), prover);
+        runtime.start_sensor_with(source.clone(), every_50_milliseconds(), prover, short_refusal_wait());
         assert!(wait_until(|| proof_files(&dir, "input-0-").len() == 1));
         assert_eq!(std::fs::metadata(&proof_files(&dir, "input-0-")[0]).unwrap().permissions().mode() & 0o777, 0o600);
 
@@ -1483,7 +1659,7 @@ if [ -e "$0.failed" ]; then printf 'second attempt' > "$3"; else : > "$0.failed"
         let source = ScriptedSource::with(3);
         source.run(900, 3, SHELL, &FETCH_AND_RUN);
 
-        runtime.start_sensor_proving(source.clone(), every_50_milliseconds(), prover);
+        runtime.start_sensor_with(source.clone(), every_50_milliseconds(), prover, short_refusal_wait());
         assert!(wait_until(|| platform.logged("Proving failed, next attempt in 1s: The prover ended with exit status: 3")));
         assert!(window_file(&dir, 0).exists(), "the plaintext stays for the next attempt");
         assert!(receipts(&server).is_empty());
@@ -1524,7 +1700,7 @@ if [ -e "$0.failed" ]; then printf 'second attempt' > "$3"; else : > "$0.failed"
         let source = ScriptedSource::with(3);
         source.run(900, 3, SHELL, &FETCH_AND_RUN);
 
-        runtime.start_sensor_proving(source.clone(), every_50_milliseconds(), prover);
+        runtime.start_sensor_with(source.clone(), every_50_milliseconds(), prover, short_refusal_wait());
         assert!(wait_until(|| platform.logged("Proving failed, next attempt in 1s: HTTP 422")));
         assert!(window_file(&dir, 0).exists());
 

@@ -327,11 +327,12 @@ impl Ledger {
     }
 
     /// The control server's signed position replaces the local chain, and nothing of the old one is proven any more.
-    /// The position names no epoch, and the server takes a window that opens an epoch only in a later one than it holds,
-    /// which a ledger that was lost and counts from one again cannot know. So this epoch is numbered by the clock
-    pub fn rebase(&mut self, next_window: u64, next_index: u64, head: Hash, now: u64) -> Result<(), String> {
+    /// The server takes a window that opens an epoch only in a later one than it holds, which a ledger that was lost
+    /// counts from one again. So the new epoch is later than both the one this ledger counts and the one the server holds
+    pub fn rebase(&mut self, epoch: u64, next_window: u64, next_index: u64, head: Hash, now: u64) -> Result<(), String> {
+        let epoch = self.chain.epoch.max(epoch).checked_add(1).ok_or_else(|| "The control server holds the last epoch there is".to_string())?;
         let unproven = self.proving.next_window.min(self.chain.deliver_from)..self.chain.deliver_from;
-        self.restart_at(next_window, next_index, head, (self.chain.epoch + 1).max(now), now)?;
+        self.restart_at(next_window, next_index, head, epoch, now)?;
         self.proving = Proving { next_window, state: State::default(), needs_fresh: true };
         self.save_proving()?;
         for window in unproven {
@@ -844,8 +845,8 @@ mod tests {
         assert_eq!(ledger.undelivered(), 2);
 
         let head = [9u8; 32];
-        ledger.rebase(0, 50, head, 2000).unwrap();
-        assert_eq!((ledger.epoch(), ledger.undelivered(), ledger.unproven()), (2000, 0, 0), "an epoch later than any a ledger that counts from one has reached");
+        ledger.rebase(1, 0, 50, head, 2000).unwrap();
+        assert_eq!((ledger.epoch(), ledger.undelivered(), ledger.unproven()), (2, 0, 0));
         assert_eq!(ledger.next_undelivered().unwrap(), None);
         assert!((0..3).all(|window| !window_path(&dir, window).exists()), "nothing of the replaced chain is kept");
         assert!(ledger.proven(&stale, stale_state).is_err(), "a proof of the replaced chain frees nothing of the new one");
@@ -855,12 +856,12 @@ mod tests {
         assert_eq!(ledger.seal_due(2000 + WINDOW_SECONDS).unwrap(), Some(0));
         let window = ledger.next_undelivered().unwrap().unwrap();
         assert!(window.header.fresh && window.header.gap);
-        assert_eq!((window.header.epoch, window.header.window, window.header.first_index, window.header.count, window.header.prev_head), (2000, 0, 50, 1, head));
+        assert_eq!((window.header.epoch, window.header.window, window.header.first_index, window.header.count, window.header.prev_head), (2, 0, 50, 1, head));
         window.header.verify(&AGENT, &window.leaves).unwrap();
 
         ledger.delivered(0, true).unwrap();
         let input = ledger.proof_input(100).unwrap().unwrap();
-        assert_eq!((input.epoch, input.fresh, input.head_in, input.windows.len(), input.windows[0].first_index), (2000, true, head, 1, 50));
+        assert_eq!((input.epoch, input.fresh, input.head_in, input.windows.len(), input.windows[0].first_index), (2, true, head, 1, 50));
         let (journal, state) = proof::run(input).unwrap();
         assert_eq!((journal.first_window, journal.head_out), (0, window.header.head));
         ledger.proven(&journal, state).unwrap();
@@ -869,28 +870,31 @@ mod tests {
         let mut ledger = Ledger::open(&dir, AGENT, MASTER, 3000).unwrap();
         ledger.seal_now(3001).unwrap();
         let next = ledger.next_undelivered().unwrap().unwrap();
-        assert_eq!((next.header.epoch, next.header.window, next.header.first_index, next.header.prev_head), (2001, 1, 51, window.header.head), "the position survives a restart");
+        assert_eq!((next.header.epoch, next.header.window, next.header.first_index, next.header.prev_head), (3, 1, 51, window.header.head), "the position survives a restart");
 
         fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
-    fn test_rebase_onto_a_longer_chain_continues_from_its_end() {
+    fn test_rebase_onto_a_longer_chain_continues_from_its_end_in_an_epoch_later_than_the_servers() {
         let dir = test_dir("ahead");
         let mut ledger = Ledger::open(&dir, AGENT, MASTER, 1000).unwrap();
         ledger.admit(&[quiet(1)]);
         ledger.seal_now(1001).unwrap();
 
         let head = [7u8; 32];
-        ledger.rebase(40, 900, head, 2000).unwrap();
-        ledger.rebase(40, 900, head, 1000).unwrap();
-        assert_eq!(ledger.epoch(), 2001, "a clock that went back still gives a later epoch");
+        ledger.rebase(57, 40, 900, head, 2000).unwrap();
+        assert_eq!(ledger.epoch(), 58, "a ledger that counts from one again still opens an epoch the server takes");
         assert!(!window_path(&dir, 0).exists());
+        ledger.rebase(3, 40, 900, head, 2000).unwrap();
+        assert_eq!(ledger.epoch(), 59, "and never goes back to an epoch it has used");
+        assert!(ledger.rebase(u64::MAX, 41, 901, [8u8; 32], 2000).is_err(), "there is no epoch after the last one");
+
         ledger.admit(&[quiet(2)]);
         ledger.seal_now(2001).unwrap();
         let window = ledger.next_undelivered().unwrap().unwrap();
         assert!(window.header.fresh && window.header.gap);
-        assert_eq!((window.header.window, window.header.first_index, window.header.prev_head), (40, 900, head));
+        assert_eq!((window.header.epoch, window.header.window, window.header.first_index, window.header.prev_head), (59, 40, 900, head), "a position that cannot be taken up changes nothing");
 
         ledger.delivered(40, true).unwrap();
         let input = ledger.proof_input(100).unwrap().unwrap();
