@@ -15,8 +15,9 @@ applyTo: "agent/**"
 - Maintains a trusted record of all detections techniques applied by the agent, and corresponding up to date research data per each operating system capabilities and research, see `../../docs/DETECTIONS.md`
 - Maintains a trusted record of all known bypass techniques and corresponding up to date research data per each operating system capabilities and research, see `../../docs/BYPASSES.md`
 - Reports detections to a central control server in real-time
+- Keeps telemetry private: every event is sealed on the endpoint, a detection rule opens only its own evidence, the rule run is proven, and the agent runs no command for the control server, see `../../docs/adr/031-sealed-telemetry-opened-by-proven-rules.md`
 - Has the ability to quarantine files, processes, and network activity on the host system
-- Has the ability to query system information, running processes, network connections, and file system activity on the host system, and report back to the central control server, in real-time and reliably
+- Has the ability to query system information, running processes, network connections, and file system activity on the host system, and report it to the central control server sealed, in real-time and reliably
 - Has conditional automatic remediation rules
 - Next-generation antivirus capabilities:
   - Signature-based malware detection and removal

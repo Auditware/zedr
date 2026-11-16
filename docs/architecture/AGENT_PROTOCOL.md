@@ -1,8 +1,10 @@
-# Agent-Backend Communication Protocol
+# Agent and Control Server Protocol
 
-Every request from an agent is signed. See [ADR 013](../adr/013-agent-identity-and-signed-requests.md) for the reasoning.
+Everything an agent sends is a signed HTTPS request. Lifecycle events go to `POST /api/events`, telemetry goes sealed to `POST /api/windows`, and proofs go to `POST /api/proofs`. The message types are in the `protocol` crate.
 
 ## Request Signing
+
+See [ADR 013](../adr/013-agent-identity-and-signed-requests.md) for the reasoning.
 
 - The agent keeps an Ed25519 seed and a session counter in `identity.json` in its data directory (`%ProgramData%\zedr` on Windows, `/var/lib/zedr` on Linux). The seed is generated on first start and never leaves the machine.
 - Header `X-Zedr-Signature`: hex Ed25519 signature over the exact request body bytes.
@@ -10,226 +12,173 @@ Every request from an agent is signed. See [ADR 013](../adr/013-agent-identity-a
 - `seq`: starts at 1 in each session and advances by one on every request.
 - The server rejects a request with `401` when the signature is missing or wrong or the agent is unknown, and with `409` when `seq` did not advance or the session is older than the four most recent ones. A `409` on a validly signed request opens a `replay` incident.
 
-## Registration Flow
+## Installation
 
-1. **Installer** restricts the data directory to SYSTEM and Administrators and writes the install key to `enrollment.key`.
-2. **Agent starts**: reads the machine GUID from the Windows Registry and loads or creates its identity.
-3. **Registration request** to `POST /api/agents/register`:
-   ```json
-   {
-     "agent_id": "7f0198dd-61c5-4d0e-9490-8687c23ca077",
-     "hostname": "ZEDR",
-     "platform": "windows",
-     "os_version": "Windows 11 Pro 24H2 (Build 26100)",
-     "architecture": "aarch64",
-     "version": "0.1.0",
-     "ip_address": "172.16.213.128",
-     "public_key": "<64 hex characters>",
-     "enrollment_key": "zedr_...",
-     "session": 1,
-     "seq": 1
-   }
-   ```
-4. **Backend** verifies the signature against `public_key`, then accepts when the key is already pinned to this agent or when `enrollment_key` is valid and not yet used for an enrollment. It pins the key, burns the enrollment key and responds `200 OK`. Anything else is `401`.
-5. **Agent** deletes `enrollment.key` after a `200`. Later registrations omit it.
+An endpoint is installed with a single-use install key or a fleet enrollment token ([ADR 019](../adr/019-fleet-enrollment-tokens.md)). Either travels in the `X-Zedr-Enrollment-Key` header or as `?key=`.
 
-On Linux the installer creates `/var/lib/zedr` with mode `0700`, and the agent id is the first 16 bytes of the SHA-256 of the agent's public key, as hex.
+1. `GET /install.sh` or `GET /install.ps1` returns the installer with the address of the control server and the key filled in.
+2. On Linux the installer asks for the prover first, `GET /api/installers/binaries/{os}-{arch}/prover`. A control server that built none for the platform answers `404`, and the endpoint then seals without proving.
+3. The installer downloads the agent, `GET /api/installers/binaries/{os}-{arch}`. This uses up an install key, which is why the prover comes first. The agent and the prover are replaced together or not at all, because both carry the same rules.
+4. The installer writes the key to `enrollment.key` in the data directory and starts the agent.
 
-`enrollment_key` is either a single-use install key or a fleet enrollment token (`zedr_fleet_...`, [ADR 019](../adr/019-fleet-enrollment-tokens.md)). A fleet token enrolls an agent id that has no pinned key, counts one use and never replaces a pinned key. A registration signed with the pinned key ignores the token. After a refused registration the agent waits 30 seconds before the next attempt and doubles the wait up to 10 minutes.
+The control server stores only the SHA-256 of a key. An install key expires, can be revoked, downloads one agent and enrolls one endpoint.
 
-## Heartbeat Flow
+### What the control server writes into the agent
 
-Every 30 seconds (configurable via `ZEDR_HEARTBEAT_INTERVAL` env var):
+The agent is built with two 64 byte placeholders, one for the address of the control server and one for the public key of the deployment ([ADR 017](../adr/017-per-deployment-signing-key.md)). When the control server serves an agent it fills both, from `ZEDR_SERVER_URL` and `ZEDR_SIGNING_KEY_HEX`, signs the whole binary and appends the signature.
 
-1. **Heartbeat request** to `POST /api/events`:
-   ```json
-   {
-     "agent_id": "7f0198dd-61c5-4d0e-9490-8687c23ca077",
-     "session": 1,
-     "seq": 2,
-     "events": [
-       {
-         "Heartbeat": {
-           "timestamp": 1765893841
-         }
-       }
-     ]
-   }
-   ```
-2. **Backend responds** with `200 OK` and, when one is pending, a signed `upgrade` command. It carries `agent_id`, and the agent refuses a command issued for another agent. An upgrade is the only command the control server can send ([ADR 030](../adr/030-no-remote-shell.md)).
-3. **Backend updates** `last_heartbeat`, sets the liveness state to `active` and closes open `silence` and `service_stopped` incidents.
-4. **On `401`** the agent registers again.
+- The address is therefore at most 64 bytes, and an installed agent talks to one control server until it is installed again.
+- The control server refuses to serve a binary where a placeholder is missing or appears more than once.
+- The agent checks its own binary, upgrade binaries and signed answers against that key. A binary read straight from the filesystem still holds the placeholder and refuses to start.
+- The prover is served as built. It holds nothing about a deployment.
 
-## Telemetry
+## Registration
 
-The Linux agent sends `Process` and `Network` events in the same signed `POST /api/events` requests, up to 200 events per request ([ADR 020](../adr/020-polling-sensor-for-process-and-connection-telemetry.md)).
+`POST /api/agents/register`:
 
-- `Process` with action `Create`: a process that runs. `timestamp` is the start time of the process, so the first batch after an agent start carries old timestamps. `ppid` links it to its parent.
-- `Process` with action `Modify`: the process replaced its image with `exec`. `executable_path` and `command_line` are the new ones.
-- `Process` with action `Terminate`: the process is gone. `timestamp` is the poll that noticed it, and the other fields repeat what was last known.
-- `Network` with action `Connect`: an outbound TCP connection. `pid` and `process_path` name the process that holds it. `bytes_sent` and `bytes_received` are always 0 for now.
-
-## Stop Notice
-
-When the service manager stops the agent it sends an `AgentStopping` event with a reason of `ServiceStop`, `SystemShutdown` or `Upgrade`. See [ADR 014](../adr/014-liveness-and-tamper-incidents.md).
-
-## Critical Design Decisions
-
-### Agent ID = Machine GUID
-- **Pros**: Stable across reinstalls, unique per machine
-- **Cons**: If hardware changes, GUID may change
-- **Alternative considered**: Random UUID generated by backend
-  - Rejected because agent needs to know its own ID for heartbeats
-
-### Heartbeat Interval
-- Default: 30 seconds
-- Trade-off: Faster = more responsive UI, but more network/DB load
-- Configurable via environment variable for flexibility
-
-### Event Batching
-- Heartbeats sent as events in batch format
-- Allows future extension: multiple events per request
-- Reduces HTTP overhead when agent has multiple events
-
-## Database Schema Notes
-
-### Foreign Key Constraint
-- `events.agent_id` MUST match `agents.id`
-- If mismatch occurs: 500 error with "FOREIGN KEY constraint failed"
-- **This was the bug we fixed**: Agent was using machine GUID for heartbeats, but backend was generating random UUID during registration
-
-### Agent Status
-- Set to "online" on registration
-- Updated via `last_heartbeat` timestamp
-- Frontend considers agent offline if `last_heartbeat` > 60 seconds old (2x heartbeat interval)
-
-## Install Keys
-
-**Purpose**: Secure, one-time use tokens for agent installation
-
-### Generation Flow
-1. Admin creates install key via `/api/admin/installers` with:
-   - Selected agent version (e.g., "0.1.0")
-   - Optional expiration time (default: 24 hours)
-
-2. Backend generates:
-   ```json
-   {
-     "id": "uuid",
-     "key": "random-32-char-string",
-     "agent_version": "0.1.0",
-     "expires_at": 1765980211,
-     "created_by": "admin-user-id"
-   }
-   ```
-
-3. Frontend displays platform-specific install commands:
-   ```powershell
-   # Windows
-   Invoke-WebRequest -Uri "http://server:7770/install/windows?key=abc123" | Invoke-Expression
-   ```
-   ```bash
-   # Linux/macOS  
-   curl -fsSL "http://server:7770/install/linux?key=abc123" | sudo bash
-   ```
-
-### Installation Flow
-
-1. **Installer script requested**: `GET /install/{platform}?key={install_key}`
-   - Backend validates key (not expired, not used, not revoked)
-   - Backend generates dynamic installer script with embedded key
-   - Returns platform-specific shell/PowerShell script
-
-2. **Installer downloads binary**: Script calls `GET /agent/{os}/{arch}/zedr-agent.exe?key={install_key}`
-   - Backend validates key again
-   - Backend marks key as `used` (prevents reuse)
-   - Backend serves binary with URL patching applied
-   - Binary specific to the agent version associated with the key
-
-3. **Agent installs and registers**: Uses embedded server URL to register
-
-### Key Security Features
-
-- **One-time use**: Key marked as used after first binary download, and it authorizes exactly one enrollment
-- **Version-locked**: Each key tied to specific agent version
-- **Expiration**: Keys expire after configurable time (default 24h)
-- **Revocable**: Admin can revoke keys before use via `/api/admin/installers/{id}`
-- **Audit trail**: Database tracks: creator, creation time, usage time, associated agent
-
-### Database Schema
-```sql
-CREATE TABLE install_keys (
-    id TEXT PRIMARY KEY,
-    key_hash TEXT UNIQUE NOT NULL,  -- SHA256 of actual key
-    created_at INTEGER NOT NULL,
-    expires_at INTEGER NOT NULL,
-    used_at INTEGER,                -- NULL until used
-    revoked_at INTEGER,             -- NULL unless revoked
-    created_by TEXT NOT NULL,       -- User ID
-    agent_version TEXT NOT NULL,    -- e.g., "0.1.0"
-    FOREIGN KEY (created_by) REFERENCES users(id)
-);
+```json
+{
+  "agent_id": "5f1c9a0e4b7d2c8a6e3f0b9d1a2c4e6f",
+  "hostname": "build-07",
+  "platform": "linux",
+  "os_version": "Debian GNU/Linux 12 (bookworm)",
+  "architecture": "aarch64",
+  "version": "0.1.0",
+  "ip_address": "10.0.4.17",
+  "public_key": "<64 hex characters>",
+  "enrollment_key": "zedr_...",
+  "session": 1,
+  "seq": 1
+}
 ```
 
-**Note**: Only the hash is stored. `enrolled_at` and `enrolled_agent_id` record the single enrollment the key authorized.
+- The control server verifies the signature against `public_key`. It accepts when that key is already pinned to this agent, or when `enrollment_key` is valid. It then pins the key, counts the enrollment against the install key or the fleet token and answers `200`. Anything else is `401`.
+- The agent deletes `enrollment.key` after a `200`. Later registrations omit it.
+- On Linux the agent id is the first 16 bytes of the SHA-256 of the agent's public key, as hex. On Windows it is the machine GUID.
+- A fleet token enrolls an agent id that has no pinned key and never replaces a pinned key.
+- After a refused registration the agent waits 30 seconds and doubles the wait up to 10 minutes.
 
-## Server URL Embedding
+## Heartbeat
 
-**Critical**: Agent binary has server URL embedded during download
+Every 30 seconds, `POST /api/events`:
 
-### How It Works
+```json
+{
+  "agent_id": "5f1c9a0e4b7d2c8a6e3f0b9d1a2c4e6f",
+  "session": 1,
+  "seq": 2,
+  "events": [{ "Heartbeat": { "timestamp": 1765893841 } }]
+}
+```
 
-1. **Agent contains placeholder** in `shared/src/lib.rs`:
-   ```rust
-   pub fn get_server_url() -> &'static str {
-       // Exactly 64 bytes, replaced at serve-time
-       "__ZEDR_SERVER_URL_PLACEHOLDER_DO_NOT_MODIFY_THIS_STRING_EXACTLY_64__"
-   }
-   ```
+- The control server answers `200` and, when one is pending, a signed `upgrade` command. It names the agent, and the agent refuses a command issued for another one and accepts each command once ([ADR 029](../adr/029-signed-commands-run-once-across-agent-restarts.md)). An upgrade is the only command the control server can send ([ADR 030](../adr/030-no-remote-shell.md)).
+- The control server updates `last_heartbeat`, sets the liveness state to `active` and closes open `silence` and `service_stopped` incidents ([ADR 014](../adr/014-liveness-and-tamper-incidents.md)).
+- On `401` the agent registers again.
+- When the service manager stops the agent it sends `AgentStopping` with a reason of `ServiceStop`, `SystemShutdown` or `Upgrade`.
 
-2. **Backend patches on-the-fly** when serving binary:
-   ```rust
-   pub fn patch_server_url(binary: Vec<u8>, server_url: &str) -> Result<Vec<u8>> {
-       const PLACEHOLDER: &[u8] = b"__ZEDR_SERVER_URL_PLACEHOLDER_DO_NOT_MODIFY_THIS_STRING_EXACTLY_64__";
-       
-       // Find placeholder in binary
-       // Replace with server URL + padding to maintain 64 bytes
-       // Return patched binary
-   }
-   ```
+`POST /api/events` takes lifecycle events only. A process, connection, file, autostart or package event in it is refused with `422`.
 
-3. **Server URL comes from** environment variable:
-   ```bash
-   export CONTROL_SERVER_URL="http://192.168.1.248:7770"
-   ```
+## Sealed Windows
 
-### Architecture Benefits
+Telemetry leaves the endpoint sealed ([ADR 031](../adr/031-sealed-telemetry-opened-by-proven-rules.md)). The Linux agent closes a window every 60 seconds, earlier when it holds 1,000 events or 1 MiB, and at once when a rule fires. `POST /api/windows`:
 
-- ✅ **No config files**: Agent is self-contained
-- ✅ **Dynamic per-deployment**: Different servers can serve same agent binary with different URLs
-- ✅ **Single download**: Everything needed in one file
-- ✅ **No rebuild needed**: Change server URL via env var, no agent recompilation
+```json
+{
+  "agent_id": "5f1c9a0e4b7d2c8a6e3f0b9d1a2c4e6f",
+  "session": 1,
+  "seq": 3,
+  "header": {
+    "epoch": 1,
+    "window": 4,
+    "first_index": 212,
+    "count": 2,
+    "fresh": false,
+    "gap": false,
+    "prev_head": "<64 hex characters>",
+    "root": "<64 hex characters>",
+    "head": "<64 hex characters>"
+  },
+  "events": [
+    { "leaf": "<64 hex characters>", "sealed": "<base64 ciphertext>" },
+    { "leaf": "<64 hex characters>", "sealed": "<base64 ciphertext>" }
+  ],
+  "releases": [
+    {
+      "trigger": 213,
+      "rule": "fetch-and-run",
+      "context": [207],
+      "pid": 4812,
+      "started_at": 1765893790,
+      "openings": [
+        { "index": 213, "seed": "<64 hex characters>" },
+        { "index": 207, "seed": "<64 hex characters>" }
+      ]
+    }
+  ],
+  "proving": true
+}
+```
 
-### Limitations & Constraints
+- `events` holds, per event, the commitment and the ciphertext. The control server cannot read either.
+- `header` chains the window to the one before. `epoch` advances at every agent start, `fresh` marks the first window of an epoch, and `gap` says that the agent lost events before it could seal them.
+- `releases` holds what a rule opened. `trigger` is the event the rule fired on, `context` the other events it opens, and `openings` the secret of each. An opening may point into an earlier window of the same epoch.
+- `proving` says whether the endpoint has a prover.
 
-- ❌ **URL length**: Server URL must be ≤64 bytes (placeholder size)
-- ❌ **Immutable after install**: Cannot change server URL without reinstalling agent
-- ❌ **Direct binary download fails**: Binary from filesystem (not via backend) has placeholder URL
-- ❌ **Binary size impact**: Every binary contains 64-byte placeholder whether used or not
+The control server checks the header against the leaves and against the head it holds for the agent, stores the window, opens what was released and answers `200` with an acknowledgement signed by the deployment key:
 
-### Security Considerations
+```json
+{ "window": 4, "next_index": 214, "head": "<64 hex characters>", "signature": "<64 bytes as an array of numbers>" }
+```
 
-- Binary integrity: Patching modifies binary, so hash changes per serve
-- Install key validation happens BEFORE patching (prevents unauthorized downloads)
-- Placeholder is unique string, unlikely to appear elsewhere in binary by accident
+The agent keeps a window on disk until it holds that signature, and sends the same bytes again until then. A window the control server already holds is acknowledged again.
 
-## Signing Public Key Embedding
+A window is refused with `422` when it is not a window an honest agent seals, and with `409` when it does not continue the chain the control server holds. Both carry a signed refusal that names the position the control server holds:
 
-The agent binary has the signing public key of its deployment embedded during download, next to the server URL ([ADR 017](../adr/017-per-deployment-signing-key.md)).
+```json
+{ "epoch": 1, "next_window": 4, "next_index": 212, "head": "<64 hex characters>", "signature": "<64 bytes as an array of numbers>" }
+```
 
-1. The agent is built with a 64 byte placeholder, `SIGNING_PUBLIC_KEY_PLACEHOLDER` in the `protocol` crate.
-2. When the backend serves a binary, for install or for upgrade, it writes the public key of `ZEDR_SIGNING_KEY_HEX` into that slot as 64 hex characters, then signs the whole binary and appends the signature.
-3. The backend refuses to serve a binary where the placeholder is missing or appears more than once.
-4. The agent reads the slot at run time and checks its own binary, upgrade binaries and signed commands against that key. A slot that still holds the placeholder is an error.
+The signature covers the agent, the session and the `seq` of the request it answers, so a refusal cannot be replayed to move an agent back. The agent drops the windows the control server did not take, continues at the position named in an epoch later than both its own and the one named, and waits 60 seconds before the next window, doubling up to one hour while refusals continue.
 
-An agent therefore trusts the control server that served it and no other, and a binary read straight from the filesystem refuses to start.
+Window numbers and event indices run on across epochs, one chain per agent. A fresh window is only taken in a later epoch than the one stored.
+
+| Incident | Opened when |
+|---|---|
+| `window_malformed` | the header does not match the leaves, the window is for another agent, or a ciphertext is not one of the sealed sizes |
+| `chain_fork` | a window is not the next one, does not start at the next event, does not follow the stored head, or is in the wrong epoch |
+| `chain_gap` | the header of a stored window says the agent lost events before it could seal them |
+| `release_invalid` | a release does not open the event that was committed, or its rule does not open what it names. The window is kept and the release opens nothing |
+
+## Proofs
+
+An endpoint with a prover proves the windows the control server acknowledged, several windows in one proof. `POST /api/proofs`:
+
+```json
+{
+  "agent_id": "5f1c9a0e4b7d2c8a6e3f0b9d1a2c4e6f",
+  "session": 1,
+  "seq": 9,
+  "receipt": "<base64 of the bincode receipt>"
+}
+```
+
+The receipt is a RISC Zero composite receipt of the rule program in `prover/guest`: one proof per segment of the run, about a quarter of a megabyte each, so a proof of 250 events is around six megabytes. The control server reads up to 32 MiB and keeps no receipt. Its public output names the agent, the epoch, the window and index range, the chain head before and after, a commitment to the rule state before and after, and every match.
+
+The control server verifies the receipt against the image IDs in `ZEDR_GUEST_IMAGE_IDS`, checks that it continues where the last proof of the epoch ended, and compares its matches with the releases it stored. It answers `200` with `{ "first_window": 2, "last_window": 4 }` and marks those windows verified.
+
+| Incident | Opened when |
+|---|---|
+| `proof_invalid` | the receipt does not verify, is for another rule program, or does not continue the proven chain |
+| `match_not_released` | the proof names a match the endpoint sent no release for |
+| `release_not_proven` | the endpoint released events for a match the proof does not name |
+| `proof_overdue` | a window from a proving endpoint has no proof after `ZEDR_PROOF_DEADLINE_SECS`, one hour unless set |
+| `proving_stopped` | an endpoint whose last window said it proves sends one that says it does not |
+
+An endpoint rests 15 minutes after a proof (`ZEDR_PROOF_REST`, in seconds) and proves earlier once 250 events wait (`ZEDR_PROOF_EVENTS`), which is also the most one proof covers. The prover works in segments of 2^18 cycles (`ZEDR_PROOF_SEGMENT_PO2`, 13 to 24). The memory it needs about doubles with every step up and halves with every step down, and smaller segments make a larger receipt.
+
+## What the control server holds about an endpoint
+
+- Its registration and its lifecycle events, in plaintext.
+- For every sensor event: its position in the chain, a commitment, a ciphertext padded to one of eight sizes, and the time its window arrived.
+- For an event a rule opened: the event itself, and the finding built from it.
+- For every proven run of windows: the receipt and its public output.

@@ -8,7 +8,7 @@ Everything else on the box is reachable from the admin network only, or not at a
 
 | Surface | Exposure | Control | Status |
 |---|---|---|---|
-| Agent paths: `/install.ps1`, `/install.sh`, `/api/installers/binaries/*`, `/api/agents/*`, `/api/events` | Public, port 443 | TLS in the server. Install keys for downloads, signed requests per agent identity for the rest. | Enforced by the server |
+| Agent paths: `/install.ps1`, `/install.sh`, `/api/installers/binaries/*`, `/api/agents/*`, `/api/events`, `/api/windows`, `/api/proofs` | Public, port 443 | TLS in the server. Install keys for downloads, signed requests per agent identity for the rest. | Enforced by the server |
 | Operator paths: console, `/api/admin/*`, `/api/auth/*`, `/api-docs/*` | Port 443, limited to `server.adminAllowedCidrs` | Peer address checked in the server before any handler, then login, optional MFA, or an API key. An unknown peer address is denied. | Enforced once `server.adminAllowedCidrs` is set. Empty means any address. `bootstrap.sh` refuses an empty list. |
 | Health: `/healthz`, `/readyz`, `/health` | Public, port 443, no authentication | Return status only. `/health` also returns the server version. | By design, the kubelet probes them |
 | Client address seen by the server | n/a | `service.externalTrafficPolicy: Local`, the chart default. With `Cluster` the server sees a cluster address and the allowlist rejects every operator. | Enforced by the chart default |

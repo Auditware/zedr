@@ -93,6 +93,13 @@ This file documents the agent's technical capabilities per operating system
 - [x] As root, can read the dpkg and apk package databases of the host through `/proc/1/root` and report installed, upgraded and removed packages by polling (`make test-linux-container`)
 - [ ] Read the rpm database, which is SQLite, Berkeley DB or ndb depending on the release
 
+## Proving
+
+- [x] As root, can run the rule program in a zkVM as a child process at the lowest priority, from one static binary with nothing else to install, on arm64 (`make test-e2e-linux`)
+- [x] The same static prover for x64, which builds and proves and verifies its self-test under emulation on an arm64 machine
+- [ ] The whole flow on an x64 machine
+- [ ] Prove on a GPU where the endpoint has one
+
 ## eBPF
 
 - [ ] As CAP_BPF capability holder, can load eBPF programs into kernel to monitor system events (`make test-linux-ebpf-load`)

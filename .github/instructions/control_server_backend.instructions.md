@@ -6,6 +6,7 @@ applyTo: "control_server/backend/**"
 
 - Provides a central control server to manage all deployed agents, view detections, and respond to incidents:
   - Cage network activity of the host system through the agent
+- Reads the telemetry of an endpoint only where a detection rule opened it, and checks a proof that the rules ran over everything it cannot read
 - Communicates securely to a central control server, over encrypted, highest-of-integrity channels
 - Access to the central control server is protected with multi-factor authentication and role-based access control
 - Any event collected must reach the central control server within 30 seconds of occurrence
