@@ -1,5 +1,5 @@
 image:
-  repository: ghcr.io/forefy/zedr
+  repository: ghcr.io/auditware/zedr
   # The release pipeline pins the digest. A digest wins over a tag.
   digest: ""
   tag: ""

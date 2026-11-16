@@ -36,7 +36,7 @@ kubectl -n zedr create secret generic zedr-secrets \
 kubectl -n zedr create secret tls zedr-tls --cert=fullchain.pem --key=privkey.pem
 
 helm registry login ghcr.io
-helm install zedr oci://ghcr.io/forefy/charts/zedr --version <x.y.z> --namespace zedr \
+helm install zedr oci://ghcr.io/auditware/charts/zedr --version <x.y.z> --namespace zedr \
   --set server.url=https://zedr.example.com \
   --set 'server.adminAllowedCidrs={203.0.113.10/32}' \
   --set 'imagePullSecrets[0].name=ghcr-pull' \
@@ -94,7 +94,7 @@ The server reads the certificate at startup only. After a renewal, restart the p
 ## Upgrade
 
 ```bash
-helm upgrade zedr oci://ghcr.io/forefy/charts/zedr --version <x.y.z> --namespace zedr --reuse-values
+helm upgrade zedr oci://ghcr.io/auditware/charts/zedr --version <x.y.z> --namespace zedr --reuse-values
 ```
 
 The single pod restarts, the server drains for 10 seconds, and agents retry until it is back. Database migrations run at startup.

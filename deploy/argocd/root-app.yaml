@@ -8,7 +8,7 @@ metadata:
 spec:
   project: zedr
   source:
-    repoURL: ghcr.io/forefy/charts
+    repoURL: ghcr.io/auditware/charts
     chart: zedr
     # Move this pin to take a release. Never use a range.
     targetRevision: 0.1.0

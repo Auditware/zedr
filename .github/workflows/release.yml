@@ -10,12 +10,12 @@ permissions:
   packages: write
 
 env:
-  IMAGE: ghcr.io/forefy/zedr
-  CHART_REPO: oci://ghcr.io/forefy/charts
+  IMAGE: ghcr.io/auditware/zedr
+  CHART_REPO: oci://ghcr.io/auditware/charts
 
 jobs:
   guest:
-    if: github.repository == 'forefy/zedr'
+    if: github.repository == 'auditware/zedr'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

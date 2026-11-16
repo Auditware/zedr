@@ -43,7 +43,7 @@ spec:
         - operator: Exists
       containers:
         - name: zedr-agent
-          image: ghcr.io/forefy/zedr-agent:0.1.0
+          image: ghcr.io/auditware/zedr-agent:0.1.0
           securityContext:
             privileged: true
           env:

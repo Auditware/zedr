@@ -5,8 +5,8 @@ type: application
 version: 0.1.0
 appVersion: "0.1.0"
 kubeVersion: ">=1.27.0-0"
-home: https://github.com/forefy/zedr
+home: https://github.com/auditware/zedr
 sources:
-  - https://github.com/forefy/zedr
+  - https://github.com/auditware/zedr
 maintainers:
-  - name: forefy
+  - name: auditware

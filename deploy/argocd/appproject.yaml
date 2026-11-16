@@ -6,7 +6,7 @@ metadata:
 spec:
   description: zedr control server
   sourceRepos:
-    - ghcr.io/forefy/charts
+    - ghcr.io/auditware/charts
   destinations:
     - server: https://kubernetes.default.svc
       namespace: zedr
