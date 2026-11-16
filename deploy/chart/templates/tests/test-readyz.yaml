@@ -1,0 +1,52 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "zedr.fullname" . }}-test-readyz
+  labels:
+    helm.sh/chart: {{ include "zedr.chart" . }}
+    app.kubernetes.io/name: {{ include "zedr.name" . }}-test
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: readyz
+      image: {{ .Values.test.image }}
+      # Asks for the public URL but connects to the Service, so the certificate is verified against server.url.
+      command:
+        - curl
+        - --fail
+        - --silent
+        - --show-error
+        - --cacert
+        - /tls/tls.crt
+        - --connect-to
+        - {{ printf "::%s:%v" (include "zedr.fullname" .) .Values.service.port | quote }}
+        - {{ printf "%s/readyz" (include "zedr.serverUrl" .) | quote }}
+      securityContext:
+        readOnlyRootFilesystem: true
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop:
+            - ALL
+      volumeMounts:
+        - name: tls
+          mountPath: /tls
+          readOnly: true
+  volumes:
+    - name: tls
+      secret:
+        secretName: {{ include "zedr.tlsSecretName" . }}
+        items:
+          - key: tls.crt
+            path: tls.crt

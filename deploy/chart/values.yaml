@@ -1,0 +1,74 @@
+image:
+  repository: ghcr.io/forefy/zedr
+  # The release pipeline pins the digest. A digest wins over a tag.
+  digest: ""
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+server:
+  # Public https origin that agents and operators use, without a path. Required, at most 64 bytes.
+  url: ""
+  # Agent release handed to endpoints. The image must hold /app/binaries/v<agentVersion>.
+  agentVersion: "0.1.0"
+  # CIDRs allowed to reach the console, /api/admin, /api/auth and /api-docs. Empty allows any address.
+  adminAllowedCidrs: []
+  # Public key of a replaced signing key, taken from the refusal in the server log.
+  # Set it only after the enrolled agents were scheduled for reinstall.
+  signingKeyChangeAccepted: ""
+  logLevel: ""
+
+secrets:
+  # create: the chart renders a Secret from jwtSecret, adminPassword and signingKeyHex.
+  # existing: existingSecret holds the keys JWT_SECRET, ADMIN_PASSWORD and ZEDR_SIGNING_KEY_HEX.
+  # The signing key is 64 hex characters from `openssl rand -hex 32`, one per deployment.
+  mode: create
+  existingSecret: ""
+  jwtSecret: ""
+  adminPassword: ""
+  signingKeyHex: ""
+
+tls:
+  # existingSecret: a kubernetes.io/tls Secret you provide.
+  # certManager: the chart requests a Certificate from the issuer you provide.
+  mode: existingSecret
+  existingSecret: ""
+  certManager:
+    issuerRef:
+      name: ""
+      kind: ClusterIssuer
+      group: cert-manager.io
+
+service:
+  type: LoadBalancer
+  port: 443
+  # Local keeps the client address, which the adminAllowedCidrs check is made against.
+  externalTrafficPolicy: Local
+  annotations: {}
+
+persistence:
+  size: 10Gi
+  # Empty uses the default StorageClass of the cluster.
+  storageClassName: ""
+
+networkPolicy:
+  enabled: false
+
+test:
+  image: curlimages/curl:8.23.0
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    memory: 512Mi
+
+podAnnotations: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}

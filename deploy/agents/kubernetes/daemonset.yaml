@@ -1,0 +1,87 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: zedr-agent
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: zedr-agent-enrollment
+  namespace: zedr-agent
+type: Opaque
+stringData:
+  server-url: https://zedr.example.com
+  enrollment-key: zedr_fleet_replace_with_your_token
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: zedr-agent
+  namespace: zedr-agent
+  labels:
+    app.kubernetes.io/name: zedr-agent
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: zedr-agent
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: zedr-agent
+    spec:
+      hostPID: true
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      automountServiceAccountToken: false
+      priorityClassName: system-node-critical
+      terminationGracePeriodSeconds: 30
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: zedr-agent
+          image: ghcr.io/forefy/zedr-agent:0.1.0
+          securityContext:
+            privileged: true
+          env:
+            - name: ZEDR_SERVER_URL
+              valueFrom:
+                secretKeyRef:
+                  name: zedr-agent-enrollment
+                  key: server-url
+            - name: ZEDR_ENROLLMENT_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: zedr-agent-enrollment
+                  key: enrollment-key
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              memory: 128Mi
+          volumeMounts:
+            - name: state
+              mountPath: /var/lib/zedr
+            - name: systemd
+              mountPath: /run/systemd
+              readOnly: true
+            - name: os-release
+              mountPath: /etc/os-release
+              readOnly: true
+      volumes:
+        - name: state
+          hostPath:
+            path: /var/lib/zedr
+            type: DirectoryOrCreate
+        - name: systemd
+          hostPath:
+            path: /run/systemd
+            type: DirectoryOrCreate
+        - name: os-release
+          hostPath:
+            path: /etc/os-release
+            type: File

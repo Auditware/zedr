@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "zedr.fullname" . }}
+  labels:
+    {{- include "zedr.labels" . | nindent 4 }}
+  {{- with .Values.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.type }}
+  {{- if ne .Values.service.type "ClusterIP" }}
+  externalTrafficPolicy: {{ .Values.service.externalTrafficPolicy }}
+  {{- end }}
+  selector:
+    {{- include "zedr.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: https
+      port: {{ .Values.service.port }}
+      targetPort: https
+      protocol: TCP

@@ -1,0 +1,16 @@
+{{- if eq .Values.tls.mode "certManager" }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "zedr.fullname" . }}
+  labels:
+    {{- include "zedr.labels" . | nindent 4 }}
+spec:
+  secretName: {{ include "zedr.tlsSecretName" . }}
+  dnsNames:
+    - {{ include "zedr.serverHostname" . | quote }}
+  issuerRef:
+    name: {{ required "tls.certManager.issuerRef.name is required when tls.mode=certManager" .Values.tls.certManager.issuerRef.name }}
+    kind: {{ .Values.tls.certManager.issuerRef.kind }}
+    group: {{ .Values.tls.certManager.issuerRef.group }}
+{{- end }}

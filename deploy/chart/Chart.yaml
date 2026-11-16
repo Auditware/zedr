@@ -1,0 +1,12 @@
+apiVersion: v2
+name: zedr
+description: zedr control server, the fleet console and agent endpoint of the zedr EDR.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.27.0-0"
+home: https://github.com/forefy/zedr
+sources:
+  - https://github.com/forefy/zedr
+maintainers:
+  - name: forefy

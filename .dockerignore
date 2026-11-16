@@ -1,0 +1,14 @@
+*
+
+!protocol
+!control_server/backend/Cargo.toml
+!control_server/backend/Cargo.lock
+!control_server/backend/src
+!control_server/backend/migrations
+!control_server/backend/binaries
+!control_server/frontend
+
+**/target
+**/node_modules
+**/dist
+**/.DS_Store

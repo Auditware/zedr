@@ -1,0 +1,13 @@
+image:
+  tag: ci
+
+server:
+  url: https://zedr.ci.invalid
+
+secrets:
+  jwtSecret: ci-lint-only
+  adminPassword: ci-lint-only
+  signingKeyHex: "0000000000000000000000000000000000000000000000000000000000000000"
+
+tls:
+  existingSecret: zedr-tls

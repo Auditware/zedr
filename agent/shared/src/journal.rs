@@ -1,0 +1,244 @@
+use std::fs;
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+use zedr_protocol::{ShellCommand, UpgradeCommand};
+
+use crate::identity::replace_private_file;
+
+const JOURNAL_FILE: &str = "accepted-commands.json";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AcceptedCommand {
+    pub nonce: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell_session_id: Option<String>,
+    pub issued_at: u64,
+    pub answered: bool,
+}
+
+pub struct CommandJournal {
+    dir: PathBuf,
+    commands: Vec<AcceptedCommand>,
+}
+
+impl CommandJournal {
+    pub fn open(dir: &Path) -> Result<Self, String> {
+        let commands = match fs::read_to_string(dir.join(JOURNAL_FILE)) {
+            Ok(raw) => serde_json::from_str(&raw)
+                .map_err(|e| format!("Record of accepted commands is corrupt: {}", e))?,
+            Err(e) if e.kind() == ErrorKind::NotFound => Vec::new(),
+            Err(e) => return Err(format!("Failed to read the record of accepted commands: {}", e)),
+        };
+
+        Ok(Self { dir: dir.to_path_buf(), commands })
+    }
+
+    pub fn unanswered(&self) -> Vec<AcceptedCommand> {
+        self.commands.iter().filter(|command| !command.answered).cloned().collect()
+    }
+
+    pub fn accept_shell(&mut self, command: &ShellCommand, now: u64) -> Result<(), String> {
+        self.accept(
+            AcceptedCommand {
+                nonce: command.nonce.clone(),
+                shell_session_id: Some(command.session_id.clone()),
+                issued_at: command.issued_at,
+                answered: false,
+            },
+            now,
+        )
+    }
+
+    pub fn accept_upgrade(&mut self, command: &UpgradeCommand, now: u64) -> Result<(), String> {
+        self.accept(
+            AcceptedCommand {
+                nonce: command.nonce.clone(),
+                shell_session_id: None,
+                issued_at: command.issued_at,
+                answered: true,
+            },
+            now,
+        )
+    }
+
+    fn accept(&mut self, command: AcceptedCommand, now: u64) -> Result<(), String> {
+        if self.commands.iter().any(|accepted| accepted.nonce == command.nonce) {
+            return Err("Command was already accepted by this agent".to_string());
+        }
+
+        let nonce = command.nonce.clone();
+        self.commands.push(command);
+
+        let written = self.persist(now);
+        if written.is_err() {
+            self.commands.retain(|accepted| accepted.nonce != nonce);
+        }
+        written
+    }
+
+    pub fn answered(&mut self, nonce: &str, now: u64) -> Result<(), String> {
+        match self.commands.iter_mut().find(|command| command.nonce == nonce && !command.answered) {
+            Some(command) => {
+                command.answered = true;
+                self.persist(now)
+            }
+            None => Ok(()),
+        }
+    }
+
+    fn persist(&mut self, now: u64) -> Result<(), String> {
+        self.commands.retain(|command| !(command.answered && crate::command_expired(command.issued_at, now)));
+
+        let encoded = serde_json::to_vec(&self.commands)
+            .map_err(|e| format!("Failed to encode the record of accepted commands: {}", e))?;
+        replace_private_file(&self.dir, JOURNAL_FILE, "record of accepted commands", &encoded)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ISSUED_AT: u64 = 1_794_780_000;
+
+    fn state_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("zedr-journal-{}-{}", std::process::id(), name));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn command(nonce: &str, issued_at: u64) -> ShellCommand {
+        ShellCommand {
+            session_id: format!("session-of-{}", nonce),
+            agent_id: "agent-a".to_string(),
+            command_text: "whoami".to_string(),
+            signature: Vec::new(),
+            issued_at,
+            nonce: nonce.to_string(),
+        }
+    }
+
+    fn upgrade(nonce: &str, issued_at: u64) -> UpgradeCommand {
+        UpgradeCommand {
+            agent_id: "agent-a".to_string(),
+            target_version: "0.2.0".to_string(),
+            signature: Vec::new(),
+            issued_at,
+            nonce: nonce.to_string(),
+        }
+    }
+
+    fn nonces(commands: &[AcceptedCommand]) -> Vec<&str> {
+        commands.iter().map(|command| command.nonce.as_str()).collect()
+    }
+
+    #[test]
+    fn test_accepted_command_is_refused_by_the_process_that_comes_after() {
+        let dir = state_dir("restart");
+        let mut journal = CommandJournal::open(&dir).unwrap();
+        assert_eq!(journal.accept_shell(&command("n-1", ISSUED_AT), ISSUED_AT + 1), Ok(()));
+
+        let mut after_restart = CommandJournal::open(&dir).unwrap();
+        let refused = after_restart.accept_shell(&command("n-1", ISSUED_AT), ISSUED_AT + 2).unwrap_err();
+        assert!(refused.contains("already accepted"), "{}", refused);
+        assert_eq!(after_restart.accept_shell(&command("n-2", ISSUED_AT), ISSUED_AT + 2), Ok(()));
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_commands_without_an_answer_are_known_after_a_restart_with_their_session() {
+        let dir = state_dir("unanswered");
+        let mut journal = CommandJournal::open(&dir).unwrap();
+        for nonce in ["n-1", "n-2", "n-3"] {
+            journal.accept_shell(&command(nonce, ISSUED_AT), ISSUED_AT).unwrap();
+        }
+        journal.answered("n-2", ISSUED_AT + 5).unwrap();
+        journal.answered("unknown", ISSUED_AT + 5).unwrap();
+
+        let after_restart = CommandJournal::open(&dir).unwrap();
+        let unanswered = after_restart.unanswered();
+        assert_eq!(nonces(&unanswered), vec!["n-1", "n-3"]);
+        assert_eq!(unanswered[0].shell_session_id.as_deref(), Some("session-of-n-1"));
+        assert_eq!(unanswered[0].issued_at, ISSUED_AT);
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_answered_command_is_forgotten_once_it_has_expired_and_an_unanswered_one_is_kept() {
+        let dir = state_dir("forgotten");
+        let mut journal = CommandJournal::open(&dir).unwrap();
+        journal.accept_shell(&command("answered", ISSUED_AT), ISSUED_AT).unwrap();
+        journal.accept_shell(&command("unanswered", ISSUED_AT), ISSUED_AT).unwrap();
+        journal.answered("answered", ISSUED_AT + 1).unwrap();
+
+        journal.accept_shell(&command("at-the-limit", ISSUED_AT + 300), ISSUED_AT + 300).unwrap();
+        assert!(journal.accept_shell(&command("answered", ISSUED_AT), ISSUED_AT + 300).is_err(), "kept for as long as the command would be accepted");
+
+        journal.accept_shell(&command("later", ISSUED_AT + 301), ISSUED_AT + 301).unwrap();
+        let after_restart = CommandJournal::open(&dir).unwrap();
+        assert_eq!(nonces(&after_restart.commands), vec!["unanswered", "at-the-limit", "later"]);
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_accepted_upgrade_command_is_refused_after_a_restart_and_needs_no_answer() {
+        let dir = state_dir("upgrade");
+        let mut journal = CommandJournal::open(&dir).unwrap();
+        assert_eq!(journal.accept_upgrade(&upgrade("u-1", ISSUED_AT), ISSUED_AT + 1), Ok(()));
+        journal.accept_shell(&command("n-1", ISSUED_AT), ISSUED_AT + 1).unwrap();
+
+        let mut after_restart = CommandJournal::open(&dir).unwrap();
+        let refused = after_restart.accept_upgrade(&upgrade("u-1", ISSUED_AT), ISSUED_AT + 2).unwrap_err();
+        assert!(refused.contains("already accepted"), "{}", refused);
+        assert_eq!(nonces(&after_restart.unanswered()), vec!["n-1"]);
+
+        after_restart.accept_shell(&command("later", ISSUED_AT + 301), ISSUED_AT + 301).unwrap();
+        assert_eq!(nonces(&after_restart.commands), vec!["n-1", "later"], "forgotten once it has expired");
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_command_that_cannot_be_recorded_is_not_accepted() {
+        let dir = state_dir("unwritable");
+        let mut journal = CommandJournal::open(&dir).unwrap();
+        fs::remove_dir_all(&dir).unwrap();
+
+        let refused = journal.accept_shell(&command("n-1", ISSUED_AT), ISSUED_AT).unwrap_err();
+        assert!(refused.contains("record of accepted commands"), "{}", refused);
+        assert!(journal.commands.is_empty());
+    }
+
+    #[test]
+    fn test_record_that_cannot_be_read_is_an_error() {
+        let dir = state_dir("corrupt");
+        fs::write(dir.join(JOURNAL_FILE), "[{\"nonce\":").unwrap();
+
+        let refused = CommandJournal::open(&dir).err().unwrap();
+        assert!(refused.contains("corrupt"), "{}", refused);
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_record_is_readable_by_its_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = state_dir("permissions");
+        let mut journal = CommandJournal::open(&dir).unwrap();
+        journal.accept_shell(&command("n-1", ISSUED_AT), ISSUED_AT).unwrap();
+
+        let mode = fs::metadata(dir.join(JOURNAL_FILE)).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        assert!(!dir.join(format!("{}.tmp", JOURNAL_FILE)).exists());
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+}

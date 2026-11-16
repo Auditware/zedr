@@ -1,0 +1,22 @@
+# Rust build artifacts
+/target/
+**/target/
+
+# Debug symbols
+*.pdb
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+
+# Test artifacts
+*.profraw
+*.profdata
+
+*.iso

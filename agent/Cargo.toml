@@ -1,0 +1,30 @@
+[workspace]
+members = [
+    "shared",
+    "linux",
+    "macos",
+    "windows",
+]
+
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["zedr contributors"]
+license = "MIT"
+
+[workspace.dependencies]
+zedr-protocol = { path = "../protocol" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.35", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

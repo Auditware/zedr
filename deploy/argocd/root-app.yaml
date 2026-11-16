@@ -1,0 +1,45 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: zedr
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: zedr
+  source:
+    repoURL: ghcr.io/forefy/charts
+    chart: zedr
+    # Move this pin to take a release. Never use a range.
+    targetRevision: 0.1.0
+    helm:
+      valuesObject:
+        server:
+          # Required. Rendering fails while this is empty.
+          url: ""
+          # Required by bootstrap.sh. The CIDRs your operators connect from.
+          adminAllowedCidrs: []
+        imagePullSecrets:
+          - name: ghcr-pull
+        secrets:
+          mode: existing
+          existingSecret: zedr-secrets
+        tls:
+          mode: existingSecret
+          existingSecret: zedr-tls
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: zedr
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+  # Kubernetes fills in defaults on volumeClaimTemplates, which would otherwise read as permanent drift.
+  ignoreDifferences:
+    - group: apps
+      kind: StatefulSet
+      jsonPointers:
+        - /spec/volumeClaimTemplates

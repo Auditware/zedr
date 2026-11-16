@@ -1,0 +1,35 @@
+.react-flow.dark {
+  --xy-background-color-default: transparent;
+  --xy-background-pattern-dots-color-default: var(--color-line);
+  --xy-edge-stroke-default: var(--color-line-strong);
+  --xy-minimap-background-color-default: var(--color-surface);
+  --xy-minimap-mask-background-color-default: color-mix(in srgb, var(--color-ink) 72%, transparent);
+  --xy-minimap-mask-stroke-color-default: var(--color-line-hover);
+  --xy-minimap-mask-stroke-width-default: 1;
+  --xy-controls-button-background-color-default: var(--color-surface);
+  --xy-controls-button-background-color-hover-default: var(--color-raised);
+  --xy-controls-button-color-default: var(--color-soft);
+  --xy-controls-button-color-hover-default: var(--color-text);
+  --xy-controls-button-border-color-default: var(--color-line);
+  --xy-controls-box-shadow-default: none;
+}
+
+.react-flow__pane {
+  cursor: grab;
+}
+
+.react-flow__pane.dragging {
+  cursor: grabbing;
+}
+
+.react-flow__controls,
+.react-flow__minimap {
+  overflow: hidden;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-control);
+}
+
+.react-flow__controls-button {
+  width: 30px;
+  height: 30px;
+}

@@ -1,0 +1,23 @@
+zedr control server {{ .Chart.AppVersion }} is installed as "{{ .Release.Name }}".
+
+1. Point DNS for {{ include "zedr.serverHostname" . }} at the address of the Service:
+
+     kubectl -n {{ .Release.Namespace }} get service {{ include "zedr.fullname" . }}
+
+2. Check it:
+
+     curl -fsS {{ include "zedr.serverUrl" . }}/readyz
+     helm -n {{ .Release.Namespace }} test {{ .Release.Name }}
+
+3. Back up ZEDR_SIGNING_KEY_HEX from the Secret "{{ include "zedr.secretName" . }}" outside the cluster.
+   Deployed agents trust only this key. If it is lost or rotated, every agent has to be reinstalled.
+{{- if not .Values.server.adminAllowedCidrs }}
+
+WARNING: server.adminAllowedCidrs is empty, so the console and the admin API accept connections from any address.
+{{- end }}
+{{- if eq .Values.tls.mode "certManager" }}
+
+The server reads its certificate at startup. After cert-manager renews it, restart the pod:
+
+     kubectl -n {{ .Release.Namespace }} rollout restart statefulset/{{ include "zedr.fullname" . }}
+{{- end }}

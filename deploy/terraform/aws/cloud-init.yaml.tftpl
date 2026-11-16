@@ -1,0 +1,31 @@
+#cloud-config
+ssh_pwauth: false
+
+write_files:
+  - path: /opt/zedr/appproject.yaml
+    encoding: b64
+    permissions: "0644"
+    content: ${appproject_b64}
+  - path: /opt/zedr/root-app.yaml
+    encoding: b64
+    permissions: "0644"
+    content: ${root_app_b64}
+  - path: /opt/zedr/bootstrap.sh
+    encoding: b64
+    permissions: "0755"
+    content: ${bootstrap_b64}
+  - path: /etc/motd
+    permissions: "0644"
+    content: |
+
+      zedr control server host. k3s is installed. The ArgoCD bootstrap is staged in /opt/zedr and has not run.
+
+        1. sudoedit /opt/zedr/root-app.yaml    set server.url and server.adminAllowedCidrs
+        2. create the zedr-secrets and zedr-tls Secrets in the zedr namespace with sudo kubectl
+        3. sudo /opt/zedr/bootstrap.sh         asks for the registry username and token
+        4. sudo kubectl -n argocd get application zedr -w
+
+runcmd:
+  # Traefik is disabled because the k3s service load balancer can give port 443 to one Service only.
+  - curl -sfL https://get.k3s.io -o /run/k3s-install.sh
+  - INSTALL_K3S_VERSION='${k3s_version}' sh /run/k3s-install.sh --secrets-encryption --disable-cloud-controller --disable traefik

@@ -1,0 +1,11 @@
+[package]
+name = "zedr-agent-macos"
+version = "0.1.0"
+edition = "2021"
+authors = ["zedr contributors"]
+description = "Zero-knowledge Endpoint Detection & Response Agent for macOS"
+license = "MIT"
+
+[dependencies]
+zedr-agent-shared = { path = "../shared" }
+libc = "0.2"

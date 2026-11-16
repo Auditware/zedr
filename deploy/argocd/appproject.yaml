@@ -1,0 +1,27 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: zedr
+  namespace: argocd
+spec:
+  description: zedr control server
+  sourceRepos:
+    - ghcr.io/forefy/charts
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: zedr
+  # CreateNamespace=true makes ArgoCD create the destination Namespace, which is cluster scoped.
+  clusterResourceWhitelist:
+    - group: ""
+      kind: Namespace
+  namespaceResourceWhitelist:
+    - group: apps
+      kind: StatefulSet
+    - group: ""
+      kind: Service
+    - group: ""
+      kind: Secret
+    - group: networking.k8s.io
+      kind: NetworkPolicy
+    - group: cert-manager.io
+      kind: Certificate

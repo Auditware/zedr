@@ -1,0 +1,102 @@
+@import "tailwindcss";
+
+@theme static {
+  --font-sans: "Inter Variable", system-ui, sans-serif;
+  --font-display: "Inter Variable", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, monospace;
+
+  --color-ink: #1c2126;
+  --color-rail: #151a1f;
+  --color-sunken: #11171c;
+  --color-row: #23282e;
+  --color-surface: #262c32;
+  --color-raised: #30363c;
+  --color-selected: #3a4046;
+  --color-chip: #353b41;
+  --color-hairline: #2d3238;
+  --color-line: #393f45;
+  --color-line-strong: #50565c;
+  --color-line-hover: #72787f;
+  --color-text: #f2f6f9;
+  --color-soft: #d6dbe1;
+  --color-muted: #aeb5bc;
+  --color-faint: #80878e;
+  --color-accent: #eef2f7;
+  --color-accent-strong: #ffffff;
+  --color-node: #8f969d;
+  --color-warn: #f5c04e;
+  --color-warn-surface: #3a3018;
+  --color-alert: #ff4a55;
+  --color-alert-soft: #ffa1a4;
+  --color-alert-surface: #3c1b20;
+  --color-alert-line: #85303a;
+  --color-steel: #a4c0dc;
+  --color-mauve: #bcaed4;
+  --color-sage: #96c4b2;
+
+  --radius-md: 4px;
+  --radius-lg: 5px;
+  --radius-xl: 6px;
+  --radius-control: 6px;
+  --radius-card: 10px;
+
+  --animate-pulse-ring: pulse-ring 1.8s ease-out infinite;
+  --animate-blink: blink 2s ease-in-out infinite;
+
+  @keyframes pulse-ring {
+    0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-alert) 60%, transparent); }
+    100% { box-shadow: 0 0 0 14px transparent; }
+  }
+  @keyframes blink {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.35; }
+  }
+}
+
+html, body, #root {
+  height: 100%;
+}
+
+html {
+  background: var(--color-rail);
+}
+
+body {
+  margin: 0;
+  overflow: hidden;
+  background: var(--color-ink);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+}
+
+button {
+  cursor: pointer;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+:where(input, textarea):focus-visible {
+  outline: none;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--color-text) 20%, transparent);
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-line-strong) transparent;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    transition-duration: 0.001ms !important;
+  }
+}

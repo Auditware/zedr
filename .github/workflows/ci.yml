@@ -1,0 +1,51 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Provide the env file the Makefile includes
+        run: cp secrets/.env.local.example secrets/.env.local
+
+      - name: Protocol, agent and control server tests
+        run: make test
+
+  console:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: control_server/frontend
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: control_server/frontend/package-lock.json
+
+      - run: npm ci
+
+      - run: npm test
+
+      - run: npm run build
+
+  chart:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v5.1.0
+        with:
+          version: v4.3.0
+
+      - run: helm lint deploy/chart --values deploy/chart/ci/ci-values.yaml
