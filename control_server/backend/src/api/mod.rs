@@ -6,6 +6,7 @@ use tower_http::services::{ServeDir, ServeFile};
 use utoipa::{OpenApi, ToSchema};
 use std::path::PathBuf;
 use std::sync::Arc;
+use crate::proofs::{ReceiptVerifier, Risc0Verifier};
 use crate::signing::SigningService;
 
 pub mod admin;
@@ -26,13 +27,15 @@ pub struct AppState {
     pub timeout_manager: Option<Arc<crate::HeartbeatTimeoutManager>>,
     pub signing_service: Arc<SigningService>,
     pub operator_allowlist: Arc<Vec<IpNet>>,
-    pub detections: Arc<tokio::sync::Mutex<crate::detections::Tracker>>,
+    pub receipt_verifier: Arc<dyn ReceiptVerifier>,
 }
 
 #[derive(Default)]
 pub struct RouterOptions {
     pub operator_allowlist: Vec<IpNet>,
     pub frontend_dist: Option<PathBuf>,
+    /// Checks proof receipts in place of the one built from ZEDR_GUEST_IMAGE_IDS
+    pub receipt_verifier: Option<Arc<dyn ReceiptVerifier>>,
 }
 
 impl RouterOptions {
@@ -44,6 +47,7 @@ impl RouterOptions {
         Self {
             operator_allowlist,
             frontend_dist: std::env::var("ZEDR_FRONTEND_DIST").ok().map(PathBuf::from),
+            receipt_verifier: None,
         }
     }
 }
@@ -86,9 +90,14 @@ pub struct SystemEventBroadcast {
         health::health_check,
         ingestion::register::register_agent,
         ingestion::events::ingest_events,
+        ingestion::windows::ingest_window,
+        ingestion::proofs::submit_proof,
         admin::agents::list_agents,
         admin::agents::get_agent,
         admin::agents::stream_agents,
+        admin::chain::agent_chain,
+        admin::chain::agent_window,
+        admin::chain::ruleset,
         admin::events::list_events,
         admin::events::event_stats,
         admin::events::event_histogram,
@@ -125,6 +134,15 @@ pub struct SystemEventBroadcast {
             zedr_protocol::AgentRegistrationResponse,
             zedr_protocol::DetectionEvent,
             zedr_protocol::SystemEvent,
+            zedr_protocol::SealedWindow,
+            zedr_protocol::SealedWindowHeader,
+            zedr_protocol::SealedEvent,
+            zedr_protocol::Release,
+            zedr_protocol::Opening,
+            zedr_protocol::SealedWindowAck,
+            zedr_protocol::ChainPosition,
+            zedr_protocol::ProofSubmission,
+            zedr_protocol::ProofAck,
             crate::db::models::Agent,
             crate::db::models::Event,
             crate::incidents::Incident,
@@ -138,6 +156,15 @@ pub struct SystemEventBroadcast {
             crate::api::AgentEvent,
             HealthResponse,
             admin::agents::ListQuery,
+            admin::chain::ChainQuery,
+            admin::chain::ChainView,
+            admin::chain::ChainTotals,
+            admin::chain::WindowSummary,
+            admin::chain::WindowView,
+            admin::chain::SealedEventView,
+            admin::chain::ReleaseView,
+            admin::chain::RulesetView,
+            admin::chain::RuleView,
             admin::events::EventsQuery,
             admin::events::EventStats,
             admin::events::HistogramQuery,
@@ -229,6 +256,13 @@ fn build_router(
     options: RouterOptions,
 ) -> Router {
     let signing_service = Arc::new(SigningService::from_env().expect("Failed to initialize signing service"));
+    let receipt_verifier = options.receipt_verifier.unwrap_or_else(|| {
+        let verifier = Risc0Verifier::from_env().expect("ZEDR_GUEST_IMAGE_IDS must be a comma-separated list of 64 hex character image IDs");
+        if verifier.image_ids().is_empty() {
+            tracing::warn!("ZEDR_GUEST_IMAGE_IDS names no rule program, no proof can be accepted");
+        }
+        Arc::new(verifier)
+    });
 
     let state = AppState {
         pool,
@@ -237,7 +271,7 @@ fn build_router(
         timeout_manager,
         signing_service,
         operator_allowlist: Arc::new(options.operator_allowlist),
-        detections: Arc::default(),
+        receipt_verifier,
     };
 
     create_router_with_appstate(state, options.frontend_dist)
@@ -247,6 +281,9 @@ fn create_router_with_appstate(state: AppState, frontend_dist: Option<PathBuf>) 
     let protected = Router::new()
         .route("/api/admin/agents", get(admin::agents::list_agents))
         .route("/api/admin/agents/:id", get(admin::agents::get_agent))
+        .route("/api/admin/agents/:id/chain", get(admin::chain::agent_chain))
+        .route("/api/admin/agents/:id/windows/:window", get(admin::chain::agent_window))
+        .route("/api/admin/ruleset", get(admin::chain::ruleset))
         .route("/api/admin/events", get(admin::events::list_events))
         .route("/api/admin/events/stats", get(admin::events::event_stats))
         .route("/api/admin/events/histogram", get(admin::events::event_histogram))
@@ -297,6 +334,11 @@ fn create_router_with_appstate(state: AppState, frontend_dist: Option<PathBuf>) 
             "/api/events",
             post(ingestion::events::ingest_events).layer(DefaultBodyLimit::max(zedr_protocol::MAX_EVENT_BATCH_BYTES)),
         )
+        .route(
+            "/api/windows",
+            post(ingestion::windows::ingest_window).layer(DefaultBodyLimit::max(ingestion::windows::MAX_WINDOW_BYTES)),
+        )
+        .route("/api/proofs", post(ingestion::proofs::submit_proof))
         .route("/api/auth/login", post(auth::login))
         .route("/api/auth/login/mfa", post(auth::login_mfa))
         .route("/api/admin/agents/stream", get(admin::agents::stream_agents))

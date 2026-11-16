@@ -1,9 +1,9 @@
 use serde::Serialize;
-use sqlx::{Row, SqlitePool};
-use zedr_protocol::{InventoryAction, PackageManager, PersistenceKind, ProcessAction, SystemEvent};
+use sqlx::{Row, SqliteExecutor, SqlitePool};
+use zedr_protocol::{InventoryAction, PackageManager, PersistenceKind, ProcessAction, ProcessEvent, SensorEvent};
+use zedr_rules::base_name;
 use utoipa::ToSchema;
 
-use crate::detections::Described;
 use crate::error::Result;
 
 const ROW_LIMIT: i64 = 500;
@@ -712,24 +712,49 @@ pub async fn run(pool: &SqlitePool, query: &Query) -> Result<std::result::Result
     }))
 }
 
-pub async fn index(pool: &SqlitePool, agent_id: &str, event: &SystemEvent, described: Option<&Described>) -> Result<()> {
+/// A process as the opened events of a release describe it
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Described {
+    pub name: String,
+    pub path: String,
+    pub command: String,
+    pub parent_name: Option<String>,
+    pub parent_path: Option<String>,
+    pub started_at: u64,
+}
+
+impl Described {
+    pub fn new(process: &ProcessEvent, parent: Option<&ProcessEvent>, started_at: u64) -> Self {
+        Described {
+            name: base_name(&process.executable_path),
+            path: process.executable_path.clone(),
+            command: process.command_line.join(" "),
+            parent_name: parent.map(|parent| base_name(&parent.executable_path)),
+            parent_path: parent.map(|parent| parent.executable_path.clone()),
+            started_at,
+        }
+    }
+}
+
+/// Adds one opened event to the hunt index. `described` is the process itself for a process event and the process it belongs to for a connection or a file
+pub async fn index<'e>(executor: impl SqliteExecutor<'e>, agent_id: &str, event: &SensorEvent, described: Option<&Described>) -> Result<()> {
     match event {
-        SystemEvent::Process(process) if matches!(process.action, ProcessAction::Terminate) => {
+        SensorEvent::Process(process) if matches!(process.action, ProcessAction::Terminate) => {
             sqlx::query("UPDATE hunt_processes SET ended_at = ? WHERE agent_id = ? AND pid = ? AND ended_at IS NULL")
                 .bind(process.timestamp as i64)
                 .bind(agent_id)
                 .bind(process.pid)
-                .execute(pool)
+                .execute(executor)
                 .await?;
         }
-        SystemEvent::Process(process) => {
+        SensorEvent::Process(process) => {
             let Some(described) = described else {
                 return Ok(());
             };
             sqlx::query(
                 "INSERT OR REPLACE INTO hunt_processes
-                 (agent_id, pid, started_at, name, path, command, uid, parent_pid, parent_name, parent_path, grandparent_name)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                 (agent_id, pid, started_at, name, path, command, uid, parent_pid, parent_name, parent_path)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(agent_id)
             .bind(process.pid)
@@ -741,11 +766,10 @@ pub async fn index(pool: &SqlitePool, agent_id: &str, event: &SystemEvent, descr
             .bind(process.ppid)
             .bind(&described.parent_name)
             .bind(&described.parent_path)
-            .bind(&described.grandparent_name)
-            .execute(pool)
+            .execute(executor)
             .await?;
         }
-        SystemEvent::Network(connection) => {
+        SensorEvent::Network(connection) => {
             sqlx::query(
                 "INSERT INTO hunt_connections (agent_id, pid, process_name, process_started_at, dest_ip, dest_port, protocol, bytes, at)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -759,10 +783,10 @@ pub async fn index(pool: &SqlitePool, agent_id: &str, event: &SystemEvent, descr
             .bind(&connection.protocol)
             .bind((connection.bytes_sent + connection.bytes_received) as i64)
             .bind(connection.timestamp as i64)
-            .execute(pool)
+            .execute(executor)
             .await?;
         }
-        SystemEvent::File(file) => {
+        SensorEvent::File(file) => {
             sqlx::query(
                 "INSERT INTO hunt_files (agent_id, pid, process_name, process_started_at, path, action, at)
                  VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -774,19 +798,19 @@ pub async fn index(pool: &SqlitePool, agent_id: &str, event: &SystemEvent, descr
             .bind(&file.path)
             .bind(format!("{:?}", file.action))
             .bind(file.timestamp as i64)
-            .execute(pool)
+            .execute(executor)
             .await?;
         }
-        SystemEvent::Package(package) if matches!(package.action, InventoryAction::Removed) => {
+        SensorEvent::Package(package) if matches!(package.action, InventoryAction::Removed) => {
             sqlx::query("DELETE FROM hunt_packages WHERE agent_id = ? AND manager = ? AND name = ? AND architecture = ?")
                 .bind(agent_id)
                 .bind(manager_name(package.manager))
                 .bind(&package.name)
                 .bind(&package.architecture)
-                .execute(pool)
+                .execute(executor)
                 .await?;
         }
-        SystemEvent::Package(package) => {
+        SensorEvent::Package(package) => {
             sqlx::query(
                 "INSERT OR REPLACE INTO hunt_packages (agent_id, manager, name, architecture, version, version_key, previous_version, seen_at)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -799,19 +823,19 @@ pub async fn index(pool: &SqlitePool, agent_id: &str, event: &SystemEvent, descr
             .bind(version_key(&package.version))
             .bind(&package.previous_version)
             .bind(package.timestamp as i64)
-            .execute(pool)
+            .execute(executor)
             .await?;
         }
-        SystemEvent::Persistence(item) if matches!(item.action, InventoryAction::Removed) => {
+        SensorEvent::Persistence(item) if matches!(item.action, InventoryAction::Removed) => {
             sqlx::query("DELETE FROM hunt_persistence WHERE agent_id = ? AND kind = ? AND path = ? AND name = ?")
                 .bind(agent_id)
                 .bind(kind_name(item.kind))
                 .bind(&item.path)
                 .bind(&item.name)
-                .execute(pool)
+                .execute(executor)
                 .await?;
         }
-        SystemEvent::Persistence(item) => {
+        SensorEvent::Persistence(item) => {
             sqlx::query(
                 "INSERT OR REPLACE INTO hunt_persistence (agent_id, kind, path, name, command, user, enabled, hash, seen_at)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -825,10 +849,9 @@ pub async fn index(pool: &SqlitePool, agent_id: &str, event: &SystemEvent, descr
             .bind(item.enabled)
             .bind(&item.hash)
             .bind(item.timestamp as i64)
-            .execute(pool)
+            .execute(executor)
             .await?;
         }
-        _ => {}
     }
     Ok(())
 }

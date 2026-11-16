@@ -1,6 +1,6 @@
 use chrono::Utc;
 use serde::Serialize;
-use sqlx::SqlitePool;
+use sqlx::{SqliteConnection, SqliteExecutor, SqlitePool};
 use tokio::sync::broadcast;
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -12,6 +12,13 @@ pub const SILENCE: &str = "silence";
 pub const SERVICE_STOPPED: &str = "service_stopped";
 pub const REPLAY: &str = "replay";
 pub const IDENTITY_CONFLICT: &str = "identity_conflict";
+pub const CHAIN_FORK: &str = "chain_fork";
+pub const CHAIN_GAP: &str = "chain_gap";
+pub const RELEASE_INVALID: &str = "release_invalid";
+pub const PROOF_INVALID: &str = "proof_invalid";
+pub const MATCH_NOT_RELEASED: &str = "match_not_released";
+pub const RELEASE_NOT_PROVEN: &str = "release_not_proven";
+pub const PROOF_OVERDUE: &str = "proof_overdue";
 
 #[derive(Debug, Clone, Serialize, sqlx::FromRow, ToSchema)]
 pub struct Incident {
@@ -23,13 +30,8 @@ pub struct Incident {
     pub closed_at: Option<i64>,
 }
 
-pub async fn record_event(
-    pool: &SqlitePool,
-    events_tx: &broadcast::Sender<SystemEventBroadcast>,
-    agent_id: Option<&str>,
-    event_type: &str,
-    data: serde_json::Value,
-) -> Result<()> {
+/// Stores an event the server itself tells, and returns what to send the listeners once it is committed
+pub async fn insert_event<'e>(executor: impl SqliteExecutor<'e>, agent_id: Option<&str>, event_type: &str, data: serde_json::Value) -> Result<SystemEventBroadcast> {
     let id = Uuid::new_v4().to_string();
     let now = Utc::now().timestamp();
     let mut data = data;
@@ -48,28 +50,32 @@ pub async fn record_event(
     .bind(now)
     .bind(&data)
     .bind(now)
-    .execute(pool)
+    .execute(executor)
     .await?;
 
-    let _ = events_tx.send(SystemEventBroadcast {
+    Ok(SystemEventBroadcast {
         id,
         agent_id: agent_id.map(str::to_string).unwrap_or_default(),
         event_type: event_type.to_string(),
         timestamp: now,
         data,
         received_at: now,
-    });
+    })
+}
 
+pub async fn record_event(
+    pool: &SqlitePool,
+    events_tx: &broadcast::Sender<SystemEventBroadcast>,
+    agent_id: Option<&str>,
+    event_type: &str,
+    data: serde_json::Value,
+) -> Result<()> {
+    let _ = events_tx.send(insert_event(pool, agent_id, event_type, data).await?);
     Ok(())
 }
 
-pub async fn open(
-    pool: &SqlitePool,
-    events_tx: &broadcast::Sender<SystemEventBroadcast>,
-    agent_id: &str,
-    incident_type: &str,
-    evidence: serde_json::Value,
-) -> Result<bool> {
+/// Opens an incident inside the caller's transaction, and returns what to send the listeners once it is committed. `None` when one of this type is already open
+pub async fn open_within(conn: &mut SqliteConnection, agent_id: &str, incident_type: &str, evidence: serde_json::Value) -> Result<Option<SystemEventBroadcast>> {
     let id = Uuid::new_v4().to_string();
 
     let opened = sqlx::query(
@@ -82,26 +88,44 @@ pub async fn open(
     .bind(incident_type)
     .bind(evidence.to_string())
     .bind(Utc::now().timestamp())
-    .execute(pool)
+    .execute(&mut *conn)
     .await?
     .rows_affected()
         > 0;
 
-    if opened {
-        record_event(
-            pool,
-            events_tx,
-            Some(agent_id),
-            "incident_opened",
-            serde_json::json!({
-                "incident_id": id,
-                "incident_type": incident_type,
-                "evidence": evidence,
-            }),
-        )
-        .await?;
+    if !opened {
+        return Ok(None);
     }
 
+    let recorded = insert_event(
+        &mut *conn,
+        Some(agent_id),
+        "incident_opened",
+        serde_json::json!({
+            "incident_id": id,
+            "incident_type": incident_type,
+            "evidence": evidence,
+        }),
+    )
+    .await?;
+    Ok(Some(recorded))
+}
+
+pub async fn open(
+    pool: &SqlitePool,
+    events_tx: &broadcast::Sender<SystemEventBroadcast>,
+    agent_id: &str,
+    incident_type: &str,
+    evidence: serde_json::Value,
+) -> Result<bool> {
+    let mut conn = pool.acquire().await?;
+    let recorded = open_within(&mut conn, agent_id, incident_type, evidence).await?;
+    drop(conn);
+
+    let opened = recorded.is_some();
+    if let Some(recorded) = recorded {
+        let _ = events_tx.send(recorded);
+    }
     Ok(opened)
 }
 

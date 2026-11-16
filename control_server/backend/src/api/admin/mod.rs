@@ -1,6 +1,7 @@
 pub mod agents;
 pub mod api_keys;
 pub mod audit;
+pub mod chain;
 pub mod enrollment_tokens;
 pub mod events;
 pub mod hunt;

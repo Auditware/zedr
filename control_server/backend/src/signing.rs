@@ -59,6 +59,16 @@ impl SigningService {
             .map_err(AppError::InternalError)?;
         Ok(self.signing_key.sign(&signed_bytes))
     }
+
+    pub fn sign_window_ack(&self, agent_id: &str, window: u64, next_index: u64, head: &str) -> Result<Signature> {
+        let signed_bytes = zedr_protocol::window_ack_signing_bytes(agent_id, window, next_index, head).map_err(AppError::InternalError)?;
+        Ok(self.signing_key.sign(&signed_bytes))
+    }
+
+    pub fn sign_chain_position(&self, agent_id: &str, session: u64, seq: u64, next_window: u64, next_index: u64, head: &str) -> Result<Signature> {
+        let signed_bytes = zedr_protocol::chain_position_signing_bytes(agent_id, session, seq, next_window, next_index, head).map_err(AppError::InternalError)?;
+        Ok(self.signing_key.sign(&signed_bytes))
+    }
 }
 
 pub fn sha256(data: &[u8]) -> [u8; 32] {

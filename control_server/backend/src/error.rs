@@ -28,6 +28,9 @@ pub enum AppError {
     #[error("Conflict: {0}")]
     Conflict(String),
 
+    #[error("Unprocessable: {0}")]
+    Unprocessable(String),
+
     #[error("Internal server error: {0}")]
     InternalError(String),
 }
@@ -48,6 +51,7 @@ impl IntoResponse for AppError {
             AppError::Unauthorized => (StatusCode::UNAUTHORIZED, "Unauthorized"),
             AppError::Forbidden => (StatusCode::FORBIDDEN, "Forbidden"),
             AppError::Conflict(ref msg) => (StatusCode::CONFLICT, msg.as_str()),
+            AppError::Unprocessable(ref msg) => (StatusCode::UNPROCESSABLE_ENTITY, msg.as_str()),
             AppError::InternalError(ref msg) => {
                 tracing::error!("Internal server error: {}", msg);
                 (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error")
@@ -63,3 +67,27 @@ impl IntoResponse for AppError {
 }
 
 pub type Result<T, E = AppError> = std::result::Result<T, E>;
+
+/// Why something an agent sent was turned down: for what it says, or because the server failed while reading it
+pub enum Refusal {
+    Invalid(String),
+    Failed(AppError),
+}
+
+impl From<String> for Refusal {
+    fn from(reason: String) -> Self {
+        Refusal::Invalid(reason)
+    }
+}
+
+impl From<AppError> for Refusal {
+    fn from(error: AppError) -> Self {
+        Refusal::Failed(error)
+    }
+}
+
+impl From<sqlx::Error> for Refusal {
+    fn from(error: sqlx::Error) -> Self {
+        Refusal::Failed(error.into())
+    }
+}

@@ -4,6 +4,7 @@ pub mod audit;
 pub mod auth;
 #[cfg(test)]
 pub mod auth_tests;
+pub mod chain;
 pub mod config;
 pub mod db;
 pub mod detections;
@@ -13,6 +14,7 @@ pub mod hunt;
 pub mod incidents;
 pub mod liveness;
 pub mod mfa;
+pub mod proofs;
 pub mod signing;
 pub mod signing_key_guard;
 

@@ -10,6 +10,7 @@ pub struct Config {
     pub tls_cert_path: PathBuf,
     pub tls_key_path: PathBuf,
     pub signing_key_change_accepted: Option<String>,
+    pub proof_deadline_secs: i64,
 }
 
 impl Config {
@@ -31,6 +32,7 @@ impl Config {
             tls_cert_path: PathBuf::from(std::env::var("ZEDR_TLS_CERT_PATH")?),
             tls_key_path: PathBuf::from(std::env::var("ZEDR_TLS_KEY_PATH")?),
             signing_key_change_accepted: std::env::var(crate::signing_key_guard::ACCEPT_CHANGE_ENV).ok(),
+            proof_deadline_secs: crate::proofs::deadline_from_env()?,
         })
     }
 }

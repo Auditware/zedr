@@ -53,6 +53,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ));
     
     zedr_control_server::liveness::spawn_sweeper(pool.clone(), system_events_tx.clone());
+    zedr_control_server::proofs::spawn_sweeper(pool.clone(), system_events_tx.clone(), config.proof_deadline_secs);
 
     let app = api::create_router_with_state_and_timeout_manager(
         pool, 

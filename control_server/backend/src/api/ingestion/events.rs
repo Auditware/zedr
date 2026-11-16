@@ -1,12 +1,12 @@
 use axum::{body::Bytes, extract::State, http::HeaderMap, Json};
 use chrono::Utc;
 use serde::Serialize;
+use sqlx::SqliteExecutor;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use crate::detections::Level;
 use crate::agent_auth;
-use crate::api::AppState;
+use crate::api::{AppState, SystemEventBroadcast};
 use crate::error::{AppError, Result};
 use crate::incidents;
 use crate::liveness;
@@ -34,7 +34,8 @@ pub struct HeartbeatResponse {
         (status = 400, description = "Batch that cannot be read, nothing is stored"),
         (status = 401, description = "Missing or invalid signature, or unknown agent"),
         (status = 409, description = "Replayed or stale request"),
-        (status = 413, description = "Batch larger than MAX_EVENT_BATCH_BYTES, nothing is stored")
+        (status = 413, description = "Batch larger than MAX_EVENT_BATCH_BYTES, nothing is stored"),
+        (status = 422, description = "Batch with a sensor event, which only travels in a sealed window, nothing is stored")
     )
 )]
 pub async fn ingest_events(
@@ -45,109 +46,42 @@ pub async fn ingest_events(
     let batch: EventBatch = serde_json::from_slice(&body)
         .map_err(|e| AppError::BadRequest(format!("Invalid event batch: {}", e)))?;
 
-    authenticate_batch(&state, &batch, &headers, &body).await?;
+    agent_auth::authenticate(&state, "events", &batch.agent_id, batch.session, batch.seq, &headers, &body).await?;
+
+    if batch.events.iter().any(is_sensor_event) {
+        return Err(AppError::Unprocessable("Sensor events are sent in sealed windows".to_string()));
+    }
 
     let mut has_heartbeat = false;
     let received_at = Utc::now().timestamp();
-    
+
     for event in batch.events {
-        let event_id = Uuid::new_v4().to_string();
-        let (event_type, timestamp, data) = match &event {
-            SystemEvent::Process(e) => {
-                ("process", e.timestamp as i64, serde_json::to_string(e).unwrap())
-            }
-            SystemEvent::File(e) => {
-                ("file", e.timestamp as i64, serde_json::to_string(e).unwrap())
-            }
-            SystemEvent::Network(e) => {
-                ("network", e.timestamp as i64, serde_json::to_string(e).unwrap())
-            }
-            SystemEvent::Heartbeat(e) => {
-                has_heartbeat = true;
-                ("heartbeat", e.timestamp as i64, serde_json::to_string(e).unwrap())
-            }
-            SystemEvent::Upgrade(e) => {
-                ("upgrade", e.timestamp as i64, serde_json::to_string(e).unwrap())
-            }
-            SystemEvent::Install(e) => {
-                ("install", e.timestamp as i64, serde_json::to_string(e).unwrap())
-            }
-            SystemEvent::AgentStopping(e) => {
-                ("agent_stopping", e.timestamp as i64, serde_json::to_string(e).unwrap())
-            }
-            SystemEvent::Persistence(e) => {
-                ("persistence", e.timestamp as i64, serde_json::to_string(e).unwrap())
-            }
-            SystemEvent::Package(e) => {
-                ("package", e.timestamp as i64, serde_json::to_string(e).unwrap())
-            }
-        };
-
-        sqlx::query(
-            "INSERT INTO events (id, agent_id, event_type, timestamp, data, received_at)
-             VALUES (?, ?, ?, ?, ?, ?)"
-        )
-        .bind(&event_id)
-        .bind(&batch.agent_id)
-        .bind(event_type)
-        .bind(timestamp)
-        .bind(&data)
-        .bind(received_at)
-        .execute(&state.pool)
-        .await?;
-
-        let _ = state.system_events_tx.send(crate::api::SystemEventBroadcast {
-            id: event_id.clone(),
-            agent_id: batch.agent_id.clone(),
-            event_type: event_type.to_string(),
-            timestamp,
-            data: data.clone(),
-            received_at,
-        });
-
-        let (detections, described) = {
-            let mut tracker = state.detections.lock().await;
-            let detections = tracker.observe(&batch.agent_id, &event);
-            let pid = match &event {
-                SystemEvent::Process(process) => Some(process.pid),
-                SystemEvent::Network(connection) => Some(connection.pid),
-                SystemEvent::File(file) => Some(file.pid),
-                _ => None,
-            };
-            (detections, pid.and_then(|pid| tracker.describe(&batch.agent_id, pid)))
-        };
-        crate::hunt::index(&state.pool, &batch.agent_id, &event, described.as_ref()).await?;
-        for detection in detections {
-            let evidence = detection.evidence();
-            incidents::record_event(&state.pool, &state.system_events_tx, Some(&batch.agent_id), "detection", evidence.clone()).await?;
-            if detection.rule.level == Level::High {
-                incidents::open(&state.pool, &state.system_events_tx, &batch.agent_id, &detection.incident_type(), evidence).await?;
-            }
-        }
+        has_heartbeat |= matches!(event, SystemEvent::Heartbeat(_));
+        let stored = store_event(&state.pool, &batch.agent_id, &event, received_at).await?;
+        let timestamp = stored.timestamp;
+        let _ = state.system_events_tx.send(stored);
 
         // Update upgrade_commands status if this is an upgrade event
-        if event_type == "upgrade" {
-            if let SystemEvent::Upgrade(upgrade_evt) = &event {
-                let status = match upgrade_evt.status {
-                    zedr_protocol::UpgradeStatus::Handoff => "handoff",
-                    zedr_protocol::UpgradeStatus::Completed => "completed",
-                    zedr_protocol::UpgradeStatus::Failed => "failed",
-                    _ => continue,
-                };
-                
-                sqlx::query(
-                    "UPDATE upgrade_commands 
-                     SET status = ?, executed_at = ?, error = ?
-                     WHERE agent_id = ? AND target_version = ? AND status IN ('pending', 'downloaded', 'handoff')"
-                )
-                .bind(status)
-                .bind(timestamp)
-                .bind(&upgrade_evt.error)
-                .bind(&batch.agent_id)
-                .bind(&upgrade_evt.to_version)
-                .execute(&state.pool)
-                .await?;
-            }
+        if let SystemEvent::Upgrade(upgrade_evt) = &event {
+            let status = match upgrade_evt.status {
+                zedr_protocol::UpgradeStatus::Handoff => "handoff",
+                zedr_protocol::UpgradeStatus::Completed => "completed",
+                zedr_protocol::UpgradeStatus::Failed => "failed",
+                _ => continue,
+            };
+
+            sqlx::query(
+                "UPDATE upgrade_commands 
+                 SET status = ?, executed_at = ?, error = ?
+                 WHERE agent_id = ? AND target_version = ? AND status IN ('pending', 'downloaded', 'handoff')"
+            )
+            .bind(status)
+            .bind(timestamp)
+            .bind(&upgrade_evt.error)
+            .bind(&batch.agent_id)
+            .bind(&upgrade_evt.to_version)
+            .execute(&state.pool)
+            .await?;
         }
 
         if let SystemEvent::AgentStopping(stopping) = &event {
@@ -234,46 +168,39 @@ pub async fn ingest_events(
     Ok(Json(HeartbeatResponse { upgrade: None }))
 }
 
-async fn authenticate_batch(
-    state: &AppState,
-    batch: &EventBatch,
-    headers: &HeaderMap,
-    body: &[u8],
-) -> Result<()> {
-    let signature = agent_auth::signature_header(headers).ok_or(AppError::Unauthorized)?;
+fn is_sensor_event(event: &SystemEvent) -> bool {
+    matches!(event, SystemEvent::Process(_) | SystemEvent::File(_) | SystemEvent::Network(_) | SystemEvent::Persistence(_) | SystemEvent::Package(_))
+}
 
-    let pinned_key: Option<String> = sqlx::query_scalar("SELECT public_key FROM agents WHERE id = ?")
-        .bind(&batch.agent_id)
-        .fetch_optional(&state.pool)
-        .await?
-        .flatten();
-    let pinned_key = pinned_key.ok_or(AppError::Unauthorized)?;
+/// Stores one event in the form the console reads and returns what to tell the listeners once it is committed
+pub async fn store_event<'e>(executor: impl SqliteExecutor<'e>, agent_id: &str, event: &SystemEvent, received_at: i64) -> Result<SystemEventBroadcast> {
+    let (event_type, timestamp, data) = match event {
+        SystemEvent::Process(e) => ("process", e.timestamp as i64, serde_json::to_string(e).unwrap()),
+        SystemEvent::File(e) => ("file", e.timestamp as i64, serde_json::to_string(e).unwrap()),
+        SystemEvent::Network(e) => ("network", e.timestamp as i64, serde_json::to_string(e).unwrap()),
+        SystemEvent::Heartbeat(e) => ("heartbeat", e.timestamp as i64, serde_json::to_string(e).unwrap()),
+        SystemEvent::Upgrade(e) => ("upgrade", e.timestamp as i64, serde_json::to_string(e).unwrap()),
+        SystemEvent::Install(e) => ("install", e.timestamp as i64, serde_json::to_string(e).unwrap()),
+        SystemEvent::AgentStopping(e) => ("agent_stopping", e.timestamp as i64, serde_json::to_string(e).unwrap()),
+        SystemEvent::Persistence(e) => ("persistence", e.timestamp as i64, serde_json::to_string(e).unwrap()),
+        SystemEvent::Package(e) => ("package", e.timestamp as i64, serde_json::to_string(e).unwrap()),
+    };
+    let id = Uuid::new_v4().to_string();
 
-    if !agent_auth::signature_is_valid(&pinned_key, body, signature) {
-        return Err(AppError::Unauthorized);
-    }
+    sqlx::query(
+        "INSERT INTO events (id, agent_id, event_type, timestamp, data, received_at)
+         VALUES (?, ?, ?, ?, ?, ?)"
+    )
+    .bind(&id)
+    .bind(agent_id)
+    .bind(event_type)
+    .bind(timestamp)
+    .bind(&data)
+    .bind(received_at)
+    .execute(executor)
+    .await?;
 
-    let mut conn = state.pool.acquire().await?;
-    let accepted = agent_auth::accept_sequence(&mut conn, &batch.agent_id, batch.session, batch.seq).await?;
-    drop(conn);
-
-    if accepted.is_none() {
-        incidents::open(
-            &state.pool,
-            &state.system_events_tx,
-            &batch.agent_id,
-            incidents::REPLAY,
-            serde_json::json!({
-                "request": "events",
-                "session": batch.session,
-                "seq": batch.seq,
-            }),
-        )
-        .await?;
-        return Err(AppError::Conflict("Replayed or stale request".to_string()));
-    }
-
-    Ok(())
+    Ok(SystemEventBroadcast { id, agent_id: agent_id.to_string(), event_type: event_type.to_string(), timestamp, data, received_at })
 }
 
 async fn record_stop(state: &AppState, agent_id: &str, reason: &StopReason) -> Result<()> {
