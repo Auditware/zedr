@@ -33,7 +33,8 @@ export function Rules() {
           <p role="status" data-stand-in className="mt-2 flex max-w-[860px] flex-wrap items-center gap-2 text-[13px] leading-relaxed text-soft">
             <Chip tone="warn">test tenant</Chip>
             This server takes an endpoint's own statement where a proof goes, so the proof states in this console show how the flow looks and
-            prove nothing. A deployment verifies every proof against the rule programs listed here.
+            prove nothing. Its fleet is simulated, Windows endpoints included, whose agent has no sensor yet. A deployment verifies every proof
+            against the rule programs listed here.
           </p>
         ) : data && data.image_ids.length === 0 ? (
           <p role="status" className="mt-2 flex flex-wrap items-center gap-2 text-[13px] text-soft">
