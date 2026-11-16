@@ -40,7 +40,7 @@
 - [x] Upgrade commands recorded on disk before the agent acts on them, so a restarted agent does not accept one again (ADR 029)
 - [x] Lock files committed, so every build uses pinned dependencies
 - [ ] Build the Windows agent with `make build-windows-binary` and enroll it. No Windows binary was built from this tree, and the move of its server link and heartbeat loop into `agent/shared` was only type-checked from macOS
-- [ ] Build the container image and install the chart on a cluster, neither has been run from this tree
+- [ ] Install the chart on a cluster. The image builds from a clean checkout and a container of it serves the console, the installer, the agent and the prover, the chart was only linted and rendered
 - [ ] Signing key rotation that moves enrolled agents to a new key, and a console marker for agents that still trust a replaced key
 - [ ] Move the binary signing key out of the control server into CI, with pre-flight and rollback on upgrade
 - [ ] Console page for fleet enrollment tokens (create, list, revoke) and agents grouped by `enrollment_group`, today the tokens are API only
