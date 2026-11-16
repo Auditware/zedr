@@ -1,5 +1,7 @@
 # Server-Side Detections
 
+Status: superseded by [ADR 031](./031-sealed-telemetry-opened-by-proven-rules.md)
+
 ## Context and Problem Statement
 
 The control server stored process, network and file events and analysed none of them. The only incidents it raised were about the agent itself: silence, a stopped service, a replayed request, a changed key. The console had named rules with MITRE ATT&CK ids, but they ran in the browser, so a macro dropper raised nothing unless an analyst happened to open that endpoint. Enterprise EDRs detect on the server or the sensor and put the result in front of the analyst.
