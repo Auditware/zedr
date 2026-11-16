@@ -68,7 +68,7 @@ describe('incident titles', () => {
 
   it('reads a detection from its evidence, with the key of the process it is about', () => {
     expect(incidentTitle(detection)).toBe('Office application started a script host')
-    expect(detectionOf(detection)).toEqual({
+    expect(detectionOf(detection)).toMatchObject({
       title: 'Office application started a script host',
       technique: 'T1204.002',
       image: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
@@ -80,9 +80,9 @@ describe('incident titles', () => {
   it('reads a finding about an autostart item as the item, not a process', () => {
     const planted = {
       incident_type: 'detection.autostart-fetch',
-      evidence: JSON.stringify({ title: 'Autostart item downloads and runs code', technique: 'T1053.003', pid: 0, started_at: 500, image: '/etc/cron.d/sysupdate', subject: 'sysupdate', autostart: 'cron' }),
+      evidence: JSON.stringify({ rule: 'autostart-fetch', title: 'Autostart item downloads and runs code', technique: 'T1053.003', pid: 0, started_at: 500, image: '/etc/cron.d/sysupdate', subject: 'sysupdate', autostart: 'cron' }),
     }
-    expect(detectionOf(planted)?.autostart).toBe('sysupdate')
+    expect(detectionOf(planted)).toMatchObject({ autostart: 'cron', subject: 'sysupdate' })
   })
 
   it('summarises a detection event by what fired and where', () => {

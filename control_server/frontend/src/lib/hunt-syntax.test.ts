@@ -24,20 +24,20 @@ describe('huntPieces', () => {
   })
 
   it('reads every word of a list as a value, and a word named like a keyword after an operator too', () => {
-    expect(kinds('package where name in (openssl, and) or version >= 3.0.14 and name != in')).toEqual([
-      'kind:package',
+    expect(kinds('process where name in (rundll32.exe, and) or pid >= 4000 and name != in')).toEqual([
+      'kind:process',
       'keyword:where',
       'field:name',
       'keyword:in',
       'operator:(',
-      'value:openssl',
+      'value:rundll32.exe',
       'operator:,',
       'value:and',
       'operator:)',
       'keyword:or',
-      'field:version',
+      'field:pid',
       'operator:>=',
-      'value:3.0.14',
+      'value:4000',
       'keyword:and',
       'field:name',
       'operator:!=',

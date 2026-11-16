@@ -117,18 +117,20 @@ export function SectionTitle({ children, className }: { children: ReactNode; cla
   )
 }
 
-type Tone = 'neutral' | 'accent' | 'warn' | 'alert'
+type Tone = 'neutral' | 'accent' | 'warn' | 'alert' | 'steel' | 'sage'
 
 const TONE: Record<Tone, string> = {
   neutral: 'bg-chip text-soft',
   accent: 'bg-selected text-text',
   warn: 'bg-warn-surface text-warn',
   alert: 'bg-alert-surface text-alert-soft',
+  steel: 'bg-chip text-steel',
+  sage: 'bg-chip text-sage',
 }
 
-export function Chip({ tone = 'neutral', children, className }: { tone?: Tone; children: ReactNode; className?: string }) {
+export function Chip({ tone = 'neutral', children, className, title }: { tone?: Tone; children: ReactNode; className?: string; title?: string }) {
   return (
-    <span className={cn('inline-block whitespace-nowrap rounded-full px-2.5 py-0.5 text-xs font-semibold', TONE[tone], className)}>
+    <span title={title} className={cn('inline-block whitespace-nowrap rounded-full px-2.5 py-0.5 text-xs font-semibold', TONE[tone], className)}>
       {children}
     </span>
   )

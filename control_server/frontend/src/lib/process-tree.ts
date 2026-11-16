@@ -1,6 +1,6 @@
 import type { ApiEvent } from './api'
 import { eventData } from './events'
-import { detect, type Finding } from './findings'
+import { findingsByProcess, type Finding } from './findings'
 import { baseName, isInterpreter } from './images'
 
 export { baseName, isInterpreter }
@@ -44,7 +44,7 @@ function text(value: unknown): string {
   return typeof value === 'string' ? value : ''
 }
 
-export function buildProcessModel(events: ApiEvent[]): ProcessModel {
+export function buildProcessModel(events: ApiEvent[], findings: Finding[] = []): ProcessModel {
   const ordered = [...events].sort((a, b) => a.timestamp - b.timestamp)
   const live = new Map<number, Proc>()
   const all: Proc[] = []
@@ -107,7 +107,8 @@ export function buildProcessModel(events: ApiEvent[]): ProcessModel {
     }
   }
 
-  for (const proc of all) proc.findings = detect(proc)
+  const told = findingsByProcess(findings)
+  for (const proc of all) proc.findings = told.get(proc.key) ?? []
   return { roots, all, byKey: new Map(all.map((proc) => [proc.key, proc])) }
 }
 
@@ -322,46 +323,6 @@ export function findProcs(model: ProcessModel, query: string): Proc[] {
       proc.command.toLowerCase().includes(needle) ||
       proc.path.toLowerCase().includes(needle) ||
       String(proc.pid) === needle,
-  )
-}
-
-export type App = {
-  key: string
-  name: string
-  path: string
-  procs: Proc[]
-  running: number
-  first: number
-  last: number
-  connections: number
-  bytes: number
-  files: number
-  users: number[]
-  severity: Severity
-}
-
-export function apps(model: ProcessModel): App[] {
-  const byKey = new Map<string, App>()
-  for (const proc of model.all) {
-    const key = (proc.path || proc.name).toLowerCase()
-    let app = byKey.get(key)
-    if (!app) {
-      app = { key, name: proc.name, path: proc.path, procs: [], running: 0, first: proc.start, last: proc.start, connections: 0, bytes: 0, files: 0, users: [], severity: 'plain' }
-      byKey.set(key, app)
-    }
-    app.procs.push(proc)
-    if (proc.end === null) app.running += 1
-    app.first = Math.min(app.first, proc.start)
-    app.last = Math.max(app.last, proc.end ?? proc.start)
-    app.connections += proc.connections.length
-    for (const connection of proc.connections) app.bytes += connection.sent + connection.received
-    app.files += proc.files.length
-    if (!app.users.includes(proc.uid)) app.users.push(proc.uid)
-    const level = severity(proc)
-    if (RANK[level] < RANK[app.severity]) app.severity = level
-  }
-  return [...byKey.values()].sort(
-    (a, b) => RANK[a.severity] - RANK[b.severity] || b.bytes - a.bytes || b.procs.length - a.procs.length || a.name.localeCompare(b.name),
   )
 }
 

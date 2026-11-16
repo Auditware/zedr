@@ -1,7 +1,6 @@
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { ChevronRight, File, Folder, FolderOpen } from 'lucide-react'
 import { useMemo, useRef, useState } from 'react'
-import { Empty } from '@/components/ui/bits'
 import { FindBox } from '@/components/ui/find-box'
 import type { Period } from '@/lib/activity'
 import { cn } from '@/lib/cn'
@@ -9,6 +8,7 @@ import { actionSummary, buildFileTree, fileRows, quietFolders, type FileNode, ty
 import { clock } from '@/lib/format'
 import { severity } from '@/lib/process-tree'
 import { SEVERITY_DOT, useProbe } from './probe'
+import { SealedList } from './SealedList'
 
 type Props = { period: Period | null; find: string; onFind: (find: string) => void }
 
@@ -89,7 +89,7 @@ export function FilesLens({ period, find, onFind }: Props) {
     return { folders: dirs, flagged: hot }
   }, [tree])
 
-  if (!any) return <Empty title="No file activity reported" />
+  if (!any) return <SealedList agentId={probe.agentId} lead="No file event was opened." />
 
   const from = period ? period[0] : tree.from
   const to = Math.max(from + 1, period ? period[1] : tree.to)

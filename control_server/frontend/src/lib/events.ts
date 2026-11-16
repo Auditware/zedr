@@ -1,6 +1,8 @@
 import type { ApiEvent, AuditEntry } from './api'
 import { tone } from '@/lib/palette'
+import { findingOf, type Finding } from './findings'
 import { baseName } from './images'
+import { INCIDENTS } from './incidents'
 
 export type Category = 'heartbeat' | 'lifecycle' | 'incident' | 'upgrade' | 'identity' | 'telemetry' | 'audit'
 
@@ -10,7 +12,7 @@ export const CATEGORIES: { id: Category; label: string; color: string; types: st
   { id: 'lifecycle', label: 'Lifecycle', color: tone('soft'), types: ['install', 'agent_stopping'] },
   { id: 'identity', label: 'Identity', color: tone('warn'), types: ['enrollment_rejected', 'identity_rotated'] },
   { id: 'upgrade', label: 'Upgrade', color: tone('mauve'), types: ['upgrade'] },
-  { id: 'telemetry', label: 'Telemetry', color: tone('sage'), types: ['process', 'file', 'network', 'persistence', 'package'] },
+  { id: 'telemetry', label: 'Opened', color: tone('steel'), types: ['process', 'file', 'network', 'persistence'] },
   { id: 'audit', label: 'Audit', color: tone('accent'), types: ['audit'] },
 ]
 
@@ -72,8 +74,6 @@ export function summarize(event: Pick<ApiEvent, 'event_type' | 'data'>): string 
       return `${text(data.action)} ${text(data.dest_ip)}:${text(data.dest_port)}`.trim()
     case 'persistence':
       return `${text(data.action)} ${text(data.kind)} ${text(data.name)}`.trim()
-    case 'package':
-      return `${text(data.action)} ${text(data.name)} ${text(data.version)}`.trim()
     case 'detection':
       return `${text(data.title)} · ${baseName(text(data.image))}`
     case 'audit':
@@ -83,31 +83,14 @@ export function summarize(event: Pick<ApiEvent, 'event_type' | 'data'>): string 
   }
 }
 
-const INCIDENT_LABEL: Record<string, string> = {
-  silence: 'Silent while others report',
-  service_stopped: 'Service stopped, system running',
-  replay: 'Signed request replayed',
-  identity_conflict: 'Key change without enrollment',
-}
-
 type IncidentLike = { incident_type: string; evidence: string }
 
-export type Detection = { title: string; technique: string; image: string; processKey: string; autostart: string | null }
-
-export function detectionOf(incident: IncidentLike): Detection | null {
-  if (!incident.incident_type.startsWith('detection.')) return null
-  const evidence = eventData({ data: incident.evidence })
-  return {
-    title: text(evidence.title),
-    technique: text(evidence.technique),
-    image: text(evidence.image),
-    processKey: `${text(evidence.pid)}@${text(evidence.started_at)}`,
-    autostart: typeof evidence.autostart === 'string' ? text(evidence.subject) : null,
-  }
+export function detectionOf(incident: IncidentLike): Finding | null {
+  return incident.incident_type.startsWith('detection.') ? findingOf(eventData({ data: incident.evidence })) : null
 }
 
 export function incidentTitle(incident: IncidentLike): string {
-  return detectionOf(incident)?.title ?? INCIDENT_LABEL[incident.incident_type] ?? incident.incident_type
+  return detectionOf(incident)?.title ?? INCIDENTS[incident.incident_type]?.title ?? incident.incident_type
 }
 
 export function auditTone(action: string): string {

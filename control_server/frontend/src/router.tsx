@@ -10,6 +10,7 @@ import { Hunt } from '@/pages/Hunt'
 import { Endpoints } from '@/pages/Endpoints'
 import { Installers } from '@/pages/Installers'
 import { Login } from '@/pages/Login'
+import { Rules } from '@/pages/Rules'
 import { Settings } from '@/pages/Settings'
 import { Users } from '@/pages/Users'
 
@@ -17,8 +18,12 @@ function text(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined
 }
 
+function index(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : undefined
+}
+
 const GROUPS: GroupBy[] = ['subnet', 'os', 'version', 'liveness']
-const LENSES = ['processes', 'network', 'files', 'apps', 'persistence', 'agent'] as const
+const LENSES = ['processes', 'network', 'files', 'persistence', 'sealed', 'agent'] as const
 const FOCUSES: Focus[] = ['all', 'notable']
 
 export type EndpointsSearch = {
@@ -28,6 +33,7 @@ export type EndpointsSearch = {
   view?: (typeof LENSES)[number]
   proc?: string
   item?: string
+  win?: number
   when?: Moment
   layout?: 'list'
   focus?: Focus
@@ -78,6 +84,7 @@ const endpointsRoute = createRoute({
     focus: FOCUSES.find((focus) => focus === search.focus),
     find: text(search.find),
     item: text(search.item),
+    win: index(search.win),
     when: MOMENTS.find((moment) => moment.id === search.when)?.id,
     cam: text(search.cam),
     t: text(search.t),
@@ -105,6 +112,8 @@ const huntRoute = createRoute({
   validateSearch: (search: Record<string, unknown>): { q?: string; host?: string } => ({ q: text(search.q), host: text(search.host) }),
 })
 
+const rulesRoute = createRoute({ getParentRoute: () => appRoute, path: '/rules', component: Rules })
+
 const installersRoute = createRoute({
   getParentRoute: () => appRoute,
   path: '/installers',
@@ -129,6 +138,7 @@ const routeTree = rootRoute.addChildren([
     endpointsRoute,
     eventsRoute,
     huntRoute,
+    rulesRoute,
     installersRoute,
     usersRoute,
     settingsRoute,

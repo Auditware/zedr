@@ -1,72 +1,114 @@
-import { generateKeyPairSync, randomUUID, sign } from 'node:crypto'
-import { demoClient } from './env.mjs'
-import { fleet, pastHeartbeats, seeded, STORY, telemetry } from './scenario.mjs'
+import { execFileSync, spawn } from 'node:child_process'
+import { readFileSync } from 'node:fs'
+import http from 'node:http'
+import https from 'node:https'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { CERT, demoClient } from './env.mjs'
+import { fleet, scenario, STORY } from './scenario.mjs'
 
-const HEARTBEAT_SECONDS = 30
 const SPARE_KEYS = 3
-const call = demoClient(process.env.ZEDR_DEMO_URL)
-const random = seeded(20261116)
-const now = () => Math.floor(Date.now() / 1000)
+const AGENT_WORKSPACE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../../agent')
+const SIMULATOR = path.join(AGENT_WORKSPACE, 'target/debug/zedr-simulator')
+const url = process.env.ZEDR_DEMO_URL
+const call = demoClient(url)
+
+try {
+  execFileSync('cargo', ['build', '--quiet', '--package', 'zedr-simulator'], { cwd: AGENT_WORKSPACE, stdio: ['ignore', 'ignore', 'inherit'] })
+} catch {
+  throw new Error(`the fleet simulator did not build: run "cargo build --package zedr-simulator" in ${AGENT_WORKSPACE}`)
+}
 
 const login = await call('POST', '/api/auth/login', {
   body: JSON.stringify({ username: 'admin', password: process.env.ZEDR_DEMO_PASSWORD }),
 })
 if (login.status !== 200) throw new Error(`demo login failed with ${login.status}`)
 const token = login.json.token
+const installKey = async () => (await call('POST', '/api/admin/installers/generate', { token, body: '{}' })).json.install_key
 
-const agents = []
-for (const endpoint of fleet()) {
-  const issued = await call('POST', '/api/admin/installers/generate', { token, body: '{}' })
-  const { publicKey, privateKey } = generateKeyPairSync('ed25519')
-  const agent = { ...endpoint, id: randomUUID(), seq: 0, alive: true, next: now() + Math.floor(random() * HEARTBEAT_SECONDS) }
-  const send = (route, body) => call('POST', route, { body, signature: sign(null, Buffer.from(body), privateKey).toString('hex') })
-  const batch = (events) => JSON.stringify({ agent_id: agent.id, session: 1, seq: ++agent.seq, events })
-  agent.send = send
-  agent.batch = batch
+const hosts = fleet().length
+const enrollmentKeys = []
+while (enrollmentKeys.length < hosts) enrollmentKeys.push(await installKey())
 
-  const registration = JSON.stringify({
-    agent_id: agent.id,
-    hostname: endpoint.host,
-    platform: endpoint.platform,
-    os_version: endpoint.os,
-    architecture: endpoint.arch,
-    version: endpoint.version,
-    ip_address: endpoint.ip,
-    public_key: publicKey.export({ format: 'der', type: 'spki' }).subarray(-32).toString('hex'),
-    enrollment_key: issued.json.install_key,
-    session: 1,
-    seq: ++agent.seq,
+// The simulator speaks through the agent's own link, which trusts the system's certificate authorities and not the
+// throwaway certificate of a test tenant, so its requests pass through this relay on the loopback interface.
+// The relay is also the one who replays a signed request it saw go by, the way someone on the network path could.
+const upstream = new https.Agent({ ca: readFileSync(CERT), keepAlive: true })
+function forward(method, route, headers, body) {
+  return new Promise((resolve, reject) => {
+    const request = https.request(url + route, { method, headers, agent: upstream }, (response) => {
+      const chunks = []
+      response.on('data', (chunk) => chunks.push(chunk))
+      response.on('end', () => resolve({ status: response.statusCode, body: Buffer.concat(chunks) }))
+    })
+    request.on('error', reject)
+    request.end(body)
   })
-  const registered = await send('/api/agents/register', registration)
-  if (registered.status !== 200) throw new Error(`enrolling ${endpoint.host} failed with ${registered.status}`)
-
-  await send('/api/events', batch(pastHeartbeats(endpoint, now(), HEARTBEAT_SECONDS)))
-  const first = batch([{ Heartbeat: { timestamp: now() } }])
-  if (!STORY.quiet.includes(endpoint.host)) await send('/api/events', first)
-  await send('/api/events', batch(telemetry(endpoint, now(), random)))
-
-  if (endpoint.host === STORY.serviceStop) {
-    await send('/api/events', batch([{ AgentStopping: { timestamp: now(), reason: 'ServiceStop' } }]))
-    agent.alive = false
-  }
-  if (endpoint.host === STORY.replay) await send('/api/events', first)
-  if (STORY.shutdown.includes(endpoint.host)) {
-    await send('/api/events', batch([{ AgentStopping: { timestamp: now(), reason: 'SystemShutdown' } }]))
-    agent.alive = false
-  }
-  if (STORY.quiet.includes(endpoint.host)) agent.alive = false
-  agents.push(agent)
 }
 
-for (let spare = 0; spare < SPARE_KEYS; spare++) await call('POST', '/api/admin/installers/generate', { token, body: '{}' })
+let replayable = null
+let replayedAgent = null
+const relay = http.createServer((incoming, outgoing) => {
+  const chunks = []
+  incoming.on('data', (chunk) => chunks.push(chunk))
+  incoming.on('end', () => {
+    const body = Buffer.concat(chunks)
+    const headers = { 'content-type': 'application/json', 'content-length': body.length, 'x-zedr-signature': incoming.headers['x-zedr-signature'] ?? '' }
+    if (incoming.url === '/api/agents/register' && body.includes(`"hostname":"${STORY.replay}"`)) replayedAgent = JSON.parse(body).agent_id
+    else if (incoming.url === '/api/events' && !replayable && replayedAgent && body.includes(replayedAgent)) replayable = { headers, body }
+    forward(incoming.method, incoming.url, headers, body).then(
+      (answer) => {
+        outgoing.writeHead(answer.status, { 'content-type': 'application/json', 'content-length': answer.body.length })
+        outgoing.end(answer.body)
+      },
+      () => {
+        outgoing.writeHead(502)
+        outgoing.end()
+      },
+    )
+  })
+})
+await new Promise((resolve) => relay.listen(0, '127.0.0.1', resolve))
 
-console.log(`READY ${agents.length} endpoints`)
-
-setInterval(() => {
-  const moment = now()
-  for (const agent of agents) {
-    if (!agent.alive || agent.next > moment) continue
-    agent.next = moment + HEARTBEAT_SECONDS
-    agent.send('/api/events', agent.batch([{ Heartbeat: { timestamp: moment } }])).catch(() => undefined)
+const simulator = spawn(SIMULATOR, [], { stdio: ['pipe', 'pipe', 'inherit'], detached: true })
+const stop = () => {
+  try {
+    process.kill(-simulator.pid, 'SIGTERM')
+  } catch {
+    // the simulator and its provers are already gone
   }
-}, 1000)
+  process.exit(0)
+}
+for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(signal, stop)
+simulator.on('exit', (code) => {
+  console.error(`fleet simulator ended with code ${code}`)
+  process.exit(1)
+})
+simulator.stdin.end(
+  JSON.stringify(
+    scenario({
+      server: `http://127.0.0.1:${relay.address().port}`,
+      deploymentKey: process.env.ZEDR_DEMO_DEPLOYMENT_KEY,
+      stateDir: process.env.ZEDR_DEMO_STATE,
+      prover: process.env.ZEDR_DEMO_PROVER || null,
+      enrollmentKeys,
+      now: Math.floor(Date.now() / 1000),
+    }),
+  ),
+)
+
+let said = ''
+let ready = false
+simulator.stdout.on('data', async (chunk) => {
+  said += chunk.toString('utf8')
+  const lines = said.split('\n')
+  said = lines.pop()
+  for (const line of lines) {
+    if (line.startsWith('READY') && !ready) {
+      ready = true
+      if (replayable) await forward('POST', '/api/events', replayable.headers, replayable.body)
+      for (let spare = 0; spare < SPARE_KEYS; spare++) await installKey()
+    }
+    console.log(line)
+  }
+})

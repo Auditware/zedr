@@ -472,6 +472,11 @@ control-server-logs: ## Show control server logs
 control-server-status: ## Show control server status
 	@pm2 status
 
+.PHONY: demo
+demo: ## Open the console on a test tenant with a fleet played by the development simulator. After `make guest prover`, two of its endpoints prove for real
+	@cargo build --manifest-path control_server/backend/Cargo.toml
+	@cd control_server/frontend && { [ -d node_modules ] || npm ci --no-audit --no-fund; } && npm run dev
+
 .PHONY: frontend-deps
 frontend-deps: ## Install frontend dependencies
 	@echo "Installing frontend dependencies..."

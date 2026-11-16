@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { getRouteApi, useNavigate } from '@tanstack/react-router'
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { CornerDownLeft, X } from 'lucide-react'
+import { CornerDownLeft, Lock, X } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { PageHeader } from '@/components/ui/bits'
 import { Button } from '@/components/ui/button'
@@ -25,7 +25,6 @@ const STARTERS: { title: string; query: string }[] = [
   { title: 'Every endpoint that reached an address', query: 'connection where dest.ip = 203.0.113.47' },
   { title: 'Executables written by a script host', query: 'file where process.name in (powershell.exe, cmd.exe, bash, sh) and path ~ ".dll"' },
   { title: 'High findings', query: 'detection where level = high' },
-  { title: 'Endpoints behind on an OpenSSL fix', query: 'package where name = openssl and version < 3.0.13-0ubuntu3.5' },
   { title: 'Autostart items that download code', query: 'persistence where command ~ curl or command ~ wget' },
 ]
 
@@ -34,7 +33,6 @@ const WIDTHS: Record<string, string> = {
   connection: '170px minmax(160px,1fr) 80px 96px',
   file: '170px 84px minmax(160px,1fr)',
   detection: 'minmax(220px,1.2fr) 100px 72px minmax(160px,1fr)',
-  package: 'minmax(140px,1fr) minmax(170px,1fr) minmax(120px,0.8fr) 64px 64px',
   persistence: 'minmax(130px,0.8fr) 110px minmax(200px,1.4fr) minmax(160px,1fr) 64px',
 }
 const DATED = new Set(['process', 'connection', 'file', 'detection'])
@@ -344,6 +342,10 @@ export function Hunt() {
             </button>
           ))}
         </div>
+        <p data-hunt-scope className="mt-2 flex items-center gap-1.5 text-xs text-muted">
+          <Lock size={12} strokeWidth={1.75} className="shrink-0 text-steel" aria-hidden />
+          Hunt searches opened events only: what a rule released on an endpoint. Sealed telemetry cannot be searched.
+        </p>
         {failure ? (
           <div role="alert" className="mt-2 font-mono text-xs text-alert-soft">
             {failure.message}

@@ -3,6 +3,7 @@ import { Link } from '@tanstack/react-router'
 import { ArrowUpCircle, Rows3 } from 'lucide-react'
 import { useState } from 'react'
 import { CloseIncident, IncidentCard } from '@/components/common/IncidentCard'
+import { FindingProof } from '@/components/common/Proof'
 import { CopyButton, FindingLine, SectionTitle, StateChip } from '@/components/ui/bits'
 import { Button } from '@/components/ui/button'
 import { inputClass } from '@/components/ui/dialog'
@@ -12,6 +13,7 @@ import { cn } from '@/lib/cn'
 import { detectionOf } from '@/lib/events'
 import { baseName } from '@/lib/images'
 import { ago, clock, dateTime, shortId } from '@/lib/format'
+import { isGrave } from '@/lib/incidents'
 import { STATE_LABEL, type NodeState } from '@/lib/map-layout'
 import { useNow, useUpgrades } from '@/lib/queries'
 
@@ -66,7 +68,12 @@ export function HostSheet({ agent, state, incidents, onProcess, onAutostart }: P
     .sort((a, b) => a.incident.opened_at - b.incident.opened_at)
   const ordered = incidents
     .filter((incident) => !incident.incident_type.startsWith('detection.'))
-    .sort((a, b) => Number(a.closed_at != null) - Number(b.closed_at != null) || b.opened_at - a.opened_at)
+    .sort(
+      (a, b) =>
+        Number(a.closed_at != null) - Number(b.closed_at != null) ||
+        Number(isGrave(b.incident_type)) - Number(isGrave(a.incident_type)) ||
+        b.opened_at - a.opened_at,
+    )
 
   return (
     <div className="flex min-h-full flex-col">
@@ -87,23 +94,23 @@ export function HostSheet({ agent, state, incidents, onProcess, onAutostart }: P
         <>
           <SectionTitle className="mb-2 mt-5">Findings</SectionTitle>
           {detections.map(({ incident, detection }) => (
-            <div
-              key={incident.id}
-              className="mb-1.5 flex min-h-[48px] items-center gap-1 rounded-xl border border-line bg-row pr-1.5 transition-colors hover:border-line-hover"
-            >
-              <button
-                type="button"
-                onClick={() => (detection.autostart === null ? onProcess(detection.processKey) : onAutostart(detection.autostart))}
-                className="flex min-w-0 flex-1 px-3 py-2 text-left"
-              >
-                <FindingLine
-                  title={detection.title}
-                  technique={detection.technique}
-                  high
-                  meta={`${detection.autostart ?? baseName(detection.image)} · ${clock(incident.opened_at)}`}
-                />
-              </button>
-              <CloseIncident incident={incident} />
+            <div key={incident.id} data-finding={detection.rule} className="mb-1.5 rounded-xl border border-line bg-row transition-colors hover:border-line-hover">
+              <div className="flex min-h-[48px] items-center gap-1 pr-1.5">
+                <button
+                  type="button"
+                  onClick={() => (detection.autostart === null ? onProcess(detection.processKey) : onAutostart(detection.subject ?? ''))}
+                  className="flex min-w-0 flex-1 px-3 py-2 text-left"
+                >
+                  <FindingLine
+                    title={detection.title}
+                    technique={detection.technique}
+                    high
+                    meta={`${detection.autostart === null ? baseName(detection.image) : (detection.subject ?? detection.autostart)} · ${clock(incident.opened_at)}`}
+                  />
+                </button>
+                <CloseIncident incident={incident} />
+              </div>
+              <FindingProof agentId={agent.id} finding={detection} className="pb-2.5 pl-[30px] pr-3" />
             </div>
           ))}
         </>

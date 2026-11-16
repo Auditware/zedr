@@ -5,6 +5,7 @@ import { tone } from '@/lib/palette'
 import type { Focus, ProcessModel, Severity, TreeLayout, TreeNode } from '@/lib/process-tree'
 
 export type Probe = {
+  agentId: string
   model: ProcessModel
   layout: TreeLayout
   focus: Focus

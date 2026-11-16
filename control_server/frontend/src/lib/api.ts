@@ -18,6 +18,15 @@ export type LoginResponse = Schemas['LoginResponse']
 export type InstallKeyResponse = Schemas['InstallKeyResponse']
 export type MfaSetupResponse = Schemas['MfaSetupResponse']
 export type HealthResponse = Schemas['HealthResponse']
+export type ChainView = Schemas['ChainView']
+export type ChainSummary = Schemas['ChainSummary']
+export type WindowSummary = Schemas['WindowSummary']
+export type WindowView = Schemas['WindowView']
+export type SealedEventView = Schemas['SealedEventView']
+export type SealedRow = Schemas['SealedRow']
+export type ReleaseView = Schemas['ReleaseView']
+export type RulesetView = Schemas['RulesetView']
+export type RuleView = Schemas['RuleView']
 
 export type InstallKey = {
   id: string
@@ -136,6 +145,13 @@ export const api = {
       'GET',
       '/api/admin/events/histogram' + query({ from: params.from, to: params.to, buckets: params.buckets, agent_id: params.agentId }),
     ),
+
+  chain: (agentId: string, limit?: number) => request<ChainView>('GET', `/api/admin/agents/${agentId}/chain` + query({ limit })),
+  window: (agentId: string, window: number) => request<WindowView>('GET', `/api/admin/agents/${agentId}/windows/${window}`),
+  sealed: (agentId: string, params: { before?: number; limit: number }) =>
+    request<SealedRow[]>('GET', `/api/admin/agents/${agentId}/sealed` + query({ before: params.before, limit: params.limit })),
+  chainSummary: () => request<ChainSummary>('GET', '/api/admin/chain/summary'),
+  ruleset: () => request<RulesetView>('GET', '/api/admin/ruleset'),
 
   installKeys: async () => (await request<{ keys: InstallKey[] }>('GET', '/api/admin/installers')).keys,
   generateInstallKey: (agent_version?: string) =>

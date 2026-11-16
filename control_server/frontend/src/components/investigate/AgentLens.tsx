@@ -1,17 +1,19 @@
 import { Activity } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { CloseIncident } from '@/components/common/IncidentCard'
+import { CloseIncident, IncidentEvidence } from '@/components/common/IncidentCard'
 import { JsonView } from '@/components/common/JsonView'
-import { Empty } from '@/components/ui/bits'
+import { FindingProof } from '@/components/common/Proof'
 import type { Period } from '@/lib/activity'
 import type { Agent, ApiEvent, Incident } from '@/lib/api'
 import { cn } from '@/lib/cn'
 import { categoryOf, eventData, incidentTitle, summarize } from '@/lib/events'
+import { findingOf } from '@/lib/findings'
 import { ago, clock, span } from '@/lib/format'
 import { baseName } from '@/lib/images'
 import { tone } from '@/lib/palette'
 import { buildPulse, type Pulse, type RailEntry } from '@/lib/pulse'
 import { useAgentEvents, useSize } from '@/lib/queries'
+import { ChainCard } from './ChainCard'
 
 type Props = {
   agent: Agent
@@ -20,6 +22,8 @@ type Props = {
   now: number
   openId: string | null
   onOpen: (id: string | null) => void
+  window: number | null
+  onWindow: (window: number | null) => void
 }
 
 const HEIGHT = 124
@@ -218,6 +222,7 @@ function Row({
   const event = entry.kind === 'event' ? entry.event : undefined
   const data = event ? eventData(event) : {}
   const finding = event?.event_type === 'detection'
+  const found = finding && event?.agent_id ? findingOf(data) : null
   const closable = incident ?? (finding ? incidents.find((item) => item.closed_at == null && item.incident_type === `detection.${String(data.rule)}`) : undefined)
   const openIncident = incident && incident.closed_at == null
   const meta = incident
@@ -249,13 +254,19 @@ function Row({
           </button>
           {closable ? <CloseIncident incident={closable} /> : null}
         </div>
-        {open ? <JsonView value={incident ? incident.evidence : data} className="rounded-t-none border-x-0 border-b-0 border-t border-line/60 bg-transparent" /> : null}
+        {open && incident ? <IncidentEvidence incident={incident} raw className="border-t border-line/60" /> : null}
+        {open && !incident ? (
+          <div className="border-t border-line/60">
+            {found && event?.agent_id ? <FindingProof agentId={event.agent_id} finding={found} className="px-3 pt-2.5" /> : null}
+            <JsonView value={data} className="rounded-t-none bg-transparent" />
+          </div>
+        ) : null}
       </div>
     </li>
   )
 }
 
-export function AgentLens({ agent, incidents, period, now, openId, onOpen }: Props) {
+export function AgentLens({ agent, incidents, period, now, openId, onOpen, window, onWindow }: Props) {
   const { data, isLoading } = useAgentEvents(agent.id)
   const end = period ? Math.min(now, period[1]) : now
   const pulse = useMemo(() => {
@@ -278,10 +289,7 @@ export function AgentLens({ agent, incidents, period, now, openId, onOpen }: Pro
     rail.current?.querySelector(`[data-rail-id="${CSS.escape(openId)}"]`)?.scrollIntoView({ block: 'nearest' })
   }, [openId])
 
-  if (!isLoading && pulse.rail.length === 0) {
-    return <Empty title={period ? 'Nothing from the agent in this time window' : 'Nothing from the agent yet'} />
-  }
-
+  const nothing = !isLoading && pulse.rail.length === 0
   const gaps = pulse.silences.length
   return (
     <div className="absolute inset-0 overflow-auto px-4 pb-3">
@@ -295,6 +303,10 @@ export function AgentLens({ agent, incidents, period, now, openId, onOpen }: Pro
         </div>
         <Trace pulse={pulse} incidents={shown} openId={openId} onOpen={onOpen} />
       </section>
+      <ChainCard agentId={agent.id} selected={window} onSelect={onWindow} />
+      {nothing ? (
+        <p className="mt-3 px-1 text-[13px] text-muted">{period ? 'Nothing from the agent in this time window.' : 'Nothing from the agent yet.'}</p>
+      ) : null}
       <ol ref={rail} aria-label="What the agent reported" className="mt-3">
         {pulse.rail.map((entry) => (
           <Row

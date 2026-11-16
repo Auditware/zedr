@@ -1,12 +1,12 @@
 import { Handle, Position, type Edge, type Node, type NodeProps, type Viewport } from '@xyflow/react'
 import { useMemo, useState } from 'react'
-import { Empty } from '@/components/ui/bits'
 import { cn } from '@/lib/cn'
 import { bytes } from '@/lib/format'
 import { tone } from '@/lib/palette'
 import { remotes, severity, TREE, type Proc, type Remote } from '@/lib/process-tree'
 import { FlowCanvas } from './FlowCanvas'
 import { SEVERITY_DOT, SEVERITY_TONE, useProbe } from './probe'
+import { SealedList } from './SealedList'
 
 type TalkerNode = Node<{ proc: Proc; volume: number }, 'talker'>
 type RemoteNode = Node<{ remote: Remote; flagged: boolean; picked: boolean }, 'remote'>
@@ -135,7 +135,7 @@ export function NetworkGraph({ cam, onCam }: Props) {
     return { nodes: built, edges: links }
   }, [list, probe.selectedKey, remoteKey])
 
-  if (list.length === 0) return <Empty title="No connections reported" />
+  if (list.length === 0) return <SealedList agentId={probe.agentId} lead="No connection was opened." />
 
   const first = nodes[0]
 

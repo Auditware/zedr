@@ -1,5 +1,5 @@
 import { Link } from '@tanstack/react-router'
-import { Crosshair, KeyRound, PanelLeftClose, PanelLeftOpen, UsersRound } from 'lucide-react'
+import { Crosshair, KeyRound, PanelLeftClose, PanelLeftOpen, ScrollText, UsersRound } from 'lucide-react'
 import type { ReactNode } from 'react'
 import { Tip } from '@/components/ui/bits'
 import { isAdmin, useSession } from '@/lib/auth'
@@ -112,6 +112,7 @@ export function Rail() {
       <NavItem to="/endpoints" label="Endpoints" icon={<MapIcon />} badge={open} wide={wide} />
       <NavItem to="/hunt" label="Hunt" icon={<Crosshair size={size} strokeWidth={1.5} aria-hidden />} wide={wide} />
       <NavItem to="/events" label="Events" icon={<EventsIcon />} wide={wide} />
+      <NavItem to="/rules" label="Rules" icon={<ScrollText size={size} strokeWidth={1.5} aria-hidden />} wide={wide} />
       <NavItem to="/installers" label="Installers" icon={<KeyRound size={size} strokeWidth={1.5} aria-hidden />} wide={wide} />
       {admin ? <NavItem to="/users" label="Users" icon={<UsersRound size={size} strokeWidth={1.5} aria-hidden />} wide={wide} /> : null}
       <div className="flex-1" />

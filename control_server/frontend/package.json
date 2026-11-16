@@ -9,7 +9,7 @@
     "preview": "vite preview",
     "test": "vitest run",
     "codegen": "openapi-typescript http://localhost:7770/api-docs/openapi.json -o src/lib/schema.d.ts",
-    "sweep": "vite build && playwright test"
+    "sweep": "vite build --mode sweep --outDir e2e/.out/console && playwright test"
   },
   "dependencies": {
     "@fontsource-variable/inter": "^5.3.0",

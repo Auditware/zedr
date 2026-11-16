@@ -111,7 +111,7 @@ export function ActivityDock({ agent, model, incidents, selectedKey, period, onS
   return (
     <div className="flex h-full min-h-0 flex-col gap-2 rounded-card border border-line bg-surface px-4 pb-2.5 pt-3">
       <div className="flex h-8 shrink-0 items-center gap-3">
-        <span className="shrink-0 font-display text-xs font-medium uppercase tracking-wider text-muted">Activity</span>
+        <span className="shrink-0 font-display text-xs font-medium uppercase tracking-wider text-muted">Opened activity</span>
         {period ? (
           <button
             type="button"

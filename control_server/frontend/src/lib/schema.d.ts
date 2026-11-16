@@ -52,6 +52,54 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/admin/agents/{id}/chain": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["agent_chain"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/agents/{id}/sealed": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["agent_sealed"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/agents/{id}/windows/{window}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["agent_window"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/admin/api-keys": {
         parameters: {
             query?: never;
@@ -92,6 +140,22 @@ export interface paths {
             cookie?: never;
         };
         get: operations["list_audit"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/chain/summary": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["chain_summary"];
         put?: never;
         post?: never;
         delete?: never;
@@ -254,6 +318,22 @@ export interface paths {
         get?: never;
         put?: never;
         post: operations["generate_install_key"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/admin/ruleset": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["ruleset"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -484,6 +564,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/proofs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["submit_proof"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/windows": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["ingest_window"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/health": {
         parameters: {
             query?: never;
@@ -596,6 +708,54 @@ export interface components {
             entries: components["schemas"]["AuditEntry"][];
             /** Format: int64 */
             first_broken_seq?: number | null;
+        };
+        ChainQuery: {
+            /**
+             * Format: int64
+             * @description How many of the most recent windows to return, at most 500
+             */
+            limit?: number;
+        };
+        ChainSummary: {
+            /**
+             * Format: int64
+             * @description Agents the server holds at least one window of
+             */
+            agents: number;
+            /** Format: int64 */
+            events: number;
+            /** Format: int64 */
+            gaps: number;
+            /** Format: int64 */
+            opened: number;
+            /** @description Windows by where their proof stands */
+            proofs: components["schemas"]["ProofCounts"];
+            /** Format: int64 */
+            windows: number;
+        };
+        ChainTotals: {
+            /** Format: int64 */
+            events: number;
+            /** Format: int64 */
+            gaps: number;
+            /** Format: int64 */
+            opened: number;
+            /** Format: int64 */
+            windows: number;
+        };
+        ChainView: {
+            /** Format: int64 */
+            epoch: number;
+            head: string;
+            /** Format: int64 */
+            next_index: number;
+            /** Format: int64 */
+            next_window: number;
+            /** Format: int64 */
+            proven_window?: number | null;
+            totals: components["schemas"]["ChainTotals"];
+            /** @description The most recent windows, newest first */
+            windows: components["schemas"]["WindowSummary"][];
         };
         CreateApiKeyRequest: {
             name: string;
@@ -908,6 +1068,12 @@ export interface components {
             /** Format: int64 */
             timestamp: number;
         };
+        /** @description The secret that opens one sealed event, in hex */
+        Opening: {
+            /** Format: int64 */
+            index: number;
+            seed: string;
+        };
         /** @description One installed package, and what happened to it */
         PackageEvent: {
             action: components["schemas"]["InventoryAction"];
@@ -962,9 +1128,169 @@ export interface components {
             /** Format: int32 */
             uid: number;
         };
+        /** @description The windows a proof was accepted for */
+        ProofAck: {
+            /** Format: int64 */
+            first_window: number;
+            /** Format: int64 */
+            last_window: number;
+        };
+        ProofCounts: {
+            /** Format: int64 */
+            mismatch: number;
+            /**
+             * Format: int64
+             * @description Windows of endpoints without a prover
+             */
+            none: number;
+            /** Format: int64 */
+            pending: number;
+            /** Format: int64 */
+            verified: number;
+        };
+        /** @description A proof that the rules ran over a run of sealed windows, the receipt in base64 */
+        ProofSubmission: {
+            agent_id: string;
+            receipt: string;
+            /** Format: int64 */
+            seq: number;
+            /** Format: int64 */
+            session: number;
+        };
+        /** @description A rule that fired on the endpoint, with the secrets of the events it opens */
+        Release: {
+            context: number[];
+            openings: components["schemas"]["Opening"][];
+            /** Format: int32 */
+            pid: number;
+            rule: string;
+            /** Format: int64 */
+            started_at: number;
+            /** Format: int64 */
+            trigger: number;
+        };
+        ReleaseView: {
+            context: number[];
+            /** @description high, medium, or info for a rule that only follows up on a finding and is none itself */
+            level: string;
+            proven: boolean;
+            rule: string;
+            /** @description Empty for a rule that only follows up on a finding */
+            technique: string;
+            title: string;
+            /** Format: int64 */
+            trigger: number;
+        };
         ResetPasswordRequest: {
             current_password?: string | null;
             password: string;
+        };
+        RuleView: {
+            id: string;
+            /** @description high, medium, or info for a rule that only follows up on a finding and is none itself */
+            level: string;
+            /** @description What a match of this rule lets the server open */
+            opens: string;
+            /** Format: int64 */
+            releases: number;
+            /** @description Empty for a rule that only follows up on a finding */
+            technique: string;
+            title: string;
+        };
+        RulesetView: {
+            /** @description The proof programs this server accepts receipts of, none means no proof can be accepted */
+            image_ids: string[];
+            rules: components["schemas"]["RuleView"][];
+        };
+        /** @description One sealed event: the leaf that commits to it in hex, and its ciphertext in base64 */
+        SealedEvent: {
+            leaf: string;
+            sealed: string;
+        };
+        SealedEventView: {
+            /** Format: int64 */
+            ciphertext_bytes: number;
+            /** @description The plaintext event this one was opened as */
+            event_id?: string | null;
+            /** Format: int64 */
+            index: number;
+            leaf: string;
+            opened: boolean;
+        };
+        SealedQuery: {
+            /**
+             * Format: int64
+             * @description Only events before this index, to read further back than the page before
+             */
+            before?: number | null;
+            /**
+             * Format: int64
+             * @description How many events to return, at most 500
+             */
+            limit?: number;
+        };
+        /** @description One committed event as the server holds it. The kind and the content are there only when a rule opened it */
+        SealedRow: {
+            /** Format: int64 */
+            ciphertext_bytes: number;
+            /** @description The opened event, as JSON */
+            data?: string | null;
+            /** Format: int64 */
+            epoch: number;
+            /** @description The plaintext event it was opened as */
+            event_id?: string | null;
+            event_type?: string | null;
+            /** Format: int64 */
+            index: number;
+            leaf: string;
+            opened: boolean;
+            /** @description Proof state of its window */
+            proof: string;
+            /**
+             * Format: int64
+             * @description When the server received the window that holds it
+             */
+            received_at: number;
+            /** Format: int64 */
+            window: number;
+        };
+        /** @description One sealed window on its way to the control server, with what the rules opened in it */
+        SealedWindow: {
+            agent_id: string;
+            events: components["schemas"]["SealedEvent"][];
+            header: components["schemas"]["SealedWindowHeader"];
+            /** @description Whether this endpoint has a prover and will prove the window */
+            proving: boolean;
+            releases: components["schemas"]["Release"][];
+            /** Format: int64 */
+            seq: number;
+            /** Format: int64 */
+            session: number;
+        };
+        /** @description The control server's signed word that it holds a window */
+        SealedWindowAck: {
+            head: string;
+            /** Format: int64 */
+            next_index: number;
+            signature: number[];
+            /** Format: int64 */
+            window: number;
+        };
+        /** @description Header of one sealed window. Hashes travel as 64 hex characters */
+        SealedWindowHeader: {
+            /** Format: int32 */
+            count: number;
+            /** Format: int64 */
+            epoch: number;
+            /** Format: int64 */
+            first_index: number;
+            fresh: boolean;
+            gap: boolean;
+            head: string;
+            prev_head: string;
+            root: string;
+            /** Format: int64 */
+            window: number;
         };
         /**
          * @description Why the agent is stopping
@@ -1029,6 +1355,47 @@ export interface components {
             mfa_enabled: boolean;
             role: string;
             username: string;
+        };
+        /**
+         * @description The control server's answer to a window it will not take: where its copy of the agent's chain stands.
+         *     It is signed for the one request it answers, so nobody else can make an agent start over, and never from an old position
+         */
+        WindowRefusal: {
+            /** Format: int64 */
+            epoch: number;
+            head: string;
+            /** Format: int64 */
+            next_index: number;
+            /** Format: int64 */
+            next_window: number;
+            signature: number[];
+        };
+        WindowSummary: {
+            /** Format: int64 */
+            count: number;
+            /** Format: int64 */
+            epoch: number;
+            /** Format: int64 */
+            first_index: number;
+            fresh: boolean;
+            gap: boolean;
+            /** Format: int64 */
+            opened: number;
+            /** @description pending, verified, mismatch, or none when the endpoint has no prover */
+            proof: string;
+            /** Format: int64 */
+            received_at: number;
+            /** Format: int64 */
+            window: number;
+        };
+        WindowView: {
+            events: components["schemas"]["SealedEventView"][];
+            header: components["schemas"]["SealedWindowHeader"];
+            proof: string;
+            proving: boolean;
+            /** Format: int64 */
+            received_at: number;
+            releases: components["schemas"]["ReleaseView"][];
         };
     };
     responses: never;
@@ -1114,6 +1481,106 @@ export interface operations {
                 };
             };
             /** @description Agent not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    agent_chain: {
+        parameters: {
+            query?: {
+                /** @description How many of the most recent windows to return, at most 500 */
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                /** @description Agent ID */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Where the stored chain of sealed windows of an agent stands, with its most recent windows */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChainView"];
+                };
+            };
+            /** @description Agent not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    agent_sealed: {
+        parameters: {
+            query?: {
+                /** @description Only events before this index, to read further back than the page before */
+                before?: number | null;
+                /** @description How many events to return, at most 500 */
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                /** @description Agent ID */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The committed events of an agent, newest first: commitment, sealed size and window of each, and the content of those a rule opened */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SealedRow"][];
+                };
+            };
+            /** @description Agent not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    agent_window: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Agent ID */
+                id: string;
+                /** @description Window number */
+                window: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One sealed window: its header, its sealed events and what was released in it */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WindowView"];
+                };
+            };
+            /** @description The server holds no such window of this agent */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -1263,6 +1730,26 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    chain_summary: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description What the server holds of the sealed chains of all agents together */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChainSummary"];
+                };
             };
         };
     };
@@ -1585,6 +2072,26 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    ruleset: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The rules endpoints run and the proof programs this server accepts */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RulesetView"];
+                };
             };
         };
     };
@@ -2189,6 +2696,128 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description Batch with a sensor event, which only travels in a sealed window, nothing is stored */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    submit_proof: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProofSubmission"];
+            };
+        };
+        responses: {
+            /** @description The proof is accepted for these windows. They are verified when the proof says what the agent released, and marked as a mismatch when it does not */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProofAck"];
+                };
+            };
+            /** @description Request that cannot be read */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing or invalid signature, or unknown agent */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Replayed or stale request */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Receipt that does not verify, or a journal that contradicts the stored windows */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    ingest_window: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SealedWindow"];
+            };
+        };
+        responses: {
+            /** @description The server holds the window, the acknowledgement is signed with the deployment key */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SealedWindowAck"];
+                };
+            };
+            /** @description Request that cannot be read, nothing is stored */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing or invalid signature, or unknown agent */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The window does not continue the stored chain, answered with where that chain stands, signed for this request. A replayed or stale request is answered 409 too, with an error and no signature */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WindowRefusal"];
+                };
+            };
+            /** @description Window larger than MAX_WINDOW_BYTES, nothing is stored */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Window that is malformed or does not match its own header, nothing is stored. Answered with where the stored chain stands, signed for this request */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WindowRefusal"];
+                };
             };
         };
     };

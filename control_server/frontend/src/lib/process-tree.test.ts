@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import type { ApiEvent } from './api'
+import { findingOf } from './findings'
 import {
   alertTrail,
-  apps,
   baseName,
   buildProcessModel,
   expose,
@@ -150,10 +150,11 @@ describe('layoutProcessTree', () => {
 })
 
 describe('focus, folding and stacks', () => {
-  const model = buildProcessModel(events)
+  const found = findingOf({ rule: 'encoded-command', title: 'Encoded PowerShell command', technique: 'T1059.001', level: 'high', pid: 3, started_at: 30 })!
+  const model = buildProcessModel(events, [found])
   const pid = (value: number) => model.all.find((proc) => proc.pid === value)!
 
-  it('rates an interpreter that talks to the network above everything else', () => {
+  it('rates a process with a high finding above everything else', () => {
     expect(severity(pid(3))).toBe('alert')
     expect(severity(pid(2))).toBe('plain')
     expect([...alertTrail(model)].sort()).toEqual([pid(1).key, pid(2).key, pid(3).key].sort())
@@ -214,17 +215,6 @@ describe('findProcs', () => {
     expect(findProcs(model, '-enc').map((proc) => proc.pid)).toEqual([3])
     expect(findProcs(model, '4').map((proc) => proc.pid)).toEqual([4])
     expect(findProcs(model, '  ')).toEqual([])
-  })
-})
-
-describe('apps', () => {
-  it('groups processes by image and puts the riskiest first', () => {
-    const list = apps(buildProcessModel(events))
-    expect(list[0]).toMatchObject({ name: 'powershell.exe', severity: 'alert', connections: 2, bytes: 1000, files: 1 })
-    const svchost = list.find((app) => app.name === 'svchost.exe')!
-    expect(svchost.procs).toHaveLength(3)
-    expect(svchost.running).toBe(3)
-    expect(list.find((app) => app.name === 'WINWORD.EXE')!.running).toBe(0)
   })
 })
 

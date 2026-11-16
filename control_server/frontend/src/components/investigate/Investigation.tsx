@@ -19,14 +19,14 @@ import {
   type ProcessModel,
   type TreeOptions,
 } from '@/lib/process-tree'
-import { AppsLens } from './AppsLens'
 import { FilesLens } from './FilesLens'
 import { NetworkGraph } from './NetworkGraph'
 import { ProcessGraph } from './ProcessGraph'
 import { ProcessList } from './ProcessList'
 import { ProbeContext, type Probe } from './probe'
+import { SealedList } from './SealedList'
 
-export type Lens = 'processes' | 'network' | 'files' | 'apps' | 'persistence' | 'agent'
+export type Lens = 'processes' | 'network' | 'files' | 'persistence' | 'sealed' | 'agent'
 export type Arrangement = 'tree' | 'list'
 
 export type InvestigationState = {
@@ -36,12 +36,14 @@ export type InvestigationState = {
   find: string
   proc: string | null
   item: string | null
+  window: number | null
   when: Moment | null
   cam: Viewport | null
   period: Period | null
 }
 
 type Props = {
+  agentId: string
   model: ProcessModel
   loading: boolean
   now: number
@@ -59,7 +61,7 @@ const ARRANGEMENTS: { id: Arrangement; label: string }[] = [
 ]
 const BUSY_TREE = 60
 
-export default function Investigation({ model, loading, now, state, onChange }: Props) {
+export default function Investigation({ agentId, model, loading, now, state, onChange }: Props) {
   const hot = useMemo(() => hotSet(model), [model])
   const focus: Focus = state.focus ?? (hot.size > 0 && model.all.length > BUSY_TREE ? 'notable' : 'all')
   const [folds, setFolds] = useState<{ folded: Set<string>; opened: Set<string> }>({ folded: new Set(), opened: new Set() })
@@ -87,6 +89,7 @@ export default function Investigation({ model, loading, now, state, onChange }: 
 
   const probe = useMemo<Probe>(
     () => ({
+      agentId,
       model,
       layout,
       focus,
@@ -114,7 +117,7 @@ export default function Investigation({ model, loading, now, state, onChange }: 
         setFolds((current) => ({ folded: current.folded, opened: new Set(current.opened).add(groupId) }))
       },
     }),
-    [model, layout, focus, anchor, selected, state.find, found, inside, onChange],
+    [agentId, model, layout, focus, anchor, selected, state.find, found, inside, onChange],
   )
 
   const jump = (direction: 1 | -1) => {
@@ -124,7 +127,7 @@ export default function Investigation({ model, loading, now, state, onChange }: 
   }
 
   if (model.all.length === 0) {
-    return <Empty title={loading ? 'Loading telemetry' : 'No process, network or file telemetry from this endpoint yet'} />
+    return loading ? <Empty title="Loading opened events" /> : <SealedList agentId={agentId} />
   }
 
   const onCam = (cam: Viewport) => onChange({ cam })
@@ -177,9 +180,6 @@ export default function Investigation({ model, loading, now, state, onChange }: 
           {state.lens === 'processes' && state.arrangement === 'list' ? <ProcessList now={now} /> : null}
           {state.lens === 'network' ? <NetworkGraph cam={state.cam} onCam={onCam} /> : null}
           {state.lens === 'files' ? <FilesLens period={state.period} find={state.find} onFind={(find) => onChange({ find })} /> : null}
-          {state.lens === 'apps' ? (
-            <AppsLens onOpen={(name) => onChange({ lens: 'processes', find: name, proc: null, cam: null })} />
-          ) : null}
         </div>
       </div>
     </ProbeContext.Provider>

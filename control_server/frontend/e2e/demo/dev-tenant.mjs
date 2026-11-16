@@ -8,7 +8,7 @@ async function start(origin) {
   const server = await startServer(DEV_TENANT, { origin })
   let simulator
   try {
-    simulator = await startSimulator(DEV_TENANT, server.password)
+    simulator = await startSimulator(DEV_TENANT, server)
   } catch (error) {
     server.stop()
     throw error

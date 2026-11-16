@@ -1,17 +1,19 @@
 import { ChevronLeft } from 'lucide-react'
+import { FindingProof } from '@/components/common/Proof'
 import { Chip, CopyButton, FindingLine, SectionTitle } from '@/components/ui/bits'
 import { clock, dateTime, span } from '@/lib/format'
 import { lineage, type Proc } from '@/lib/process-tree'
 
 type Props = {
   proc: Proc
+  agentId: string
   host: string
   now: number
   onSelect: (key: string) => void
   onClose: () => void
 }
 
-export function ProcessSheet({ proc, host, now, onSelect, onClose }: Props) {
+export function ProcessSheet({ proc, agentId, host, now, onSelect, onClose }: Props) {
   const chain = lineage(proc)
   const outbound = proc.connections.length > 0
 
@@ -33,10 +35,11 @@ export function ProcessSheet({ proc, host, now, onSelect, onClose }: Props) {
       </div>
 
       {proc.findings.length > 0 ? (
-        <div className="mt-4 flex flex-col gap-2 rounded-xl border border-line bg-row p-3" role="list" aria-label="Findings">
+        <div className="mt-4 flex flex-col gap-3 rounded-xl border border-line bg-row p-3" role="list" aria-label="Findings">
           {proc.findings.map((finding) => (
-            <div key={finding.rule} role="listitem" className="flex">
+            <div key={finding.rule} role="listitem" className="flex flex-col gap-1.5">
               <FindingLine title={finding.title} technique={finding.technique} high={finding.level === 'high'} />
+              <FindingProof agentId={agentId} finding={finding} className="pl-[18px]" />
             </div>
           ))}
         </div>

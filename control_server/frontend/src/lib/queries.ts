@@ -1,8 +1,9 @@
-import { useQuery } from '@tanstack/react-query'
+import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
 import { useEffect, useMemo, useRef, useState, type RefObject } from 'react'
 import { api, type Agent } from './api'
 import { nowSeconds } from './format'
 import { CATEGORIES } from './events'
+import { SEALED_PAGE } from './sealed'
 
 export function useAgents() {
   return useQuery({ queryKey: ['agents'], queryFn: api.agents, refetchInterval: 15_000 })
@@ -29,6 +30,46 @@ export function useAgentEvents(agentId: string) {
     queryFn: () => api.events({ agentId, types: AGENT_EVENT_TYPES, limit: 1000 }),
     refetchInterval: 20_000,
   })
+}
+
+export function useDetections(agentId: string | undefined) {
+  return useQuery({
+    queryKey: ['agent-events', agentId, 'detections'],
+    queryFn: () => api.events({ agentId, types: ['detection'], limit: 1000 }),
+    enabled: !!agentId,
+    refetchInterval: 15_000,
+  })
+}
+
+export function useChain(agentId: string | undefined) {
+  return useQuery({ queryKey: ['chain', agentId], queryFn: () => api.chain(agentId!), enabled: !!agentId, refetchInterval: 15_000 })
+}
+
+export function useWindow(agentId: string | undefined, window: number | null | undefined) {
+  return useQuery({
+    queryKey: ['chain', agentId, 'window', window],
+    queryFn: () => api.window(agentId!, window!),
+    enabled: !!agentId && window != null,
+    refetchInterval: 15_000,
+  })
+}
+
+export function useSealed(agentId: string) {
+  return useInfiniteQuery({
+    queryKey: ['chain', agentId, 'sealed'],
+    queryFn: ({ pageParam }) => api.sealed(agentId, { before: pageParam, limit: SEALED_PAGE }),
+    initialPageParam: undefined as number | undefined,
+    getNextPageParam: (last) => (last.length < SEALED_PAGE ? undefined : last[last.length - 1]!.index),
+    refetchInterval: (query) => ((query.state.data?.pages.length ?? 0) > 1 ? false : 20_000),
+  })
+}
+
+export function useChainSummary() {
+  return useQuery({ queryKey: ['chain-summary'], queryFn: api.chainSummary, refetchInterval: 15_000 })
+}
+
+export function useRuleset() {
+  return useQuery({ queryKey: ['ruleset'], queryFn: api.ruleset, refetchInterval: 30_000 })
 }
 
 export function useUpgrades() {

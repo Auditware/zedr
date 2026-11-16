@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { ApiEvent } from './api'
 import { actionSummary, buildFileTree, fileRows, quietFolders } from './file-tree'
+import { findingOf } from './findings'
 import { buildProcessModel } from './process-tree'
 
 let serial = 0
@@ -13,6 +14,8 @@ function event(type: string, timestamp: number, data: Record<string, unknown>): 
 const create = (timestamp: number, pid: number, ppid: number, path: string, args: string[] = []) =>
   event('process', timestamp, { action: 'Create', pid, ppid, executable_path: path, command_line: [path, ...args], uid: 1000 })
 const touch = (timestamp: number, pid: number, action: string, path: string) => event('file', timestamp, { action, pid, path })
+const flagged = (pid: number, started_at: number) =>
+  findingOf({ rule: 'encoded-command', title: 'Encoded PowerShell command', technique: 'T1059.001', level: 'high', pid, started_at })!
 
 const model = buildProcessModel([
   create(100, 1, 0, 'C:\\Windows\\explorer.exe'),
@@ -24,7 +27,7 @@ const model = buildProcessModel([
   touch(155, 3, 'Create', 'C:\\Users\\Public\\update.dll'),
   touch(156, 3, 'Write', 'c:\\users\\public\\update.dll'),
   touch(160, 3, 'Delete', 'C:\\Users\\user\\Downloads\\report.pdf'),
-])
+], [flagged(3, 150)])
 
 const labels = (tree: ReturnType<typeof buildFileTree>, closed = new Set<string>()) =>
   fileRows(tree, (node) => !closed.has(node.id)).map((row) => `${'  '.repeat(row.depth)}${row.node.label}`)
@@ -90,7 +93,7 @@ describe('quietFolders', () => {
     const events = [create(100, 1, 0, 'C:\\Build\\cl.exe'), create(101, 2, 0, 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe', ['-enc', 'SQBFAFgAIAAoAE4A'])]
     for (let unit = 0; unit < 50; unit++) events.push(touch(110 + unit, 1, 'Write', `C:\\Build\\work\\job${unit % 5}\\unit${unit}.obj`))
     events.push(touch(200, 2, 'Create', 'C:\\Build\\tools\\run.ps1'))
-    const tree = buildFileTree(buildProcessModel(events), null, '')
+    const tree = buildFileTree(buildProcessModel(events, [flagged(2, 101)]), null, '')
     const closed = quietFolders(tree)
     expect([...closed]).toEqual(['C:\\Build\\work'])
     expect(labels(tree, closed)).toEqual(['C:\\Build', '  tools', '    run.ps1', '  work'])

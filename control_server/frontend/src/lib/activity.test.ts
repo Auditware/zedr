@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { binIndex, binPeriod, buildActivity, inPeriod, nextMember } from './activity'
 import type { ApiEvent } from './api'
+import { findingOf } from './findings'
 import { buildProcessModel } from './process-tree'
 
 let serial = 0
@@ -16,6 +17,9 @@ const create = (timestamp: number, pid: number, ppid: number, path: string) =>
 const connect = (timestamp: number, pid: number, port: number, sent: number, received: number) =>
   event('network', timestamp, { action: 'Connect', pid, protocol: 'tcp', dest_ip: '203.0.113.9', dest_port: port, bytes_sent: sent, bytes_received: received })
 
+const flagged = (pid: number, started_at: number, level = 'high') =>
+  findingOf({ rule: 'shell-network', title: 'Shell with an outbound connection', technique: 'T1071', level, pid, started_at })!
+
 const model = buildProcessModel([
   create(100, 1, 0, 'C:\\Windows\\explorer.exe'),
   create(105, 2, 1, 'C:\\Windows\\System32\\svchost.exe'),
@@ -26,7 +30,7 @@ const model = buildProcessModel([
   connect(120, 2, 443, 50, 50),
   event('file', 155, { action: 'Write', pid: 4, path: 'C:\\Users\\Public\\a.dll' }),
   event('file', 125, { action: 'Write', pid: 2, path: 'C:\\Windows\\Temp\\svc.log' }),
-])
+], [flagged(4, 150)])
 
 describe('bins', () => {
   it('maps a time to its bin and back to the seconds that bin covers', () => {
@@ -79,7 +83,7 @@ describe('marks that share a slot', () => {
     connect(151, 2, 443, 10, 10),
     create(152, 3, 2, 'C:\\Windows\\System32\\rundll32.exe'),
     connect(153, 3, 443, 10, 10),
-  ])
+  ], [flagged(2, 150, 'medium'), flagged(3, 152)])
   const group = buildActivity(crowded, 100, 200, 10).marks.find((item) => item.lane === 'processes')!
   const key = (pid: number) => crowded.all.find((proc) => proc.pid === pid)!.key
 

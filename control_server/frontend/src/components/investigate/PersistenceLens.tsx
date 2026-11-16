@@ -18,6 +18,7 @@ import {
   type Moment,
 } from '@/lib/persistence'
 import { useAgentEvents } from '@/lib/queries'
+import { SealedList } from './SealedList'
 
 type Props = {
   agent: Agent
@@ -174,7 +175,7 @@ export function PersistenceLens({ agent, find, onFind, when, onWhen, openId, onO
   }, [openId, shown.length])
 
   if (items.length === 0) {
-    return <Empty title={inventory.isLoading ? 'Loading autostart items' : 'This endpoint has not reported what starts by itself'} />
+    return inventory.isLoading ? <Empty title="Loading autostart items" /> : <SealedList agentId={agent.id} lead="No autostart item was opened." />
   }
 
   const notable = shown.filter((item) => item.finding || item.change)

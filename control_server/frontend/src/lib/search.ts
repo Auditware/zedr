@@ -6,7 +6,7 @@ export type SearchTarget =
   | { kind: 'endpoint'; agentId: string }
   | { kind: 'subnet'; key: string }
   | { kind: 'events'; agentId: string }
-  | { kind: 'page'; to: '/endpoints' | '/hunt' | '/events' | '/installers' | '/users' | '/settings' }
+  | { kind: 'page'; to: '/endpoints' | '/hunt' | '/events' | '/rules' | '/installers' | '/users' | '/settings' }
   | { kind: 'sign-out' }
 
 export type SearchResult = {
@@ -29,7 +29,8 @@ export type SearchSource = {
 const PAGES: { to: Extract<SearchTarget, { kind: 'page' }>['to']; label: string; words: string }[] = [
   { to: '/endpoints', label: 'Endpoints', words: 'endpoints map hosts incidents' },
   { to: '/hunt', label: 'Hunt', words: 'hunt query search threat' },
-  { to: '/events', label: 'Events', words: 'events stream log audit' },
+  { to: '/events', label: 'Events', words: 'events stream log audit sealed opened' },
+  { to: '/rules', label: 'Rules', words: 'rules detections proof image release open' },
   { to: '/installers', label: 'Installers', words: 'installers install keys enroll' },
   { to: '/users', label: 'Users', words: 'users accounts roles impersonate' },
   { to: '/settings', label: 'Settings', words: 'settings users two-factor api keys' },

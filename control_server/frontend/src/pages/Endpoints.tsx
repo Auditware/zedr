@@ -8,15 +8,19 @@ import { HostSheet } from '@/components/map/HostSheet'
 import { ActivityDock } from '@/components/investigate/ActivityDock'
 import { AgentLens } from '@/components/investigate/AgentLens'
 import { PersistenceLens } from '@/components/investigate/PersistenceLens'
+import { SealedList } from '@/components/investigate/SealedList'
 import type { InvestigationState, Lens } from '@/components/investigate/Investigation'
 import { formatCam, formatPeriod, parseCam, parsePeriod } from '@/components/investigate/probe'
 import { ProcessSheet } from '@/components/map/ProcessSheet'
+import { SealedCount } from '@/components/common/Proof'
 import { Empty, Row, SectionTitle, StateDot } from '@/components/ui/bits'
 import { Button } from '@/components/ui/button'
 import { CollapseToggle, Handle, Panel, PaneStrip, Split, STRIP_SIZE, useCollapsible } from '@/components/ui/panes'
 import { Segmented } from '@/components/ui/segmented'
 import { api, type Agent, type Incident } from '@/lib/api'
-import { incidentTitle } from '@/lib/events'
+import { eventData, incidentTitle } from '@/lib/events'
+import { findingOf } from '@/lib/findings'
+import { isGrave } from '@/lib/incidents'
 import { ago } from '@/lib/format'
 import {
   GROUP_BY,
@@ -27,7 +31,7 @@ import {
   type NodeState,
 } from '@/lib/map-layout'
 import { buildProcessModel } from '@/lib/process-tree'
-import { useAgents, useIncidents, useMedia, useNow } from '@/lib/queries'
+import { useAgents, useDetections, useIncidents, useMedia, useNow } from '@/lib/queries'
 
 const route = getRouteApi('/app/endpoints')
 const Investigation = lazy(() => import('@/components/investigate/Investigation'))
@@ -36,8 +40,8 @@ const LENSES: { id: Lens; label: string }[] = [
   { id: 'processes', label: 'Processes' },
   { id: 'network', label: 'Network' },
   { id: 'files', label: 'Files' },
-  { id: 'apps', label: 'Apps' },
   { id: 'persistence', label: 'Persistence' },
+  { id: 'sealed', label: 'Sealed' },
   { id: 'agent', label: 'Agent' },
 ]
 
@@ -77,7 +81,8 @@ export function Endpoints() {
       if (!group) groups.set(incident.agent_id, { agentId: incident.agent_id, latest: incident, count: 1 })
       else {
         group.count += 1
-        if (incident.opened_at > group.latest.opened_at) group.latest = incident
+        const graver = Number(isGrave(incident.incident_type)) - Number(isGrave(group.latest.incident_type))
+        if (graver > 0 || (graver === 0 && incident.opened_at > group.latest.opened_at)) group.latest = incident
       }
     }
     return [...groups.values()].sort((a, b) => b.latest.opened_at - a.latest.opened_at)
@@ -122,7 +127,11 @@ export function Endpoints() {
     enabled: !!selected,
     refetchInterval: 15_000,
   })
-  const processes = useMemo(() => buildProcessModel(telemetry.data ?? []), [telemetry.data])
+  const detections = useDetections(selected?.id)
+  const processes = useMemo(
+    () => buildProcessModel(telemetry.data ?? [], (detections.data ?? []).flatMap((event) => findingOf(eventData(event)) ?? [])),
+    [telemetry.data, detections.data],
+  )
   const hostIncidents = useMemo(() => allIncidents.filter((incident) => incident.agent_id === selected?.id), [allIncidents, selected?.id])
   const proc = selected && search.proc ? processes.byKey.get(search.proc) : undefined
   const investigation = useMemo<InvestigationState>(
@@ -133,11 +142,12 @@ export function Endpoints() {
       find: search.find ?? '',
       proc: search.proc ?? null,
       item: search.item ?? null,
+      window: search.win ?? null,
       when: search.when ?? null,
       cam: parseCam(search.cam),
       period: parsePeriod(search.t),
     }),
-    [search.view, search.layout, search.focus, search.find, search.proc, search.item, search.when, search.cam, search.t],
+    [search.view, search.layout, search.focus, search.find, search.proc, search.item, search.win, search.when, search.cam, search.t],
   )
 
   const investigate = useCallback(
@@ -154,6 +164,8 @@ export function Endpoints() {
           if ('proc' in patch) next.proc = patch.proc ?? undefined
           if ('item' in patch) next.item = patch.item ?? undefined
           else if ('lens' in patch) next.item = undefined
+          if ('window' in patch) next.win = patch.window ?? undefined
+          else if ('lens' in patch) next.win = undefined
           if ('when' in patch) next.when = patch.when ?? undefined
           else if ('lens' in patch) next.when = undefined
           if ('period' in patch) next.t = patch.period ? formatPeriod(patch.period) : undefined
@@ -233,6 +245,8 @@ export function Endpoints() {
                       now={now}
                       openId={investigation.item}
                       onOpen={(item) => investigate({ item })}
+                      window={investigation.window}
+                      onWindow={(window) => investigate({ window })}
                     />
                   ) : selected && investigation.lens === 'persistence' ? (
                     <PersistenceLens
@@ -245,10 +259,13 @@ export function Endpoints() {
                       openId={investigation.item}
                       onOpen={(item) => investigate({ item })}
                     />
+                  ) : selected && investigation.lens === 'sealed' ? (
+                    <SealedList key={selected.id} agentId={selected.id} />
                   ) : selected ? (
                     <Suspense fallback={null}>
                       <Investigation
                         key={selected.id}
+                        agentId={selected.id}
                         model={processes}
                         loading={telemetry.isLoading}
                         now={now}
@@ -280,6 +297,7 @@ export function Endpoints() {
                         <h1 className="truncate font-mono text-[19px]">{selected.hostname}</h1>
                       </nav>
                       <Segmented label="Investigate" value={investigation.lens} options={LENSES} onChange={(lens) => investigate({ lens })} />
+                      <SealedCount agentId={selected.id} className="ml-auto" />
                     </>
                   ) : (
                     <>
@@ -374,6 +392,7 @@ export function Endpoints() {
             {selected && proc ? (
               <ProcessSheet
                 proc={proc}
+                agentId={selected.id}
                 host={selected.hostname}
                 now={now}
                 onSelect={(key) => investigate({ proc: key })}

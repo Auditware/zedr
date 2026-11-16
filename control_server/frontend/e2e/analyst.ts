@@ -9,6 +9,8 @@ type Bridge = {
   canvas?: { nodes: () => Point[]; viewport: () => { x: number; y: number; zoom: number } }
 }
 
+export const PROVING = Boolean(process.env.ZEDR_DEMO_PROVER)
+
 export type Recorder = {
   shot: (name: string) => Promise<void>
   expectError: (pattern: RegExp) => void
@@ -61,7 +63,7 @@ export async function signIn(page: Page) {
   await page.getByLabel('Username').fill('admin')
   await page.getByLabel('Password').fill(password)
   await page.getByRole('button', { name: 'Sign in' }).click()
-  await expect(page).toHaveURL(/\/endpoints/)
+  await expect(page, 'checking a password is slow on a debug server while a prover has the cores').toHaveURL(/\/endpoints/, { timeout: 30_000 })
 }
 
 export async function mapNodes(page: Page): Promise<MapPoint[]> {
@@ -109,24 +111,6 @@ export async function drag(page: Page, from: { x: number; y: number }, dx: numbe
     await page.mouse.move(from.x + (dx * step) / steps, from.y + (dy * step) / steps)
   }
   await page.mouse.up()
-}
-
-export async function frameRate(page: Page, during: () => Promise<void>): Promise<number> {
-  await page.evaluate(() => {
-    const state = { frames: 0, start: performance.now(), stop: false }
-    ;(window as unknown as { __frames: typeof state }).__frames = state
-    const tick = () => {
-      state.frames += 1
-      if (!state.stop) requestAnimationFrame(tick)
-    }
-    requestAnimationFrame(tick)
-  })
-  await during()
-  return page.evaluate(() => {
-    const state = (window as unknown as { __frames: { frames: number; start: number; stop: boolean } }).__frames
-    state.stop = true
-    return (state.frames * 1000) / (performance.now() - state.start)
-  })
 }
 
 export async function expectNothingCutOff(page: Page, container: string, rows: string) {

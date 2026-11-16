@@ -1,9 +1,10 @@
 import { keepPreviousData, useInfiniteQuery, useQuery } from '@tanstack/react-query'
 import { getRouteApi, Link } from '@tanstack/react-router'
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { Pause, Play, X } from 'lucide-react'
+import { Lock, LockOpen, Pause, Play, X } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState, type PointerEvent } from 'react'
 import { JsonView } from '@/components/common/JsonView'
+import { FindingProof } from '@/components/common/Proof'
 import { formatPeriod, parsePeriod } from '@/components/investigate/probe'
 import { Chip, CopyButton, PageHeader } from '@/components/ui/bits'
 import { Button } from '@/components/ui/button'
@@ -13,18 +14,59 @@ import { Segmented } from '@/components/ui/segmented'
 import type { Period } from '@/lib/activity'
 import { api, type ApiEvent, type EventHistogram } from '@/lib/api'
 import { isAdmin, useSession } from '@/lib/auth'
+import { count, PROOF_FILL, PROOF_LABEL, PROOF_ORDER, share } from '@/lib/chain'
 import { cn } from '@/lib/cn'
 import { auditEvent, CATEGORIES, categoryOf, eventData, summarize, typesOf, type Category } from '@/lib/events'
+import { findingOf } from '@/lib/findings'
 import { clock, dateTime } from '@/lib/format'
 import { bucketsOf, buildLanes, countIn, LANE_BUCKETS, laneWindow, periodOf, RANGES, tickLabel, type Lane, type Range } from '@/lib/lanes'
 import { useLive } from '@/lib/live'
-import { useAgentIndex, useMedia, useNow, useSize } from '@/lib/queries'
+import { useAgentIndex, useChainSummary, useMedia, useNow, useSize } from '@/lib/queries'
 
 const route = getRouteApi('/app/events')
 const PAGE = 500
 const AUDIT_PAGE = 200
 const TICKS = 5
 const LANE = 16
+
+function FleetChain() {
+  const { data } = useChainSummary()
+  if (!data) return null
+  const shown = PROOF_ORDER.filter((status) => data.proofs[status] > 0)
+  return (
+    <section aria-label="What the server holds" className="flex shrink-0 flex-wrap items-center gap-x-8 gap-y-2 rounded-card border border-line bg-surface px-3 py-2.5">
+      <div className="flex items-baseline gap-2" data-fleet="sealed">
+        <Lock size={14} strokeWidth={1.75} className="self-center text-steel" aria-hidden />
+        <span className="font-display text-xl font-medium leading-none text-steel">{count(data.events)}</span>
+        <span className="text-xs text-muted">
+          events sealed by {count(data.agents)} {data.agents === 1 ? 'endpoint' : 'endpoints'}
+        </span>
+      </div>
+      <div className="flex items-baseline gap-2" data-fleet="opened">
+        <LockOpen size={14} strokeWidth={1.75} className="self-center text-text" aria-hidden />
+        <span className="font-display text-xl font-medium leading-none text-text">{count(data.opened)}</span>
+        <span className="text-xs text-muted">opened by rule matches, {share(data.opened, data.events)} of what the server holds</span>
+      </div>
+      <div className="min-w-[240px] flex-1" data-fleet="windows">
+        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5 font-mono text-[11px] text-muted">
+          <span className="text-soft">{count(data.windows)} windows</span>
+          {shown.map((status) => (
+            <span key={status} className="inline-flex items-center gap-1.5">
+              <span className={cn('h-2 w-2 rounded-[2px]', PROOF_FILL[status])} aria-hidden />
+              {PROOF_LABEL[status]} {count(data.proofs[status])}
+            </span>
+          ))}
+          {data.gaps > 0 ? <span className="text-alert-soft">{data.gaps === 1 ? '1 gap' : `${count(data.gaps)} gaps`}</span> : null}
+        </div>
+        <div className="mt-1.5 flex h-1.5 gap-px overflow-hidden rounded-full bg-sunken" aria-hidden>
+          {shown.map((status) => (
+            <span key={status} className={cn('min-w-[3px]', PROOF_FILL[status])} style={{ flexGrow: data.proofs[status] }} />
+          ))}
+        </div>
+      </div>
+    </section>
+  )
+}
 
 type LanesProps = {
   lanes: Lane[]
@@ -266,6 +308,10 @@ export function Events() {
   }, [lastIndex, rows.length, history, audit, withAudit])
 
   const opened = openId ? rows.find((event) => event.id === openId) : undefined
+  const openedData = opened ? eventData(opened) : {}
+  const openedFinding = opened?.agent_id
+    ? findingOf(opened.event_type === 'detection' ? openedData : openedData.evidence && typeof openedData.evidence === 'object' ? (openedData.evidence as Record<string, unknown>) : {})
+    : null
   const filteredHost = search.agent ? (agents.get(search.agent)?.hostname ?? search.agent.slice(0, 8)) : null
 
   return (
@@ -301,6 +347,8 @@ export function Events() {
           {paused ? <Play size={16} strokeWidth={1.5} /> : <Pause size={16} strokeWidth={1.5} />}
         </Button>
       </PageHeader>
+
+      <FleetChain />
 
       <Lanes
         lanes={lanes}
@@ -408,6 +456,7 @@ export function Events() {
                 {brokenAt === null ? 'hash chain intact' : `hash chain broken at #${brokenAt}`}
               </Chip>
             ) : null}
+            {openedFinding && opened.agent_id ? <FindingProof agentId={opened.agent_id} finding={openedFinding} /> : null}
             <div className="relative">
               <JsonView value={opened.data} />
               <CopyButton value={opened.data} label="Copy JSON" className="absolute right-1.5 top-1.5" />
