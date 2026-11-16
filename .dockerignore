@@ -3,6 +3,7 @@
 !protocol
 !ledger
 !rules
+!prover/guest
 !control_server/backend/Cargo.toml
 !control_server/backend/Cargo.lock
 !control_server/backend/src

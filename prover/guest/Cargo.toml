@@ -1,0 +1,20 @@
+[package]
+name = "zedr-guest"
+version = "0.1.0"
+edition = "2021"
+description = "The program a zedr proof is about: it replays sealed windows through the rules"
+
+[workspace]
+
+[dependencies]
+risc0-zkvm = { version = "=3.1.0", default-features = false, features = ["std"] }
+zedr-rules = { path = "../../rules" }
+sha2 = "=0.10.9"
+
+[patch.crates-io]
+sha2 = { git = "https://github.com/risc0/RustCrypto-hashes", tag = "sha2-v0.10.9-risczero.0" }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

@@ -180,6 +180,22 @@ build-linux-binary: ## Build the static Linux agent for x64 and arm64 in contain
 	@file control_server/backend/binaries/v0.1.0/linux/arm64/zedr-agent | grep -q "ELF 64-bit.*aarch64.*static" || (echo "ERROR: arm64 binary is not a static aarch64 ELF" && exit 1)
 	@ls -lh control_server/backend/binaries/v0.1.0/linux/*/zedr-agent
 
+.PHONY: guest
+guest: ## Build the rule program a proof is about, reproducibly in a container, and print its image ID
+	@cargo risczero build --manifest-path prover/guest/Cargo.toml
+
+GUEST_BIN := $(abspath prover/guest/target/riscv32im-risc0-zkvm-elf/docker/zedr-guest.bin)
+
+.PHONY: prover
+prover: ## Build the prover for this machine around the rule program from `make guest`
+	@test -f $(GUEST_BIN) || (echo "ERROR: run 'make guest' first" && exit 1)
+	@ZEDR_GUEST_BIN=$(GUEST_BIN) cargo build --release --manifest-path prover/host/Cargo.toml
+	@prover/host/target/release/zedr-prover image-id
+
+.PHONY: test-zk
+test-zk: guest prover ## Prove and verify a small window for real, this takes minutes
+	@prover/host/target/release/zedr-prover selftest
+
 .PHONY: test-linux-container
 test-linux-container: ## Test the shared and Linux agent code in a Linux container
 	@docker build --file agent/linux/Dockerfile --target test --progress plain .
