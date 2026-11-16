@@ -4451,6 +4451,22 @@ async fn test_the_console_reads_what_the_server_holds_of_all_chains_together() {
 }
 
 #[tokio::test]
+async fn test_a_live_stream_says_it_is_open_before_anything_happens() {
+    use futures::StreamExt;
+    let app = create_test_app().await;
+    let token = admin_token("user");
+
+    for stream in ["/api/admin/events/stream", "/api/admin/agents/stream"] {
+        let request = Request::builder().uri(format!("{}?token={}", stream, token)).body(Body::empty()).unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{}", stream);
+        let mut body = response.into_body().into_data_stream();
+        let first = tokio::time::timeout(std::time::Duration::from_secs(2), body.next()).await.expect("a quiet stream still sends its first bytes at once");
+        assert_eq!(first.unwrap().unwrap().as_ref(), b": open\n\n", "{}", stream);
+    }
+}
+
+#[tokio::test]
 async fn test_the_console_reads_the_committed_events_of_an_agent_newest_first_and_only_the_opened_in_the_clear() {
     let (app, pool) = create_proving_app().await;
     let mut host = enroll_endpoint(&app, &pool, "sealed-host").await;

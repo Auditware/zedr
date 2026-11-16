@@ -1,7 +1,7 @@
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
-    response::sse::{Event, Sse},
+    response::sse::{Event, KeepAlive, Sse},
     Json,
 };
 use futures::stream::{Stream, StreamExt};
@@ -74,6 +74,11 @@ pub struct StreamQuery {
     token: String,
 }
 
+/// The first thing a stream sends. A browser counts a stream as open only once bytes arrive, and on a quiet fleet the first event can be minutes away
+pub fn opened() -> impl Stream<Item = Result<Event, Infallible>> {
+    futures::stream::once(async { Ok(Event::default().comment("open")) })
+}
+
 #[utoipa::path(
     get,
     path = "/api/admin/agents/stream",
@@ -109,5 +114,5 @@ pub async fn stream_agents(
     })
     .take_until(ended);
 
-    Ok(Sse::new(stream))
+    Ok(Sse::new(opened().chain(stream)).keep_alive(KeepAlive::default()))
 }

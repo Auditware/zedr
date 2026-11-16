@@ -194,5 +194,5 @@ pub async fn stream_events(
         })
         .take_until(ended);
 
-    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+    Ok(Sse::new(super::agents::opened().chain(stream)).keep_alive(KeepAlive::default()))
 }
