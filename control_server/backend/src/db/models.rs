@@ -81,10 +81,3 @@ pub struct Event {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub received_at: Option<i64>,
 }
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EventSubmission {
-    pub agent_id: String,
-    pub event_type: String,
-    pub data: serde_json::Value,
-}

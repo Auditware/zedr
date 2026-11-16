@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use chrono::Utc;
 use sqlx::{QueryBuilder, Sqlite, SqliteConnection, SqliteExecutor};
 use zedr_ledger::{leaf, seal, Hash, WindowHeader, GENESIS};
-use zedr_protocol::{bytes_from_base64, hash_from_hex, hash_to_hex, Release, SealedWindow, SensorEvent, SystemEvent};
+use zedr_protocol::{bytes_from_base64, hash_from_hex, hash_to_hex, ProcessAction, Release, SealedWindow, SensorEvent, SystemEvent};
 use zedr_rules::{Level, RuleId};
 
 use crate::api::ingestion::events::store_event;
@@ -265,18 +265,19 @@ async fn apply_release(
     }
     let opened = detections::roles(rule, release.pid, &events[0], &events[1..])?;
 
-    let owner = match &opened {
-        Opened::Process { process, parent, .. } => Some(Described::new(process, *parent, release.started_at)),
-        Opened::Item(_) => None,
+    let (owner, owner_at) = match &opened {
+        Opened::Process { process, parent, .. } => (Some(Described::new(process, *parent, release.started_at)), usize::from(!matches!(events[0], SensorEvent::Process(_)))),
+        Opened::End { process, .. } => (Some(Described::new(process, None, release.started_at)), 1),
+        Opened::Item(_) => (None, 0),
     };
-    let owner_at = usize::from(!matches!(events[0], SensorEvent::Process(_)));
-    for (at, event) in events.iter().enumerate() {
+    // Oldest first, so that a process is in the index before its end is
+    for (at, event) in events.iter().enumerate().rev() {
         if stored_as[at].is_some() {
             continue;
         }
         let alone;
         let described = match event {
-            SensorEvent::Process(process) if at != owner_at => {
+            SensorEvent::Process(process) if at != owner_at && !matches!(process.action, ProcessAction::Terminate) => {
                 alone = Described::new(process, None, process.timestamp);
                 Some(&alone)
             }
@@ -295,19 +296,18 @@ async fn apply_release(
         announce.push(stored);
     }
 
-    let finding = Finding::new(rule, release.pid, release.started_at, &opened, release.trigger, header.window);
-    let finding_event_id = if repeats(conn, agent_id, &finding).await? {
-        None
-    } else {
-        let evidence = finding.evidence();
-        let recorded = incidents::insert_event(&mut *conn, Some(agent_id), "detection", evidence.clone()).await?;
-        let id = recorded.id.clone();
-        announce.push(recorded);
-        if rule.level() == Level::High {
-            announce.extend(incidents::open_within(conn, agent_id, &finding.incident_type(), evidence).await?);
+    let mut finding_event_id = None;
+    if let Some(finding) = Finding::new(rule, release.pid, release.started_at, &opened, release.trigger, header.window) {
+        if !repeats(conn, agent_id, &finding).await? {
+            let evidence = finding.evidence();
+            let recorded = incidents::insert_event(&mut *conn, Some(agent_id), "detection", evidence.clone()).await?;
+            finding_event_id = Some(recorded.id.clone());
+            announce.push(recorded);
+            if rule.level() == Level::High {
+                announce.extend(incidents::open_within(conn, agent_id, &finding.incident_type(), evidence).await?);
+            }
         }
-        Some(id)
-    };
+    }
 
     sqlx::query("INSERT INTO releases (agent_id, window, trigger_idx, rule, pid, started_at, context, finding_event_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
         .bind(agent_id)

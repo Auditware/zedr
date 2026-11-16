@@ -269,11 +269,15 @@ pub async fn accept(state: &AppState, agent_id: &str, agent: &Hash, receipt: &st
     }
 }
 
-pub fn deadline_from_env() -> std::result::Result<i64, String> {
-    match std::env::var(DEADLINE_ENV) {
-        Ok(raw) => raw.parse::<i64>().ok().filter(|secs| *secs > 0).ok_or_else(|| format!("{} must be a number of seconds above zero", DEADLINE_ENV)),
-        Err(_) => Ok(DEFAULT_DEADLINE_SECS),
+pub fn parse_deadline(raw: &str) -> std::result::Result<i64, String> {
+    if raw.trim().is_empty() {
+        return Ok(DEFAULT_DEADLINE_SECS);
     }
+    raw.trim().parse::<i64>().ok().filter(|secs| *secs > 0).ok_or_else(|| format!("{} must be a number of seconds above zero", DEADLINE_ENV))
+}
+
+pub fn deadline_from_env() -> std::result::Result<i64, String> {
+    parse_deadline(&std::env::var(DEADLINE_ENV).unwrap_or_default())
 }
 
 pub async fn sweep_once(pool: &SqlitePool, events_tx: &broadcast::Sender<SystemEventBroadcast>, now: i64, deadline_secs: i64) -> Result<()> {
@@ -326,6 +330,16 @@ mod tests {
         assert!(parse_image_ids("").unwrap().is_empty());
         assert!(parse_image_ids("abcd").unwrap_err().contains("abcd"));
         assert!(parse_image_ids(&format!("{},{}", first, "zz".repeat(32))).is_err());
+    }
+
+    #[test]
+    fn test_the_proof_deadline_is_an_hour_unless_it_is_set() {
+        assert_eq!(parse_deadline(""), Ok(3600));
+        assert_eq!(parse_deadline("  "), Ok(3600));
+        assert_eq!(parse_deadline("900"), Ok(900));
+        for refused in ["0", "-60", "an hour", "1.5"] {
+            assert!(parse_deadline(refused).unwrap_err().contains(DEADLINE_ENV), "{}", refused);
+        }
     }
 
     fn fake_receipt(image_id: Hash, journal: &[u8]) -> Vec<u8> {

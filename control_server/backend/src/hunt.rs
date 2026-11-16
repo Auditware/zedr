@@ -1,6 +1,6 @@
 use serde::Serialize;
 use sqlx::{Row, SqliteExecutor, SqlitePool};
-use zedr_protocol::{InventoryAction, PackageManager, PersistenceKind, ProcessAction, ProcessEvent, SensorEvent};
+use zedr_protocol::{PersistenceKind, ProcessAction, ProcessEvent, SensorEvent};
 use zedr_rules::base_name;
 use utoipa::ToSchema;
 
@@ -10,7 +10,7 @@ const ROW_LIMIT: i64 = 500;
 const ENDPOINT_LIMIT: i64 = 200;
 const QUERY_LIMIT: usize = 4000;
 const DEPTH_LIMIT: usize = 32;
-const KINDS: &str = "Start with process, connection, file, detection, package or persistence";
+const KINDS: &str = "Start with process, connection, file, detection or persistence";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Entity {
@@ -18,7 +18,6 @@ pub enum Entity {
     Connection,
     File,
     Detection,
-    Package,
     Persistence,
 }
 
@@ -262,7 +261,6 @@ pub fn parse(source: &str) -> std::result::Result<Query, QueryError> {
             "connection" => Entity::Connection,
             "file" => Entity::File,
             "detection" => Entity::Detection,
-            "package" => Entity::Package,
             "persistence" => Entity::Persistence,
             _ => return fail(KINDS, 1),
         },
@@ -286,7 +284,6 @@ enum Kind {
     Text,
     Number,
     Flag,
-    Version,
 }
 
 struct Field {
@@ -316,7 +313,6 @@ const PROCESS: &[Field] = &[
     text("parent.name", "r.parent_name"),
     text("parent.path", "r.parent_path"),
     number("parent.pid", "r.parent_pid"),
-    text("grandparent.name", "r.grandparent_name"),
 ];
 const CONNECTION: &[Field] = &[
     text("process.name", "r.process_name"),
@@ -342,14 +338,6 @@ const DETECTION: &[Field] = &[
     text("command", "json_extract(r.data, '$.command')"),
     text("parent", "json_extract(r.data, '$.parent')"),
     number("time", "r.timestamp"),
-];
-const PACKAGE: &[Field] = &[
-    text("name", "r.name"),
-    Field { name: "version", sql: "r.version", kind: Kind::Version },
-    text("manager", "r.manager"),
-    text("arch", "r.architecture"),
-    text("previous", "r.previous_version"),
-    number("time", "r.seen_at"),
 ];
 const PERSISTENCE: &[Field] = &[
     text("kind", "r.kind"),
@@ -415,15 +403,6 @@ fn shape(entity: Entity) -> Shape {
                 "json_extract(r.data, '$.image')",
             ],
         },
-        Entity::Package => Shape {
-            name: "package",
-            fields: PACKAGE,
-            from: "hunt_packages r JOIN agents a ON a.id = r.agent_id WHERE 1 = 1",
-            time: "r.seen_at",
-            process: "NULL",
-            columns: &["package", "version", "was", "manager", "arch"],
-            cells: &["r.name", "r.version", "COALESCE(r.previous_version, '')", "r.manager", "r.architecture"],
-        },
         Entity::Persistence => Shape {
             name: "persistence",
             fields: PERSISTENCE,
@@ -443,60 +422,6 @@ fn lookup(entity: Entity, name: &str, at: usize) -> std::result::Result<&'static
     }
     let known: Vec<&str> = shape.fields.iter().chain(HOST.iter()).map(|field| field.name).collect();
     fail(format!("{} has no field {}. Fields: {}", shape.name, name, known.join(", ")), at)
-}
-
-const VERSION_TILDE: u8 = 0x01;
-const VERSION_END: u8 = 0x02;
-const PRE_RELEASE: [(&str, &str); 4] = [("_alpha", "~alpha"), ("_beta", "~beta"), ("_pre", "~pre"), ("_rc", "~rc")];
-
-fn version_number(key: &mut Vec<u8>, digits: &str) {
-    let significant = digits.trim_start_matches('0');
-    key.push(significant.len().min(usize::from(u8::MAX)) as u8);
-    key.extend_from_slice(significant.as_bytes());
-}
-
-/// A text key whose byte order is the order of the versions: numbers by value, a tilde or a pre-release suffix before the release, letters before punctuation, an epoch first
-pub fn version_key(version: &str) -> String {
-    let trimmed = version.trim();
-    let (epoch, rest) = match trimmed.split_once(':') {
-        Some((epoch, rest)) if !epoch.is_empty() && epoch.bytes().all(|byte| byte.is_ascii_digit()) => (epoch, rest),
-        _ => ("", trimmed),
-    };
-    let mut rest = rest.to_string();
-    for (suffix, ordered) in PRE_RELEASE {
-        rest = rest.replace(suffix, ordered);
-    }
-
-    let mut key = Vec::new();
-    version_number(&mut key, epoch);
-    let mut remaining = rest.as_str();
-    loop {
-        let split = remaining.find(|current: char| current.is_ascii_digit()).unwrap_or(remaining.len());
-        for current in remaining[..split].chars() {
-            key.push(match current {
-                '~' => VERSION_TILDE,
-                letter if letter.is_ascii_alphabetic() => letter as u8,
-                other if other.is_ascii() => other as u8 | 0x80,
-                _ => u8::MAX,
-            });
-        }
-        key.push(VERSION_END);
-        remaining = &remaining[split..];
-        if remaining.is_empty() {
-            break;
-        }
-        let split = remaining.find(|current: char| !current.is_ascii_digit()).unwrap_or(remaining.len());
-        version_number(&mut key, &remaining[..split]);
-        remaining = &remaining[split..];
-    }
-    key.iter().map(|byte| format!("{:02x}", byte)).collect()
-}
-
-fn manager_name(manager: PackageManager) -> &'static str {
-    match manager {
-        PackageManager::Dpkg => "dpkg",
-        PackageManager::Apk => "apk",
-    }
 }
 
 pub fn kind_name(kind: PersistenceKind) -> &'static str {
@@ -528,13 +453,13 @@ fn compile(entity: Entity, expr: &Expr, binds: &mut Vec<Value>) -> std::result::
             let mut slots = Vec::new();
             for value in values {
                 match (found.kind, value) {
-                    (Kind::Text | Kind::Version, Value::Text(_)) | (Kind::Number, Value::Number(_)) => binds.push(value.clone()),
-                    (Kind::Text | Kind::Version, Value::Number(number)) => binds.push(Value::Text(number.to_string())),
+                    (Kind::Text, Value::Text(_)) | (Kind::Number, Value::Number(_)) => binds.push(value.clone()),
+                    (Kind::Text, Value::Number(number)) => binds.push(Value::Text(number.to_string())),
                     _ => return fail(format!("The list for {} mixes values of the wrong kind", found.name), at),
                 }
                 slots.push("?");
             }
-            let collation = if matches!(found.kind, Kind::Text | Kind::Version) { " COLLATE NOCASE" } else { "" };
+            let collation = if found.kind == Kind::Text { " COLLATE NOCASE" } else { "" };
             Ok(format!("({}{} IN ({}))", found.sql, collation, slots.join(", ")))
         }
         Expr::Compare { field, op, value, at } => {
@@ -560,8 +485,8 @@ fn compile(entity: Entity, expr: &Expr, binds: &mut Vec<Value>) -> std::result::
                     Ok(format!("({} {} ?)", found.sql, symbol))
                 }
                 (Kind::Number, _) => fail(format!("{} is a number", found.name), at),
-                (Kind::Text | Kind::Version, Value::Flag(_)) => fail(format!("{} is text", found.name), at),
-                (Kind::Text | Kind::Version, value) => {
+                (Kind::Text, Value::Flag(_)) => fail(format!("{} is text", found.name), at),
+                (Kind::Text, value) => {
                     let wanted = match value {
                         Value::Number(number) => number.to_string(),
                         Value::Text(text) => text.clone(),
@@ -584,16 +509,6 @@ fn compile(entity: Entity, expr: &Expr, binds: &mut Vec<Value>) -> std::result::
                             binds.push(like(&wanted));
                             Ok(format!("({sql} IS NULL OR {sql} NOT LIKE ? ESCAPE '\\')", sql = found.sql))
                         }
-                        Op::Gt | Op::Ge | Op::Lt | Op::Le if found.kind == Kind::Version => {
-                            let symbol = match op {
-                                Op::Gt => ">",
-                                Op::Ge => ">=",
-                                Op::Lt => "<",
-                                _ => "<=",
-                            };
-                            binds.push(Value::Text(version_key(&wanted)));
-                            Ok(format!("({}_key {} ?)", found.sql, symbol))
-                        }
                         Op::Gt | Op::Ge | Op::Lt | Op::Le => fail(format!("{} is text, use =, !=, ~ or !~", found.name), at),
                     }
                 }
@@ -609,7 +524,7 @@ pub struct HuntEntity {
 }
 
 pub fn entities() -> Vec<HuntEntity> {
-    [Entity::Process, Entity::Connection, Entity::File, Entity::Detection, Entity::Package, Entity::Persistence]
+    [Entity::Process, Entity::Connection, Entity::File, Entity::Detection, Entity::Persistence]
         .into_iter()
         .map(|entity| {
             let shape = shape(entity);
@@ -801,40 +716,6 @@ pub async fn index<'e>(executor: impl SqliteExecutor<'e>, agent_id: &str, event:
             .execute(executor)
             .await?;
         }
-        SensorEvent::Package(package) if matches!(package.action, InventoryAction::Removed) => {
-            sqlx::query("DELETE FROM hunt_packages WHERE agent_id = ? AND manager = ? AND name = ? AND architecture = ?")
-                .bind(agent_id)
-                .bind(manager_name(package.manager))
-                .bind(&package.name)
-                .bind(&package.architecture)
-                .execute(executor)
-                .await?;
-        }
-        SensorEvent::Package(package) => {
-            sqlx::query(
-                "INSERT OR REPLACE INTO hunt_packages (agent_id, manager, name, architecture, version, version_key, previous_version, seen_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            )
-            .bind(agent_id)
-            .bind(manager_name(package.manager))
-            .bind(&package.name)
-            .bind(&package.architecture)
-            .bind(&package.version)
-            .bind(version_key(&package.version))
-            .bind(&package.previous_version)
-            .bind(package.timestamp as i64)
-            .execute(executor)
-            .await?;
-        }
-        SensorEvent::Persistence(item) if matches!(item.action, InventoryAction::Removed) => {
-            sqlx::query("DELETE FROM hunt_persistence WHERE agent_id = ? AND kind = ? AND path = ? AND name = ?")
-                .bind(agent_id)
-                .bind(kind_name(item.kind))
-                .bind(&item.path)
-                .bind(&item.name)
-                .execute(executor)
-                .await?;
-        }
         SensorEvent::Persistence(item) => {
             sqlx::query(
                 "INSERT OR REPLACE INTO hunt_persistence (agent_id, kind, path, name, command, user, enabled, hash, seen_at)
@@ -852,6 +733,8 @@ pub async fn index<'e>(executor: impl SqliteExecutor<'e>, agent_id: &str, event:
             .execute(executor)
             .await?;
         }
+        // No rule opens a package, so none reaches the index
+        SensorEvent::Package(_) => {}
     }
     Ok(())
 }
@@ -921,45 +804,6 @@ mod tests {
     }
 
     #[test]
-    fn test_version_keys_sort_the_way_versions_do() {
-        let ascending = [
-            ("3.0.9", "3.0.14"),
-            ("3.0.13-0ubuntu3", "3.0.14"),
-            ("3.0.13-0ubuntu3", "3.0.13-0ubuntu3.5"),
-            ("1.1.1n-0+deb11u5", "1.1.1w-0+deb11u1"),
-            ("2.0", "1:1.0"),
-            ("1.0~rc1", "1.0"),
-            ("1.2.3_rc1", "1.2.3"),
-            ("1.2.3_alpha2", "1.2.3_beta1"),
-            ("1.2.3", "1.2.3_p1"),
-            ("1.37.0-r9", "1.37.0-r18"),
-            ("3.0.14", "3.0.14-r0"),
-            ("1.0", "1.0.0"),
-            ("9", "10"),
-        ];
-        for (lower, higher) in ascending {
-            assert!(version_key(lower) < version_key(higher), "{} should sort before {}", lower, higher);
-        }
-        assert_eq!(version_key("1.01"), version_key("1.1"));
-        assert_eq!(version_key(" 2.4.1 "), version_key("2.4.1"));
-    }
-
-    #[test]
-    fn test_a_version_is_ordered_by_its_key_and_matched_as_text() {
-        let (sql, binds) = compiled("package where name = openssl and version < 3.0.14");
-        assert_eq!(sql, "((r.name = ? COLLATE NOCASE) AND (r.version_key < ?))");
-        assert_eq!(binds, vec![Value::Text("openssl".into()), Value::Text(version_key("3.0.14"))]);
-
-        let (sql, binds) = compiled(r#"package where version = "3.0.13-0ubuntu3" or version ~ ubuntu or version >= 3"#);
-        assert_eq!(sql, "(((r.version = ? COLLATE NOCASE) OR (r.version LIKE ? ESCAPE '\\')) OR (r.version_key >= ?))");
-        assert_eq!(binds[0], Value::Text("3.0.13-0ubuntu3".into()));
-        assert_eq!(binds[2], Value::Text(version_key("3")));
-
-        assert!(rejected("package where name > openssl").message.contains("is text"));
-        assert!(rejected("persistence where enabled > 1").message.contains("true or false"));
-    }
-
-    #[test]
     fn test_values_never_reach_the_sql_text() {
         let (sql, binds) = compiled(r#"connection where dest.ip = "1.2.3.4'; DROP TABLE agents; --" and dest.port = 443"#);
         assert!(!sql.contains("DROP"));
@@ -974,7 +818,6 @@ mod tests {
             "connection where host.ip ~ 10.20",
             "file where host.platform = windows",
             "detection where host = eng-ws-01 and level = high",
-            "package where host.platform = linux and name = openssl",
             "persistence where host = eng-ws-01 and kind = cron",
         ] {
             assert!(compiled(source).0.contains("a."), "{}", source);
@@ -994,6 +837,9 @@ mod tests {
         assert_eq!(rejected("process where pid ~ 4").message, "pid is a number, ~ works on text");
         assert_eq!(rejected("process where name > a").message, "name is text, use =, !=, ~ or !~");
         assert_eq!(rejected("process where running = yes").message, "running is true or false, compare it with = or !=");
+        assert_eq!(rejected("persistence where enabled > 1").message, "enabled is true or false, compare it with = or !=");
+        assert_eq!(rejected("package where name = openssl").message, KINDS, "no rule opens a package, so there is none to hunt");
+        assert!(rejected("process where grandparent.name = a").message.starts_with("process has no field grandparent.name"));
         assert_eq!(rejected("process where name = a name = b").message, "Expected and, or, or the end of the query");
     }
 }

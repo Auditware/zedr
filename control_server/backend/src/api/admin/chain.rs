@@ -128,7 +128,9 @@ pub struct ReleaseView {
     pub trigger: i64,
     pub rule: String,
     pub title: String,
+    /// Empty for a rule that only follows up on a finding
     pub technique: String,
+    /// high, medium, or info for a rule that only follows up on a finding and is none itself
     pub level: String,
     pub context: Vec<u64>,
     pub proven: bool,
@@ -233,7 +235,9 @@ pub async fn agent_window(State(state): State<AppState>, Path((agent_id, window)
 pub struct RuleView {
     pub id: String,
     pub title: String,
+    /// Empty for a rule that only follows up on a finding
     pub technique: String,
+    /// high, medium, or info for a rule that only follows up on a finding and is none itself
     pub level: String,
     /// What a match of this rule lets the server open
     pub opens: String,

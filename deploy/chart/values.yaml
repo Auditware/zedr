@@ -20,6 +20,10 @@ server:
   # Public key of a replaced signing key, taken from the refusal in the server log.
   # Set it only after the enrolled agents were scheduled for reinstall.
   signingKeyChangeAccepted: ""
+  # Image IDs of the rule programs whose proofs the server accepts, 64 hex characters each. Empty accepts no proof.
+  guestImageIds: []
+  # Seconds an endpoint with a prover has to prove a sealed window before a proof_overdue incident opens.
+  proofDeadlineSecs: 3600
   logLevel: ""
 
 secrets:

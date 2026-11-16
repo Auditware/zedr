@@ -56,6 +56,8 @@ Sign in to the console as `admin` with `ADMIN_PASSWORD`. The password seeds that
 | `server.adminAllowedCidrs` | `[]` | CIDRs allowed to reach the console, `/api/admin`, `/api/auth` and `/api-docs`. Empty allows any address. Agent paths are never restricted. |
 | `server.agentVersion` | `0.1.0` | Agent release handed to endpoints. The image must hold `/app/binaries/v<agentVersion>`. |
 | `server.signingKeyChangeAccepted` | empty | Public key of a replaced signing key. See [Signing key](#signing-key). |
+| `server.guestImageIds` | `[]` | Image IDs of the rule programs whose proofs the server accepts, 64 hex characters each, as `zedr-prover image-id` prints them. Sets `ZEDR_GUEST_IMAGE_IDS`. Empty accepts no proof, so every proof an endpoint sends opens a `proof_invalid` incident. |
+| `server.proofDeadlineSecs` | `3600` | Seconds an endpoint with a prover has to prove a sealed window before a `proof_overdue` incident opens. Sets `ZEDR_PROOF_DEADLINE_SECS`. |
 | `server.logLevel` | empty | Sets `ZEDR_LOG_LEVEL`. |
 | `secrets.mode` | `create` | `create` renders a Secret from `secrets.jwtSecret`, `secrets.adminPassword` and `secrets.signingKeyHex`, all required. `existing` reads `secrets.existingSecret`, which must hold the keys `JWT_SECRET`, `ADMIN_PASSWORD` and `ZEDR_SIGNING_KEY_HEX`. |
 | `tls.mode` | `existingSecret` | `existingSecret` mounts the `kubernetes.io/tls` Secret named in `tls.existingSecret`. `certManager` requests a Certificate for the host of `server.url` from `tls.certManager.issuerRef`. |

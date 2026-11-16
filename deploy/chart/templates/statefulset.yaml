@@ -65,6 +65,14 @@ spec:
             - name: ZEDR_SIGNING_KEY_CHANGE_ACCEPTED
               value: {{ . | quote }}
             {{- end }}
+            {{- with .Values.server.guestImageIds }}
+            - name: ZEDR_GUEST_IMAGE_IDS
+              value: {{ join "," . | quote }}
+            {{- end }}
+            {{- with .Values.server.proofDeadlineSecs }}
+            - name: ZEDR_PROOF_DEADLINE_SECS
+              value: {{ int64 . | quote }}
+            {{- end }}
             {{- with .Values.server.logLevel }}
             - name: ZEDR_LOG_LEVEL
               value: {{ . | quote }}
