@@ -2,6 +2,7 @@
 name = "zedr-rules"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
 description = "Detection rules for zedr, the same code on the agent, on the control server and inside the proof"
 build = "build.rs"
 

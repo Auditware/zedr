@@ -2,6 +2,7 @@
 name = "zedr-guest"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
 description = "The program a zedr proof is about: it replays sealed windows through the rules"
 
 [workspace]

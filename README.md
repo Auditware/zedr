@@ -71,3 +71,7 @@ opens the console on http://localhost:7771 against a test tenant: a control serv
 - [Development and deployment standards](.github/copilot-instructions.md#developments-and-deployment-standards)
 
 What is done and what is open is in [TODO.md](./TODO.md).
+
+## License
+
+MIT, see [LICENSE](./LICENSE).
