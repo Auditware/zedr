@@ -67,7 +67,7 @@ make demo             # console on http://localhost:7771 with a simulated fleet
 make help             # every other target
 ```
 
-Sign in to the demo with the test tenant button.
+Sign in to the demo with the test tenant button. Its fleet is simulated and its proof states are stand-ins, which the console says. `make test-e2e-linux` is the run with a real agent and real proofs.
 
 ## Status
 

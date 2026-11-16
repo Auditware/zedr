@@ -75,7 +75,7 @@ const stop = () => {
   try {
     process.kill(-simulator.pid, 'SIGTERM')
   } catch {
-    // the simulator and its provers are already gone
+    // the simulator is already gone
   }
   process.exit(0)
 }
@@ -90,7 +90,6 @@ simulator.stdin.end(
       server: `http://127.0.0.1:${relay.address().port}`,
       deploymentKey: process.env.ZEDR_DEMO_DEPLOYMENT_KEY,
       stateDir: process.env.ZEDR_DEMO_STATE,
-      prover: process.env.ZEDR_DEMO_PROVER || null,
       enrollmentKeys,
       now: Math.floor(Date.now() / 1000),
     }),

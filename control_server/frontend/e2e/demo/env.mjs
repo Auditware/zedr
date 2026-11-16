@@ -14,8 +14,8 @@ export const CERT = path.join(DEMO_DIR, 'cert.pem')
 export const KEY = path.join(DEMO_DIR, 'key.pem')
 export const DEV_TENANT = tenant('dev', 7797)
 export const SWEEP_TENANT = tenant('sweep', 7798)
-const SERVER_BINARY = path.resolve(FRONTEND, '../backend/target/debug/zedr-control-server')
-const PROVER = path.resolve(FRONTEND, '../../prover/host/target/release/zedr-prover')
+// The server of a test tenant takes an endpoint's own statement for a proof, so the fleet shows every proof state at once and no prover runs
+const SERVER_BINARY = path.resolve(FRONTEND, '../backend/target/debug/zedr-test-tenant')
 const ED25519_PKCS8_PREFIX = '302e020100300506032b657004220420'
 
 function tenant(name, port) {
@@ -105,7 +105,7 @@ function deploymentKeyOf(signingKeyHex) {
 
 export async function startServer({ port, url, data }, { origin, consoleDist }) {
   if (!existsSync(SERVER_BINARY)) {
-    throw new Error(`missing ${SERVER_BINARY}: run "cargo build" in control_server/backend first`)
+    throw new Error(`missing ${SERVER_BINARY}: run "cargo build --bins" in control_server/backend first`)
   }
   if (consoleDist && !existsSync(path.join(consoleDist, 'index.html'))) {
     throw new Error(`missing ${consoleDist}: "npm run sweep" builds it`)
@@ -120,8 +120,6 @@ export async function startServer({ port, url, data }, { origin, consoleDist }) 
 
   const password = `Aa1!${randomBytes(12).toString('hex')}`
   const signingKey = randomBytes(32).toString('hex')
-  const prover = existsSync(PROVER) ? PROVER : null
-  if (!prover) console.error(`no prover at ${PROVER}: the test tenant runs without proofs, run "make guest && make prover" to have them`)
   const env = {
     PATH: process.env.PATH,
     ZEDR_SERVER_HOST: '127.0.0.1',
@@ -139,7 +137,6 @@ export async function startServer({ port, url, data }, { origin, consoleDist }) 
     ZEDR_LOG_LEVEL: 'zedr_control_server=warn',
   }
   if (consoleDist) env.ZEDR_FRONTEND_DIST = consoleDist
-  if (prover) env.ZEDR_GUEST_IMAGE_IDS = execFileSync(prover, ['image-id'], { encoding: 'utf8' }).trim()
 
   const server = spawn(SERVER_BINARY, [], { cwd: data, stdio: ['ignore', 'ignore', 'inherit'], env })
   const exited = new Promise((resolve) => {
@@ -150,10 +147,10 @@ export async function startServer({ port, url, data }, { origin, consoleDist }) 
   })
   early.catch(() => undefined)
   await Promise.race([waitUntilHealthy(url), early])
-  return { password, deploymentKey: deploymentKeyOf(signingKey), prover, exited, stop: () => server.kill('SIGTERM') }
+  return { password, deploymentKey: deploymentKeyOf(signingKey), exited, stop: () => server.kill('SIGTERM') }
 }
 
-export function startSimulator({ url, data }, { password, deploymentKey, prover }) {
+export function startSimulator({ url, data }, { password, deploymentKey }) {
   const child = spawn(process.execPath, [path.join(here, 'sim.mjs')], {
     stdio: ['ignore', 'pipe', 'inherit'],
     env: {
@@ -163,7 +160,6 @@ export function startSimulator({ url, data }, { password, deploymentKey, prover 
       ZEDR_DEMO_PASSWORD: password,
       ZEDR_DEMO_DEPLOYMENT_KEY: deploymentKey,
       ZEDR_DEMO_STATE: path.join(data, 'agents'),
-      ZEDR_DEMO_PROVER: prover ?? '',
     },
   })
   let output = ''

@@ -485,8 +485,8 @@ control-server-status: ## Show control server status
 	@pm2 status
 
 .PHONY: demo
-demo: ## Open the console on a test tenant with a fleet played by the development simulator. After `make guest prover`, two of its endpoints prove for real
-	@cargo build --manifest-path control_server/backend/Cargo.toml
+demo: ## Open the console on a test tenant: a simulated fleet with real intrusion stories in it. Its proof states are stand-ins, `make test-e2e-linux` proves for real
+	@cargo build --bins --manifest-path control_server/backend/Cargo.toml
 	@cd control_server/frontend && { [ -d node_modules ] || npm ci --no-audit --no-fund; } && npm run dev
 
 .PHONY: frontend-deps

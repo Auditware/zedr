@@ -9,8 +9,6 @@ type Bridge = {
   canvas?: { nodes: () => Point[]; viewport: () => { x: number; y: number; zoom: number } }
 }
 
-export const PROVING = Boolean(process.env.ZEDR_DEMO_PROVER)
-
 export type Recorder = {
   shot: (name: string) => Promise<void>
   expectError: (pattern: RegExp) => void
@@ -63,7 +61,7 @@ export async function signIn(page: Page) {
   await page.getByLabel('Username').fill('admin')
   await page.getByLabel('Password').fill(password)
   await page.getByRole('button', { name: 'Sign in' }).click()
-  await expect(page, 'checking a password is slow on a debug server while a prover has the cores').toHaveURL(/\/endpoints/, { timeout: 30_000 })
+  await expect(page, 'checking a password is slow on a debug server').toHaveURL(/\/endpoints/, { timeout: 30_000 })
 }
 
 export async function mapNodes(page: Page): Promise<MapPoint[]> {

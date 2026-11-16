@@ -1,4 +1,4 @@
-import { useNavigate } from '@tanstack/react-router'
+import { Link, useNavigate } from '@tanstack/react-router'
 import { Command } from 'cmdk'
 import { CornerDownLeft, Search, X } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
@@ -8,7 +8,7 @@ import { cn } from '@/lib/cn'
 import { span } from '@/lib/format'
 import { useLive } from '@/lib/live'
 import { nodeState } from '@/lib/map-layout'
-import { useAgents, useIncidents, useInstallKeys, useNow } from '@/lib/queries'
+import { useAgents, useIncidents, useInstallKeys, useNow, useRuleset } from '@/lib/queries'
 import { search, type SearchTarget } from '@/lib/search'
 
 const key = 'rounded-md border border-line-strong px-1.5 py-px font-mono text-[10px] text-muted'
@@ -189,8 +189,11 @@ function Impersonation() {
   )
 }
 
+const TEST_TENANT = 'Test tenant: a simulated fleet, and proof states that are stand-ins and prove nothing'
+
 export function TopBar() {
   const connected = useLive((state) => state.connected)
+  const { data: ruleset } = useRuleset()
 
   return (
     <header className="flex h-12 shrink-0 items-center gap-3 border-b border-hairline px-3">
@@ -198,6 +201,11 @@ export function TopBar() {
       <AnythingSearch />
       <div className="flex min-w-max flex-1 basis-0 items-center justify-end gap-2 max-md:flex-none">
         <Impersonation />
+        {ruleset?.stand_in ? (
+          <Link to="/rules" data-test-tenant title={TEST_TENANT} aria-label={TEST_TENANT} className="shrink-0 rounded-full bg-warn-surface px-2.5 py-0.5 text-xs font-semibold text-warn">
+            Test tenant
+          </Link>
+        ) : null}
         {connected ? null : (
           <span role="status" className="shrink-0 rounded-full bg-alert-surface px-2.5 py-0.5 text-xs font-semibold text-alert-soft">
             Offline

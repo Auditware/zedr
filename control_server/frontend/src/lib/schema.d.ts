@@ -1201,6 +1201,8 @@ export interface components {
             /** @description The proof programs this server accepts receipts of, none means no proof can be accepted */
             image_ids: string[];
             rules: components["schemas"]["RuleView"][];
+            /** @description True on a test tenant only: its server takes an endpoint's own statement for a proof, so its proof states prove nothing */
+            stand_in: boolean;
         };
         /** @description One sealed event: the leaf that commits to it in hex, and its ciphertext in base64 */
         SealedEvent: {
@@ -2744,6 +2746,13 @@ export interface operations {
             };
             /** @description Replayed or stale request */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Submission larger than MAX_PROOF_BYTES, nothing is verified */
+            413: {
                 headers: {
                     [name: string]: unknown;
                 };

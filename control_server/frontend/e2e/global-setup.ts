@@ -5,7 +5,6 @@ export default async function globalSetup() {
   const simulator = await startSimulator(SWEEP_TENANT, server)
   await simulator.proven
   process.env.ZEDR_DEMO_PASSWORD = server.password
-  process.env.ZEDR_DEMO_PROVER = server.prover ?? ''
   return async () => {
     simulator.stop()
     server.stop()

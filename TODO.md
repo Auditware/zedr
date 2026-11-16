@@ -8,7 +8,7 @@
 - [x] The prover as one static Linux binary, served and installed with the agent, at low priority, resting between proofs and bounded to 2.7 GB of memory
 - [x] Incidents for a broken chain, a bad release, a bad or missing proof, a match that was not released, a release no proof stands behind and an endpoint that stops proving
 - [x] Hunt, process tree and live stream over opened events only
-- [x] Console: what the server holds of an endpoint as sealed rows with the opened ones in the clear, the commitment chain with the proof state of every window, findings with their proof, and the rule set with the accepted rule programs. `make demo` shows it on a simulated fleet
+- [x] Console: what the server holds of an endpoint as sealed rows with the opened ones in the clear, the commitment chain with the proof state of every window, findings with their proof, and the rule set with the accepted rule programs. `make demo` shows it on a test tenant: a simulated fleet with intrusion stories from real cases, whose server takes an endpoint's statement for a proof and says so
 - [x] The whole flow run for real in containers: `make test-e2e-linux`
 - [ ] Proving costs about 20 seconds of one core for every event, so a busy endpoint cannot keep up on its CPU. What would change that: fewer zkVM cycles for every event, GPU proving, a prover the owner of the endpoint runs elsewhere, or circuits for the pattern matching. See the measurements in docs/DETECTIONS.md
 - [ ] Measure proving on a quiet machine and on x64, the numbers in docs/DETECTIONS.md are from a busy arm64 machine
