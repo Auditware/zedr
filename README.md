@@ -9,8 +9,9 @@
 <p align="center">
   <a href="https://github.com/auditware/zedr/actions/workflows/ci.yml"><img src="https://github.com/auditware/zedr/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License: MIT"></a>
-  <a href="#status"><img src="https://img.shields.io/badge/status-proof_of_concept-orange" alt="Status: proof of concept"></a>
-  <img src="https://img.shields.io/badge/platform-Linux-lightgrey" alt="Platform: Linux">
+  <a href="#status"><img src="https://img.shields.io/badge/version-0.1.0-informational" alt="Version 0.1.0"></a>
+  <a href="#status"><img src="https://img.shields.io/badge/agent-2_MB_static_binary-success" alt="Agent: 2 MB static binary"></a>
+  <a href="#status"><img src="https://img.shields.io/badge/platform-Linux_%7C_Windows_%7C_macOS-lightgrey" alt="Platform: Linux, Windows, macOS"></a>
 </p>
 
 zedr is an open source EDR that stays in user space and keeps endpoint telemetry private from its own control server.
