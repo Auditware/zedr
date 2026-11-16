@@ -1,6 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { RouterProvider } from '@tanstack/react-router'
-import * as Tooltip from '@radix-ui/react-tooltip'
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { useSession } from '@/lib/auth'
@@ -25,9 +24,7 @@ if (!root) throw new Error('Missing #root element')
 createRoot(root).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
-      <Tooltip.Provider>
-        <RouterProvider router={router} />
-      </Tooltip.Provider>
+      <RouterProvider router={router} />
     </QueryClientProvider>
   </StrictMode>,
 )

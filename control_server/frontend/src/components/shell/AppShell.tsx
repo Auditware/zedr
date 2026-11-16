@@ -1,3 +1,4 @@
+import * as Tooltip from '@radix-ui/react-tooltip'
 import { useQueryClient } from '@tanstack/react-query'
 import { Outlet } from '@tanstack/react-router'
 import { useEffect } from 'react'
@@ -29,14 +30,16 @@ export function AppShell() {
   }, [toggleRail])
 
   return (
-    <div className="flex h-full overflow-hidden bg-ink max-md:flex-col">
-      <Rail />
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <TopBar />
-        <main className="relative min-h-0 min-w-0 flex-1">
-          <Outlet />
-        </main>
+    <Tooltip.Provider>
+      <div className="flex h-full overflow-hidden bg-ink max-md:flex-col">
+        <Rail />
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+          <TopBar />
+          <main className="relative min-h-0 min-w-0 flex-1">
+            <Outlet />
+          </main>
+        </div>
       </div>
-    </div>
+    </Tooltip.Provider>
   )
 }

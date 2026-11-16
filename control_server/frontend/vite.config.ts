@@ -25,6 +25,10 @@ export default defineConfig(({ command, mode, isPreview }) => {
       include: ['@xyflow/react', 'pixi.js', 'qrcode'],
     },
     envDir: '../../secrets',
+    build: {
+      // A font inlined into the stylesheet is downloaded by every visitor, a font file only by a page that shows its script
+      assetsInlineLimit: (file) => (file.endsWith('.woff2') ? false : undefined),
+    },
     // The sweep serves the console from the control server it tests, as the image does, so its build calls the origin it was loaded from
     // whatever API address the developer's environment names
     define: sweep ? { 'import.meta.env.VITE_API_URL': '""' } : undefined,

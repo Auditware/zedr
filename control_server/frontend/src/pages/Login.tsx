@@ -1,8 +1,8 @@
-import { useNavigate } from '@tanstack/react-router'
+import { useNavigate, useRouter } from '@tanstack/react-router'
 import { useState, type FormEvent, type ReactNode } from 'react'
 import { Logo } from '@/components/shell/Logo'
 import { Button } from '@/components/ui/button'
-import { inputClass } from '@/components/ui/dialog'
+import { inputClass } from '@/components/ui/input'
 import { ApiError, api, testTenantLogin, type LoginResponse } from '@/lib/api'
 import { useSession } from '@/lib/auth'
 
@@ -22,14 +22,14 @@ function useEnter() {
 
 function Frame({ children }: { children: ReactNode }) {
   return (
-    <div className="flex h-full items-center justify-center bg-ink p-4">
+    <main className="flex h-full items-center justify-center bg-ink p-4">
       <div className="w-[min(360px,100%)] rounded-card border border-line bg-surface p-7">
         <div className="mb-7">
           <Logo size={34} />
         </div>
         {children}
       </div>
-    </div>
+    </main>
   )
 }
 
@@ -63,6 +63,7 @@ function TestTenantLogin() {
 
 function CredentialLogin() {
   const enter = useEnter()
+  const router = useRouter()
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [code, setCode] = useState('')
@@ -74,6 +75,8 @@ function CredentialLogin() {
     event.preventDefault()
     setBusy(true)
     setError('')
+    // The console downloads while the server checks the password
+    void router.loadRouteChunk(router.routesById['/app'])
     try {
       const response = challenge ? await api.loginMfa(challenge, code.trim()) : await api.login(username, password)
       if (response.mfa_required && response.mfa_token) setChallenge(response.mfa_token)

@@ -1,18 +1,10 @@
-import { createRootRoute, createRoute, createRouter, Outlet, redirect } from '@tanstack/react-router'
-import { AppShell } from '@/components/shell/AppShell'
+import { createRootRoute, createRoute, createRouter, lazyRouteComponent, Outlet, redirect } from '@tanstack/react-router'
 import { useSession } from '@/lib/auth'
 import { RANGES, type Range } from '@/lib/lanes'
 import type { GroupBy } from '@/lib/map-layout'
 import { MOMENTS, type Moment } from '@/lib/persistence'
 import type { Focus } from '@/lib/process-tree'
-import { Events } from '@/pages/Events'
-import { Hunt } from '@/pages/Hunt'
-import { Endpoints } from '@/pages/Endpoints'
-import { Installers } from '@/pages/Installers'
 import { Login } from '@/pages/Login'
-import { Rules } from '@/pages/Rules'
-import { Settings } from '@/pages/Settings'
-import { Users } from '@/pages/Users'
 
 function text(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined
@@ -42,6 +34,17 @@ export type EndpointsSearch = {
   t?: string
 }
 
+function Pending() {
+  return (
+    <div role="status" className="flex h-full items-center justify-center font-display text-lg text-soft">
+      Loading
+    </div>
+  )
+}
+
+// Everything behind sign-in is one chunk: the pages share most of their code, and a chunk each costs a signed-in load a dozen more requests
+const signedIn = () => import('@/console')
+
 const rootRoute = createRootRoute({ component: Outlet })
 
 const loginRoute = createRoute({
@@ -56,7 +59,7 @@ const loginRoute = createRoute({
 const appRoute = createRoute({
   getParentRoute: () => rootRoute,
   id: 'app',
-  component: AppShell,
+  component: lazyRouteComponent(signedIn, 'AppShell'),
   beforeLoad: () => {
     if (!useSession.getState().session) throw redirect({ to: '/login' })
   },
@@ -73,7 +76,7 @@ const indexRoute = createRoute({
 const endpointsRoute = createRoute({
   getParentRoute: () => appRoute,
   path: '/endpoints',
-  component: Endpoints,
+  component: lazyRouteComponent(signedIn, 'Endpoints'),
   validateSearch: (search: Record<string, unknown>): EndpointsSearch => ({
     host: text(search.host),
     group: GROUPS.find((group) => group === search.group),
@@ -94,7 +97,7 @@ const endpointsRoute = createRoute({
 const eventsRoute = createRoute({
   getParentRoute: () => appRoute,
   path: '/events',
-  component: Events,
+  component: lazyRouteComponent(signedIn, 'Events'),
   validateSearch: (search: Record<string, unknown>): { agent?: string; show?: string; event?: string; q?: string; range?: Range; t?: string } => ({
     agent: text(search.agent),
     show: text(search.show),
@@ -108,28 +111,28 @@ const eventsRoute = createRoute({
 const huntRoute = createRoute({
   getParentRoute: () => appRoute,
   path: '/hunt',
-  component: Hunt,
+  component: lazyRouteComponent(signedIn, 'Hunt'),
   validateSearch: (search: Record<string, unknown>): { q?: string; host?: string } => ({ q: text(search.q), host: text(search.host) }),
 })
 
-const rulesRoute = createRoute({ getParentRoute: () => appRoute, path: '/rules', component: Rules })
+const rulesRoute = createRoute({ getParentRoute: () => appRoute, path: '/rules', component: lazyRouteComponent(signedIn, 'Rules') })
 
 const installersRoute = createRoute({
   getParentRoute: () => appRoute,
   path: '/installers',
-  component: Installers,
+  component: lazyRouteComponent(signedIn, 'Installers'),
   validateSearch: (search: Record<string, unknown>): { show?: string } => ({ show: text(search.show) }),
 })
 const usersRoute = createRoute({
   getParentRoute: () => appRoute,
   path: '/users',
-  component: Users,
+  component: lazyRouteComponent(signedIn, 'Users'),
   validateSearch: (search: Record<string, unknown>): { user?: string; range?: '7d' } => ({
     user: text(search.user),
     range: search.range === '7d' ? '7d' : undefined,
   }),
 })
-const settingsRoute = createRoute({ getParentRoute: () => appRoute, path: '/settings', component: Settings })
+const settingsRoute = createRoute({ getParentRoute: () => appRoute, path: '/settings', component: lazyRouteComponent(signedIn, 'Settings') })
 
 const routeTree = rootRoute.addChildren([
   loginRoute,
@@ -145,7 +148,13 @@ const routeTree = rootRoute.addChildren([
   ]),
 ])
 
-export const router = createRouter({ routeTree, defaultPreload: false })
+export const router = createRouter({
+  routeTree,
+  defaultPreload: false,
+  defaultPendingComponent: Pending,
+  // What was waited for shows as soon as it arrives, the router would otherwise hold the pending state for half a second
+  defaultPendingMinMs: 0,
+})
 
 declare module '@tanstack/react-router' {
   interface Register {

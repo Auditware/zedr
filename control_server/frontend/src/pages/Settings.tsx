@@ -1,10 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Database, ExternalLink, Monitor, Plus, Server as ServerIcon, ShieldCheck, ShieldOff, Trash2 } from 'lucide-react'
-import QRCode from 'qrcode'
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import { Card, CopyButton, PageHeader, SectionTitle } from '@/components/ui/bits'
 import { Button } from '@/components/ui/button'
-import { Dialog, Field, inputClass } from '@/components/ui/dialog'
+import { Dialog, Field } from '@/components/ui/dialog'
+import { inputClass } from '@/components/ui/input'
 import { ApiError, api, type ApiKeyResponse, type MfaSetupResponse } from '@/lib/api'
 import { isAdmin, useSession } from '@/lib/auth'
 import { cn } from '@/lib/cn'
@@ -31,11 +31,13 @@ function TwoFactor() {
   useEffect(() => {
     if (!setup) return
     let live = true
-    void QRCode.toDataURL(setup.provisioning_uri, { margin: 1, width: 220, color: { dark: resolveTone('text'), light: '#00000000' } }).then(
-      (url) => {
+    void import('qrcode')
+      .then(({ default: QRCode }) =>
+        QRCode.toDataURL(setup.provisioning_uri, { margin: 1, width: 220, color: { dark: resolveTone('text'), light: '#00000000' } }),
+      )
+      .then((url) => {
         if (live) setQr(url)
-      },
-    )
+      })
     return () => {
       live = false
     }

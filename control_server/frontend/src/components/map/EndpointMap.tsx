@@ -78,8 +78,8 @@ export function EndpointMap({
     const still = window.matchMedia('(prefers-reduced-motion: reduce)').matches
 
     void (async () => {
-      const pixi = await import('pixi.js')
-      const app = new pixi.Application()
+      const { Application, Container, Graphics, Sprite } = await import('pixi.js')
+      const app = new Application()
       await app.init({
         resizeTo: host,
         backgroundAlpha: 0,
@@ -95,20 +95,20 @@ export function EndpointMap({
       app.canvas.style.display = 'block'
 
       const disc = app.renderer.generateTexture({
-        target: new pixi.Graphics().circle(0, 0, TEXTURE_RADIUS).fill({ color: 0xffffff }),
+        target: new Graphics().circle(0, 0, TEXTURE_RADIUS).fill({ color: 0xffffff }),
         resolution: 4,
         antialias: true,
       })
       const ring = app.renderer.generateTexture({
-        target: new pixi.Graphics().circle(0, 0, TEXTURE_RADIUS - 2).stroke({ width: 4.5, color: 0xffffff }),
+        target: new Graphics().circle(0, 0, TEXTURE_RADIUS - 2).stroke({ width: 4.5, color: 0xffffff }),
         resolution: 4,
         antialias: true,
       })
 
-      const world = new pixi.Container()
-      const auras = new pixi.Container()
-      const dots = new pixi.Container()
-      const selection = new pixi.Sprite(ring)
+      const world = new Container()
+      const auras = new Container()
+      const dots = new Container()
+      const selection = new Sprite(ring)
       selection.anchor.set(0.5)
       selection.visible = false
       world.addChild(auras, dots, selection)
@@ -157,7 +157,7 @@ export function EndpointMap({
         selection,
         disc,
         ring,
-        SpriteClass: pixi.Sprite,
+        SpriteClass: Sprite,
         items: new Map(),
         view: { scale: 1, x: 0, y: 0 },
         userMoved: false,
