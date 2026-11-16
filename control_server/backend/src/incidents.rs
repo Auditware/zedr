@@ -14,6 +14,7 @@ pub const REPLAY: &str = "replay";
 pub const IDENTITY_CONFLICT: &str = "identity_conflict";
 pub const CHAIN_FORK: &str = "chain_fork";
 pub const CHAIN_GAP: &str = "chain_gap";
+pub const WINDOW_MALFORMED: &str = "window_malformed";
 pub const RELEASE_INVALID: &str = "release_invalid";
 pub const PROOF_INVALID: &str = "proof_invalid";
 pub const MATCH_NOT_RELEASED: &str = "match_not_released";

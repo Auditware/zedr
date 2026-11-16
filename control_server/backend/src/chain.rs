@@ -326,8 +326,8 @@ async fn apply_release(
 
 /// What became of a window an agent sent
 pub enum Admission {
-    /// It is not a window an honest agent seals
-    Malformed(String),
+    /// It is not a window an honest agent seals. The stored chain stands at this position
+    Malformed(Position),
     /// It does not continue the stored chain, which stands at this position
     Refused(Position),
     /// The server holds it, since now or since an earlier request
@@ -336,12 +336,17 @@ pub enum Admission {
 
 /// Takes a sealed window into the stored chain of its agent and opens what its releases name
 pub async fn admit(state: &AppState, agent: &Hash, window: &SealedWindow) -> Result<Admission> {
+    let agent_id = window.agent_id.as_str();
     let decoded = match decode(agent, window) {
         Ok(decoded) => decoded,
-        Err(reason) => return Ok(Admission::Malformed(reason)),
+        Err(reason) => {
+            let sent = &window.header;
+            let evidence = serde_json::json!({ "reason": reason, "window": sent.window, "epoch": sent.epoch, "first_index": sent.first_index, "count": sent.count, "events": window.events.len() });
+            incidents::open(&state.pool, &state.system_events_tx, agent_id, incidents::WINDOW_MALFORMED, evidence).await?;
+            return Ok(Admission::Malformed(position(&state.pool, agent_id).await?));
+        }
     };
     let header = &decoded.header;
-    let agent_id = window.agent_id.as_str();
     let head = hash_to_hex(&header.head);
 
     let mut tx = state.pool.begin_with("BEGIN IMMEDIATE").await?;

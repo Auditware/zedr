@@ -97,6 +97,7 @@ pub struct SystemEventBroadcast {
         admin::agents::stream_agents,
         admin::chain::agent_chain,
         admin::chain::agent_window,
+        admin::chain::chain_summary,
         admin::chain::ruleset,
         admin::events::list_events,
         admin::events::event_stats,
@@ -140,7 +141,7 @@ pub struct SystemEventBroadcast {
             zedr_protocol::Release,
             zedr_protocol::Opening,
             zedr_protocol::SealedWindowAck,
-            zedr_protocol::ChainPosition,
+            zedr_protocol::WindowRefusal,
             zedr_protocol::ProofSubmission,
             zedr_protocol::ProofAck,
             crate::db::models::Agent,
@@ -160,6 +161,8 @@ pub struct SystemEventBroadcast {
             admin::chain::ChainView,
             admin::chain::ChainTotals,
             admin::chain::WindowSummary,
+            admin::chain::ChainSummary,
+            admin::chain::ProofCounts,
             admin::chain::WindowView,
             admin::chain::SealedEventView,
             admin::chain::ReleaseView,
@@ -283,6 +286,7 @@ fn create_router_with_appstate(state: AppState, frontend_dist: Option<PathBuf>) 
         .route("/api/admin/agents/:id", get(admin::agents::get_agent))
         .route("/api/admin/agents/:id/chain", get(admin::chain::agent_chain))
         .route("/api/admin/agents/:id/windows/:window", get(admin::chain::agent_window))
+        .route("/api/admin/chain/summary", get(admin::chain::chain_summary))
         .route("/api/admin/ruleset", get(admin::chain::ruleset))
         .route("/api/admin/events", get(admin::events::list_events))
         .route("/api/admin/events/stats", get(admin::events::event_stats))

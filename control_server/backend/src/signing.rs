@@ -1,7 +1,9 @@
 use ed25519_dalek::{Signature, Signer, SigningKey};
 use sha2::{Digest, Sha256};
 use std::env;
+use zedr_protocol::WindowRefusal;
 
+use crate::chain::Position;
 use crate::error::{AppError, Result};
 
 pub struct SigningService {
@@ -65,9 +67,17 @@ impl SigningService {
         Ok(self.signing_key.sign(&signed_bytes))
     }
 
-    pub fn sign_chain_position(&self, agent_id: &str, session: u64, seq: u64, next_window: u64, next_index: u64, head: &str) -> Result<Signature> {
-        let signed_bytes = zedr_protocol::chain_position_signing_bytes(agent_id, session, seq, next_window, next_index, head).map_err(AppError::InternalError)?;
-        Ok(self.signing_key.sign(&signed_bytes))
+    /// The answer to one refused window: where the stored chain of its agent stands, signed for the request with this session and sequence number only
+    pub fn refuse_window(&self, agent_id: &str, session: u64, seq: u64, position: Position) -> Result<WindowRefusal> {
+        let signed_bytes = zedr_protocol::window_refusal_signing_bytes(agent_id, session, seq, position.epoch, position.next_window, position.next_index, &position.head)
+            .map_err(AppError::InternalError)?;
+        Ok(WindowRefusal {
+            epoch: position.epoch,
+            next_window: position.next_window,
+            next_index: position.next_index,
+            head: position.head,
+            signature: self.signing_key.sign(&signed_bytes).to_bytes().to_vec(),
+        })
     }
 }
 

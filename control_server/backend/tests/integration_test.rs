@@ -553,6 +553,7 @@ async fn test_unauthorized_access_blocked() {
         "/api/admin/installers",
         "/api/admin/agents/some-agent/chain",
         "/api/admin/agents/some-agent/windows/0",
+        "/api/admin/chain/summary",
         "/api/admin/ruleset",
     ];
     
@@ -3075,6 +3076,27 @@ async fn test_the_end_of_a_process_with_a_finding_is_opened_and_ends_its_hunt_ro
 }
 
 #[tokio::test]
+async fn test_the_end_of_a_process_ends_only_its_own_hunt_row_when_the_pid_was_used_before() {
+    let (app, pool) = create_test_app_with_pool().await;
+    let mut host = enroll_endpoint(&app, &pool, "reused-pid-host").await;
+    let nginx = started(1, 20, 0, "/usr/sbin/nginx", &[]);
+    host.deliver(&app, &[nginx.clone(), started(2, 21, 20, "/bin/sh", &["-c", "id"])]).await;
+
+    host.restart();
+    host.deliver(&app, &[nginx, started(50, 21, 20, "/bin/sh", &["-c", "whoami"]), ended(60, 21)]).await;
+
+    let rows: Vec<(i64, String, Option<i64>)> = sqlx::query_as("SELECT started_at, command, ended_at FROM hunt_processes WHERE agent_id = 'reused-pid-host' AND pid = 21 ORDER BY started_at").fetch_all(&pool).await.unwrap();
+    assert_eq!(
+        rows,
+        [(2, "/bin/sh -c id".to_string(), None), (50, "/bin/sh -c whoami".to_string(), Some(60))],
+        "the end the endpoint released is of the later shell. Of the earlier one with the same pid no end was ever released"
+    );
+    assert_eq!(hunt_total(&app, "process where pid = 21 and running = false").await, 1);
+    assert_eq!(hunt_total(&app, "process where pid = 21 and running = true").await, 1);
+    assert_eq!(findings(&pool, "reused-pid-host").await.len(), 2, "two processes, two findings");
+}
+
+#[tokio::test]
 async fn test_a_release_of_the_end_of_a_process_that_does_not_hold_is_refused() {
     let (app, pool) = create_test_app_with_pool().await;
     type Change = fn(&mut Release, &TestLedger);
@@ -3460,53 +3482,64 @@ async fn test_a_window_sent_again_is_acknowledged_identically_and_stored_once() 
     assert!(!open_incidents(&pool, "resending-host").await.contains(&"chain_fork".to_string()));
 }
 
-async fn assert_refused_with_the_position(app: &axum::Router, pool: &SqlitePool, host: &mut Endpoint, window: SealedWindow, position: (u64, u64, &str), case: &str) {
+/// Sends a window the server must refuse and checks its answer: where the stored chain stands, signed for this one request
+async fn assert_refused(app: &axum::Router, pool: &SqlitePool, host: &mut Endpoint, window: SealedWindow, expected: (StatusCode, &str), position: (u64, u64, u64, &str), case: &str) {
     let stored = count(pool, "SELECT COUNT(*) FROM sealed_windows WHERE agent_id = ?", &host.agent.id).await;
     let (status, answer) = host.send(app, window).await;
-    assert_eq!(status, StatusCode::CONFLICT, "{}: {}", case, answer);
-    assert_eq!((answer["next_window"].as_u64(), answer["next_index"].as_u64(), answer["head"].as_str()), (Some(position.0), Some(position.1), Some(position.2)), "{}", case);
+    assert_eq!(status, expected.0, "{}: {}", case, answer);
+    let (epoch, next_window, next_index, head) = position;
+    assert_eq!(
+        (answer["epoch"].as_u64(), answer["next_window"].as_u64(), answer["next_index"].as_u64(), answer["head"].as_str()),
+        (Some(epoch), Some(next_window), Some(next_index), Some(head)),
+        "{}",
+        case
+    );
 
-    let signed_for = |seq: u64| zedr_protocol::chain_position_signing_bytes(&host.agent.id, host.agent.session, seq, position.0, position.1, position.2).unwrap();
-    assert!(server_signed(&answer, &signed_for(host.agent.seq)), "{}: the position is signed with the deployment key", case);
-    assert!(!server_signed(&answer, &signed_for(host.agent.seq - 1)), "{}: and answers this request only", case);
+    let signed_for = |seq: u64, epoch: u64| zedr_protocol::window_refusal_signing_bytes(&host.agent.id, host.agent.session, seq, epoch, next_window, next_index, head).unwrap();
+    assert!(server_signed(&answer, &signed_for(host.agent.seq, epoch)), "{}: the refusal is signed with the deployment key", case);
+    assert!(!server_signed(&answer, &signed_for(host.agent.seq + 1, epoch)), "{}: and is no answer to the next request", case);
+    assert!(!server_signed(&answer, &signed_for(host.agent.seq - 1, epoch)), "{}: nor to the one before", case);
+    assert!(!server_signed(&answer, &signed_for(host.agent.seq, epoch + 1)), "{}: the epoch is signed too", case);
 
-    assert_eq!(open_incidents(pool, &host.agent.id).await, vec!["chain_fork"], "{}", case);
-    sqlx::query("UPDATE incidents SET closed_at = opened_at WHERE agent_id = ?").bind(&host.agent.id).execute(pool).await.unwrap();
+    assert_eq!(open_incidents(pool, &host.agent.id).await, vec![expected.1], "{}", case);
+    assert!(incident_evidence(pool, &host.agent.id, expected.1).await["reason"].as_str().is_some_and(|reason| !reason.is_empty()), "{}: the incident says why", case);
+    sqlx::query("DELETE FROM incidents WHERE agent_id = ?").bind(&host.agent.id).execute(pool).await.unwrap();
     assert_eq!(count(pool, "SELECT COUNT(*) FROM sealed_windows WHERE agent_id = ?", &host.agent.id).await, stored, "{}: nothing of a refused window is stored", case);
 }
 
 #[tokio::test]
-async fn test_a_window_that_does_not_continue_the_chain_is_answered_with_the_signed_position() {
+async fn test_a_window_that_does_not_continue_the_chain_is_answered_with_a_signed_refusal() {
     let (app, pool) = create_test_app_with_pool().await;
     let mut host = enroll_endpoint(&app, &pool, "forking-host").await;
     host.deliver(&app, &[quiet(1), quiet(2)]).await;
     let before_second = host.ledger.clone();
     host.deliver(&app, &[quiet(3)]).await;
     let head = hash_to_hex(&host.ledger.head);
-    let stands = (2, 3, head.as_str());
+    let stands = (1, 2, 3, head.as_str());
+    let forked_chain = (StatusCode::CONFLICT, "chain_fork");
 
     let mut skipping = host.ledger.clone();
     skipping.next_window += 1;
-    assert_refused_with_the_position(&app, &pool, &mut host, skipping.seal(&[quiet(4)]), stands, "a gap in the window numbers").await;
+    assert_refused(&app, &pool, &mut host, skipping.seal(&[quiet(4)]), forked_chain, stands, "a gap in the window numbers").await;
 
     let mut forked = before_second.clone();
-    assert_refused_with_the_position(&app, &pool, &mut host, forked.seal(&[quiet(9)]), stands, "another window where one is already held").await;
+    assert_refused(&app, &pool, &mut host, forked.seal(&[quiet(9)]), forked_chain, stands, "another window where one is already held").await;
 
     let mut missing_events = host.ledger.clone();
     missing_events.next_index += 1;
-    assert_refused_with_the_position(&app, &pool, &mut host, missing_events.seal(&[quiet(4)]), stands, "a gap in the event indices").await;
+    assert_refused(&app, &pool, &mut host, missing_events.seal(&[quiet(4)]), forked_chain, stands, "a gap in the event indices").await;
 
     let mut other_history = host.ledger.clone();
     other_history.head = [9u8; 32];
-    assert_refused_with_the_position(&app, &pool, &mut host, other_history.seal(&[quiet(4)]), stands, "another previous head").await;
+    assert_refused(&app, &pool, &mut host, other_history.seal(&[quiet(4)]), forked_chain, stands, "another previous head").await;
 
     let mut wrong_epoch = host.ledger.clone();
     wrong_epoch.epoch += 1;
-    assert_refused_with_the_position(&app, &pool, &mut host, wrong_epoch.seal(&[quiet(4)]), stands, "a new epoch that is not fresh").await;
+    assert_refused(&app, &pool, &mut host, wrong_epoch.seal(&[quiet(4)]), forked_chain, stands, "a new epoch that is not fresh").await;
 
     let mut wrong_fresh = host.ledger.clone();
     wrong_fresh.fresh = true;
-    assert_refused_with_the_position(&app, &pool, &mut host, wrong_fresh.seal(&[quiet(4)]), stands, "a fresh window in the stored epoch").await;
+    assert_refused(&app, &pool, &mut host, wrong_fresh.seal(&[quiet(4)]), forked_chain, stands, "a fresh window in the stored epoch").await;
 
     host.restart();
     host.deliver(&app, &[quiet(4)]).await;
@@ -3514,7 +3547,7 @@ async fn test_a_window_that_does_not_continue_the_chain_is_answered_with_the_sig
     let mut rolled_back = host.ledger.clone();
     rolled_back.restart();
     rolled_back.epoch = 1;
-    assert_refused_with_the_position(&app, &pool, &mut host, rolled_back.seal(&[quiet(5)]), (3, 4, head.as_str()), "an epoch that goes down").await;
+    assert_refused(&app, &pool, &mut host, rolled_back.seal(&[quiet(5)]), forked_chain, (2, 3, 4, head.as_str()), "an epoch that goes down").await;
 
     host.deliver(&app, &[quiet(5)]).await;
     assert_eq!(count(&pool, "SELECT COUNT(*) FROM sealed_windows WHERE agent_id = ?", "forking-host").await, 4, "the chain the server holds goes on");
@@ -3523,10 +3556,10 @@ async fn test_a_window_that_does_not_continue_the_chain_is_answered_with_the_sig
     let mut not_fresh = newcomer.ledger.clone();
     not_fresh.fresh = false;
     let genesis = hash_to_hex(&GENESIS);
-    assert_refused_with_the_position(&app, &pool, &mut newcomer, not_fresh.seal(&[quiet(1)]), (0, 0, genesis.as_str()), "a first window that is not fresh").await;
+    assert_refused(&app, &pool, &mut newcomer, not_fresh.seal(&[quiet(1)]), forked_chain, (0, 0, 0, genesis.as_str()), "a first window that is not fresh").await;
     let mut midway = newcomer.ledger.clone();
     midway.next_window = 7;
-    assert_refused_with_the_position(&app, &pool, &mut newcomer, midway.seal(&[quiet(1)]), (0, 0, genesis.as_str()), "a chain the server never saw the start of").await;
+    assert_refused(&app, &pool, &mut newcomer, midway.seal(&[quiet(1)]), forked_chain, (0, 0, 0, genesis.as_str()), "a chain the server never saw the start of").await;
     newcomer.deliver(&app, &[quiet(1)]).await;
 }
 
@@ -3559,7 +3592,7 @@ async fn test_windows_require_a_valid_signature_and_a_new_sequence_number() {
     assert_eq!(status, StatusCode::OK);
     let (status, replayed) = post_agent(&app, "/api/windows", body, Some(&signature)).await;
     assert_eq!(status, StatusCode::CONFLICT);
-    assert!(replayed["error"].is_string() && replayed["signature"].is_null(), "a replayed request is not answered with a position");
+    assert!(replayed["error"].is_string() && replayed["signature"].is_null() && replayed["epoch"].is_null(), "a replayed request gets no signed refusal, so the agent starts nothing over for it");
     assert_eq!(open_incidents(&pool, "signing-host").await, vec!["replay"]);
 
     let (status, _) = post_agent(&app, "/api/windows", "{ not a window".to_string(), Some(&signature)).await;
@@ -3608,15 +3641,23 @@ async fn test_a_window_that_does_not_match_its_own_header_is_unprocessable() {
         ("a number no database holds", too_large),
         ("a window sealed for another agent", borrowed),
     ];
+    let malformed = (StatusCode::UNPROCESSABLE_ENTITY, "window_malformed");
+    let genesis = hash_to_hex(&GENESIS);
     for (case, window) in cases {
-        let (status, answer) = host.send(&app, window).await;
-        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{}: {}", case, answer);
+        assert_refused(&app, &pool, &mut host, window, malformed, (0, 0, 0, genesis.as_str()), case).await;
     }
     assert_eq!(count(&pool, "SELECT COUNT(*) FROM sealed_windows WHERE agent_id = ?", "malformed-host").await, 0);
     assert_eq!(count(&pool, "SELECT COUNT(*) FROM sealed_events WHERE agent_id = ?", "malformed-host").await, 0);
     assert_eq!(count(&pool, "SELECT COUNT(*) FROM chain_positions WHERE agent_id = ?", "malformed-host").await, 0);
 
     host.deliver(&app, &[quiet(1), quiet(2), quiet(3)]).await;
+    host.restart();
+    host.deliver(&app, &[quiet(4)]).await;
+    let head = hash_to_hex(&host.ledger.head);
+    let mut broken = host.ledger.clone().seal(&[quiet(5)]);
+    broken.events.clear();
+    assert_refused(&app, &pool, &mut host, broken, malformed, (2, 2, 4, head.as_str()), "a malformed window after the chain has grown").await;
+    host.deliver(&app, &[quiet(5)]).await;
 }
 
 #[tokio::test]
@@ -4259,6 +4300,53 @@ async fn test_the_console_reads_the_chain_of_an_agent() {
 }
 
 #[tokio::test]
+async fn test_the_console_reads_what_the_server_holds_of_all_chains_together() {
+    let (app, pool) = create_proving_app().await;
+    let reader = admin_token("user");
+    let (status, nothing) = call(&app, "GET", "/api/admin/chain/summary", Some(&reader), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(nothing, serde_json::json!({ "agents": 0, "windows": 0, "events": 0, "opened": 0, "gaps": 0, "proofs": { "pending": 0, "verified": 0, "mismatch": 0, "none": 0 } }));
+
+    let mut proving = enroll_endpoint(&app, &pool, "summary-proving").await;
+    tell_a_story(&app, &mut proving).await;
+    let journal = proving.ledger.journal(2);
+    assert_eq!(proving.prove(&app, &journal).await.0, StatusCode::OK);
+
+    let mut hiding = enroll_endpoint(&app, &pool, "summary-hiding").await;
+    let (nginx, shell) = nginx_and_its_shell();
+    let mut window = hiding.ledger.seal(&[nginx, shell]);
+    window.releases.clear();
+    assert_eq!(hiding.send(&app, window).await.0, StatusCode::OK);
+    let journal = hiding.ledger.journal(1);
+    assert_eq!(hiding.prove(&app, &journal).await.0, StatusCode::OK);
+
+    let mut unproving = enroll_endpoint(&app, &pool, "summary-unproving").await;
+    for (events, gap) in [(vec![quiet(1), quiet(2)], false), (vec![quiet(3)], true)] {
+        let mut window = unproving.ledger.seal_marked(&events, gap);
+        window.proving = false;
+        assert_eq!(unproving.send(&app, window).await.0, StatusCode::OK);
+    }
+
+    let mut refused = enroll_endpoint(&app, &pool, "summary-refused").await;
+    let mut window = refused.ledger.seal(&[quiet(1)]);
+    window.events.clear();
+    assert_eq!(refused.send(&app, window).await.0, StatusCode::UNPROCESSABLE_ENTITY);
+    enroll_endpoint(&app, &pool, "summary-silent").await;
+
+    let (status, summary) = call(&app, "GET", "/api/admin/chain/summary", Some(&reader), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        summary,
+        serde_json::json!({ "agents": 3, "windows": 6, "events": 10, "opened": 2, "gaps": 1, "proofs": { "pending": 1, "verified": 2, "mismatch": 1, "none": 2 } }),
+        "an agent the server holds no window of is not counted"
+    );
+    let by_status: Vec<(String, i64)> = sqlx::query_as("SELECT proof, COUNT(*) FROM sealed_windows GROUP BY proof ORDER BY proof").fetch_all(&pool).await.unwrap();
+    assert_eq!(by_status, [("mismatch".to_string(), 1), ("none".to_string(), 2), ("pending".to_string(), 1), ("verified".to_string(), 2)]);
+
+    assert_eq!(call(&app, "GET", "/api/admin/chain/summary", None, None).await.0, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn test_the_console_reads_one_window_with_its_sealed_events_and_releases() {
     let (app, pool) = create_proving_app().await;
     let mut host = enroll_endpoint(&app, &pool, "window-host").await;
@@ -4339,12 +4427,15 @@ async fn test_the_api_document_describes_the_sealed_telemetry_endpoints() {
     let (status, document) = call(&app, "GET", "/api-docs/openapi.json", None, None).await;
     assert_eq!(status, StatusCode::OK);
 
-    for path in ["/api/windows", "/api/proofs", "/api/admin/agents/{id}/chain", "/api/admin/agents/{id}/windows/{window}", "/api/admin/ruleset"] {
+    for path in ["/api/windows", "/api/proofs", "/api/admin/agents/{id}/chain", "/api/admin/agents/{id}/windows/{window}", "/api/admin/chain/summary", "/api/admin/ruleset"] {
         assert!(document["paths"][path].is_object(), "{} is documented", path);
     }
-    for schema in ["SealedWindow", "Release", "SealedWindowAck", "ChainPosition", "ProofSubmission", "ProofAck", "ChainView", "WindowSummary", "WindowView", "SealedEventView", "ReleaseView", "RulesetView", "RuleView"] {
+    for schema in ["SealedWindow", "Release", "SealedWindowAck", "WindowRefusal", "ProofSubmission", "ProofAck", "ChainView", "WindowSummary", "ChainSummary", "ProofCounts", "WindowView", "SealedEventView", "ReleaseView", "RulesetView", "RuleView"] {
         assert!(document["components"]["schemas"][schema].is_object(), "{} is described", schema);
     }
-    let refused = &document["paths"]["/api/windows"]["post"]["responses"]["409"]["content"]["application/json"]["schema"]["$ref"];
-    assert_eq!(refused, "#/components/schemas/ChainPosition", "an agent can tell what a refused window is answered with");
+    for status in ["409", "422"] {
+        let refused = &document["paths"]["/api/windows"]["post"]["responses"][status]["content"]["application/json"]["schema"]["$ref"];
+        assert_eq!(refused, "#/components/schemas/WindowRefusal", "an agent can tell what a window refused with {} is answered with", status);
+    }
+    assert!(document["components"]["schemas"]["ChainPosition"].is_null());
 }

@@ -651,14 +651,19 @@ impl Described {
     }
 }
 
-/// Adds one opened event to the hunt index. `described` is the process itself for a process event and the process it belongs to for a connection or a file
+/// Adds one opened event to the hunt index. `described` is the process itself for a process event, the process that ended for its end,
+/// and the process it belongs to for a connection or a file
 pub async fn index<'e>(executor: impl SqliteExecutor<'e>, agent_id: &str, event: &SensorEvent, described: Option<&Described>) -> Result<()> {
     match event {
         SensorEvent::Process(process) if matches!(process.action, ProcessAction::Terminate) => {
-            sqlx::query("UPDATE hunt_processes SET ended_at = ? WHERE agent_id = ? AND pid = ? AND ended_at IS NULL")
+            let Some(described) = described else {
+                return Ok(());
+            };
+            sqlx::query("UPDATE hunt_processes SET ended_at = ? WHERE agent_id = ? AND pid = ? AND started_at = ?")
                 .bind(process.timestamp as i64)
                 .bind(agent_id)
                 .bind(process.pid)
+                .bind(described.started_at as i64)
                 .execute(executor)
                 .await?;
         }

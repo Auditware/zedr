@@ -8,7 +8,7 @@ use zedr_protocol::{hash_to_hex, SealedWindowHeader};
 use zedr_rules::RuleId;
 
 use crate::api::AppState;
-use crate::chain;
+use crate::chain::{self, PROOF_MISMATCH, PROOF_NONE, PROOF_PENDING};
 use crate::error::{AppError, Result};
 
 const DEFAULT_WINDOWS: i64 = 60;
@@ -109,6 +109,77 @@ pub async fn agent_chain(State(state): State<AppState>, Path(agent_id): Path<Str
         proven_window: position.proven_window,
         totals: ChainTotals { windows: position.next_window as i64, events: position.next_index as i64, opened, gaps },
         windows,
+    }))
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct ProofCounts {
+    pub pending: i64,
+    pub verified: i64,
+    pub mismatch: i64,
+    /// Windows of endpoints without a prover
+    pub none: i64,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct ChainSummary {
+    /// Agents the server holds at least one window of
+    pub agents: i64,
+    pub windows: i64,
+    pub events: i64,
+    pub opened: i64,
+    pub gaps: i64,
+    /// Windows by where their proof stands
+    pub proofs: ProofCounts,
+}
+
+#[derive(sqlx::FromRow)]
+struct FleetTotals {
+    agents: i64,
+    windows: i64,
+    events: i64,
+    opened: i64,
+    gaps: i64,
+    pending: i64,
+    mismatch: i64,
+    unproven: i64,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/admin/chain/summary",
+    tag = "admin",
+    responses((status = 200, description = "What the server holds of the sealed chains of all agents together", body = ChainSummary))
+)]
+pub async fn chain_summary(State(state): State<AppState>) -> Result<Json<ChainSummary>> {
+    // Every count is read off the per-agent positions or an index range. Verified windows, in time nearly all of them, are what is left of the total
+    let totals = sqlx::query_as::<_, FleetTotals>(
+        "SELECT COUNT(*) AS agents, COALESCE(SUM(next_window), 0) AS windows, COALESCE(SUM(next_index), 0) AS events,
+                (SELECT COUNT(*) FROM sealed_events WHERE opened_at IS NOT NULL) AS opened,
+                (SELECT COUNT(*) FROM sealed_windows WHERE gap = 1) AS gaps,
+                (SELECT COUNT(*) FROM sealed_windows WHERE proof = ?) AS pending,
+                (SELECT COUNT(*) FROM sealed_windows WHERE proof = ?) AS mismatch,
+                (SELECT COUNT(*) FROM sealed_windows WHERE proof = ?) AS unproven
+         FROM chain_positions WHERE next_window > 0",
+    )
+    .bind(PROOF_PENDING)
+    .bind(PROOF_MISMATCH)
+    .bind(PROOF_NONE)
+    .fetch_one(&state.pool)
+    .await?;
+
+    Ok(Json(ChainSummary {
+        agents: totals.agents,
+        windows: totals.windows,
+        events: totals.events,
+        opened: totals.opened,
+        gaps: totals.gaps,
+        proofs: ProofCounts {
+            pending: totals.pending,
+            verified: totals.windows - totals.pending - totals.mismatch - totals.unproven,
+            mismatch: totals.mismatch,
+            none: totals.unproven,
+        },
     }))
 }
 
