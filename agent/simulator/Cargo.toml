@@ -1,0 +1,17 @@
+[package]
+name = "zedr-simulator"
+version = "0.1.0"
+edition = "2021"
+authors = ["zedr contributors"]
+description = "Development tool that plays a scenario against a control server as many endpoints at once, never part of an agent release"
+license = "MIT"
+publish = false
+
+[dependencies]
+zedr-agent-shared = { path = "../shared" }
+zedr-protocol = { workspace = true }
+zedr-rules = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+ed25519-dalek = "2.1"
+minreq = "2.12"

@@ -1255,6 +1255,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "zedr-simulator"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "minreq",
+ "serde",
+ "serde_json",
+ "zedr-agent-shared",
+ "zedr-protocol",
+ "zedr-rules",
+]
+
+[[package]]
 name = "zeroize"
 version = "1.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

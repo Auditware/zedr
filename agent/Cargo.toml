@@ -4,6 +4,7 @@ members = [
     "linux",
     "macos",
     "windows",
+    "simulator",
 ]
 
 resolver = "2"
