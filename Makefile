@@ -215,6 +215,18 @@ build-linux-prover: ## Build the static Linux prover around the rule program fro
 test-zk: guest prover ## Prove and verify a small window for real, this takes minutes
 	@prover/host/target/release/zedr-prover selftest
 
+NATIVE_LINUX_ARCH := $(if $(filter arm64 aarch64,$(shell uname -m)),arm64,x64)
+
+.PHONY: simulator-image
+simulator-image: ## Build the image of the development simulator, which plays endpoints from a scenario file
+	@docker build --file agent/linux/Dockerfile --target simulator -t zedr-simulator:dev .
+
+.PHONY: test-e2e-linux
+test-e2e-linux: guest agent-image simulator-image ## Run the whole flow for real: control server, an endpoint set up by the installer, sealed telemetry, a finding, verified proofs, and an endpoint caught holding a match back. This takes a while
+	@$(MAKE) build-linux-binary build-linux-prover LINUX_ARCHES=$(NATIVE_LINUX_ARCH)
+	@cargo build --release --manifest-path control_server/backend/Cargo.toml
+	@node e2e/linux-flow.mjs
+
 .PHONY: test-linux-container
 test-linux-container: ## Test the shared and Linux agent code in a Linux container
 	@docker build --file agent/linux/Dockerfile --target test --progress plain .

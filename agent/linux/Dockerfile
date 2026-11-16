@@ -17,3 +17,11 @@ RUN cargo build --release --package zedr-agent-linux
 
 FROM scratch AS binary
 COPY --from=release /src/agent/target/release/zedr-agent-linux /zedr-agent
+
+# The development simulator, for runs that need an endpoint the agent refuses to be. It is never served to endpoints.
+FROM build AS simulator-release
+RUN cargo build --release --package zedr-simulator
+
+FROM alpine:3.22 AS simulator
+COPY --from=simulator-release /src/agent/target/release/zedr-simulator /usr/local/bin/zedr-simulator
+ENTRYPOINT ["/usr/local/bin/zedr-simulator"]
