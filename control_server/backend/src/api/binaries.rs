@@ -1,10 +1,12 @@
 use axum::{
-    extract::{Path, Query, State},
+    body::Body,
+    extract::{Path, Query, Request, State},
     response::Response,
     http::{StatusCode, header, HeaderMap},
 };
 use serde::Deserialize;
 use std::path::PathBuf;
+use tower_http::services::ServeFile;
 use uuid::Uuid;
 use chrono;
 use serde_json;
@@ -19,31 +21,6 @@ fn binaries_dir() -> Result<PathBuf, AppError> {
     std::env::var("ZEDR_BINARIES_DIR")
         .map(PathBuf::from)
         .map_err(|_| AppError::Config("ZEDR_BINARIES_DIR environment variable must be set".to_string()))
-}
-
-pub async fn serve_agent_binary(
-    Path((os, arch)): Path<(String, String)>,
-) -> Result<Response, AppError> {
-    
-    let extension = match os.as_str() {
-        "windows" => ".exe",
-        "linux" | "macos" => "",
-        _ => return Err(AppError::NotFound),
-    };
-    
-    if !matches!(arch.as_str(), "x64" | "arm64") {
-        return Err(AppError::NotFound);
-    }
-    
-    let version = current_agent_version();
-    let binary_path = binaries_dir()?.join(format!("v{}/{}/{}/zedr-agent{}", version, os, arch, extension));
-    
-    if !binary_path.exists() {
-        return Err(AppError::Config(format!("Agent binary not found for platform: {}-{} (version: {})", os, arch, version)));
-    }
-    
-    let binary_name = format!("zedr-agent{}", extension);
-    serve_binary(&binary_path, &binary_name)
 }
 
 fn serve_binary(binary_path: &PathBuf, binary_name: &str) -> Result<Response, AppError> {
@@ -73,18 +50,21 @@ pub fn current_agent_version() -> String {
     std::env::var("ZEDR_AGENT_VERSION").unwrap_or_else(|_| "0.1.0".to_string())
 }
 
-pub async fn serve_authenticated_binary(
-    State(state): State<AppState>,
-    Path(platform): Path<String>,
-    Query(query): Query<BinaryQuery>,
-    headers: HeaderMap,
-) -> Result<Response, AppError> {
-    let presented = enrollment::presented_key(&headers, query.key.as_deref())
+/// What an installer asked for, after its credential was accepted
+struct Download {
+    presented: String,
+    credential: Credential,
+    directory: PathBuf,
+    extension: &'static str,
+}
+
+async fn authorize_download(state: &AppState, platform: &str, query_key: Option<&str>, headers: &HeaderMap) -> Result<Download, AppError> {
+    let presented = enrollment::presented_key(headers, query_key)
         .ok_or_else(|| AppError::BadRequest("Missing enrollment key".to_string()))?;
 
     let now = chrono::Utc::now().timestamp();
     let Some(credential) = enrollment::usable_credential(&state.pool, &presented, now).await? else {
-        record_refused_fleet_download(&state, &presented, &platform, now).await?;
+        record_refused_fleet_download(state, &presented, platform, now).await?;
         return Err(AppError::Unauthorized);
     };
 
@@ -92,7 +72,7 @@ pub async fn serve_authenticated_binary(
         return Err(AppError::Unauthorized);
     }
 
-    let (os, arch) = parse_platform(&platform)?;
+    let (os, arch) = parse_platform(platform)?;
 
     let extension = match os.as_str() {
         "windows" => ".exe",
@@ -104,11 +84,24 @@ pub async fn serve_authenticated_binary(
         return Err(AppError::NotFound);
     }
 
+    let directory = binaries_dir()?.join(format!("v{}/{}/{}", current_agent_version(), os, arch));
+    Ok(Download { presented, credential, directory, extension })
+}
+
+pub async fn serve_authenticated_binary(
+    State(state): State<AppState>,
+    Path(platform): Path<String>,
+    Query(query): Query<BinaryQuery>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Download { presented, credential, directory, extension } = authorize_download(&state, &platform, query.key.as_deref(), &headers).await?;
+
     let version = current_agent_version();
-    let binary_path = binaries_dir()?.join(format!("v{}/{}/{}/zedr-agent{}", version, os, arch, extension));
+    let binary_name = format!("zedr-agent{}", extension);
+    let binary_path = directory.join(&binary_name);
 
     if !binary_path.exists() {
-        return Err(AppError::Config(format!("Agent binary not found for platform: {}-{} (version: {})", os, arch, version)));
+        return Err(AppError::Config(format!("Agent binary not found for platform: {} (version: {})", platform, version)));
     }
 
     let download = match &credential {
@@ -132,8 +125,30 @@ pub async fn serve_authenticated_binary(
         let _ = mark_key_as_used(&state, id).await;
     }
 
-    let binary_name = format!("zedr-agent{}", extension);
     serve_binary(&binary_path, &binary_name)
+}
+
+/// The prover that belongs to the agent of the same platform and version, for the credential that downloads that agent.
+/// An install key stays usable after it, the agent download is what uses the key up, so an installer asks for the prover first.
+/// A deployment that built no prover for the platform answers 404 and its endpoints seal without proving
+pub async fn serve_authenticated_prover(
+    State(state): State<AppState>,
+    Path(platform): Path<String>,
+    Query(query): Query<BinaryQuery>,
+    request: Request,
+) -> Result<Response, AppError> {
+    let download = authorize_download(&state, &platform, query.key.as_deref(), request.headers()).await?;
+    let prover_path = download.directory.join(format!("zedr-prover{}", download.extension));
+
+    if !prover_path.is_file() {
+        return Err(AppError::NotFound);
+    }
+
+    let response = ServeFile::new(&prover_path)
+        .try_call(request)
+        .await
+        .map_err(|e| AppError::InternalError(format!("Failed to read the prover: {}", e)))?;
+    Ok(response.map(Body::new))
 }
 
 async fn record_refused_fleet_download(state: &AppState, presented: &str, platform: &str, now: i64) -> Result<(), AppError> {

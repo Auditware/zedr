@@ -143,7 +143,7 @@ mod tests {
 
     #[test]
     fn test_agent_paths_are_public_and_operator_paths_are_not() {
-        for path in ["/api/events", "/api/windows", "/api/proofs", "/api/agents/register", "/api/agents/abc/upgrade-binary", "/api/installers/binaries/windows-arm64", "/install.ps1", "/install.sh", "/healthz", "/readyz", "/health"] {
+        for path in ["/api/events", "/api/windows", "/api/proofs", "/api/agents/register", "/api/agents/abc/upgrade-binary", "/api/installers/binaries/windows-arm64", "/api/installers/binaries/linux-x64/prover", "/install.ps1", "/install.sh", "/healthz", "/readyz", "/health"] {
             assert!(is_agent_facing_path(path), "{} is agent facing", path);
         }
         for path in ["/", "/admin/agents", "/assets/index.js", "/api/admin/agents", "/api/admin/events", "/api/admin/events/stream", "/api/auth/login", "/api-docs/openapi.json", "/api/eventsx", "/api/windows/1", "/api/admin/ruleset", "/install.ps1.bak"] {

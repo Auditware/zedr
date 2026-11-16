@@ -171,14 +171,28 @@ build-windows-binary: ## Build Windows agent binary and copy to control server
 	ls -lh control_server/backend/binaries/v0.1.0/windows/$$ARCH/zedr-agent.exe && \
 	echo "✓ Windows $$ARCH binary built and ready for control server distribution"
 
+LINUX_ARCHES ?= x64 arm64
+
+# Builds one static Linux binary per architecture in LINUX_ARCHES and copies it to where the control server serves it from.
+# $(1) is the file name, $(2) the docker build arguments
+define build_linux_static
+	@set -e; for arch in $(LINUX_ARCHES); do \
+		case $$arch in \
+			x64) platform=linux/amd64; machine=x86-64 ;; \
+			arm64) platform=linux/arm64; machine=aarch64 ;; \
+			*) echo "ERROR: unknown architecture $$arch, use x64 or arm64"; exit 1 ;; \
+		esac; \
+		out=control_server/backend/binaries/v0.1.0/linux/$$arch; \
+		mkdir -p $$out; \
+		docker build $(2) --target binary --platform $$platform --output type=local,dest=$$out .; \
+		file $$out/$(1) | grep -q "ELF 64-bit.*$$machine.*static" || { echo "ERROR: $$out/$(1) is not a static $$machine ELF"; exit 1; }; \
+		ls -lh $$out/$(1); \
+	done
+endef
+
 .PHONY: build-linux-binary
-build-linux-binary: ## Build the static Linux agent for x64 and arm64 in containers and copy it to the control server
-	@mkdir -p control_server/backend/binaries/v0.1.0/linux/x64 control_server/backend/binaries/v0.1.0/linux/arm64
-	@docker build --file agent/linux/Dockerfile --target binary --platform linux/amd64 --output type=local,dest=control_server/backend/binaries/v0.1.0/linux/x64 .
-	@docker build --file agent/linux/Dockerfile --target binary --platform linux/arm64 --output type=local,dest=control_server/backend/binaries/v0.1.0/linux/arm64 .
-	@file control_server/backend/binaries/v0.1.0/linux/x64/zedr-agent | grep -q "ELF 64-bit.*x86-64.*static" || (echo "ERROR: x64 binary is not a static x86-64 ELF" && exit 1)
-	@file control_server/backend/binaries/v0.1.0/linux/arm64/zedr-agent | grep -q "ELF 64-bit.*aarch64.*static" || (echo "ERROR: arm64 binary is not a static aarch64 ELF" && exit 1)
-	@ls -lh control_server/backend/binaries/v0.1.0/linux/*/zedr-agent
+build-linux-binary: ## Build the static Linux agent in containers and copy it to the control server, LINUX_ARCHES picks x64, arm64 or both
+	$(call build_linux_static,zedr-agent,--file agent/linux/Dockerfile)
 
 .PHONY: guest
 guest: ## Build the rule program a proof is about, reproducibly in a container, and print its image ID
@@ -191,6 +205,11 @@ prover: ## Build the prover for this machine around the rule program from `make 
 	@test -f $(GUEST_BIN) || (echo "ERROR: run 'make guest' first" && exit 1)
 	@ZEDR_GUEST_BIN=$(GUEST_BIN) cargo build --release --manifest-path prover/host/Cargo.toml
 	@prover/host/target/release/zedr-prover image-id
+
+.PHONY: build-linux-prover
+build-linux-prover: ## Build the static Linux prover around the rule program from `make guest` and copy it to the control server, which hands it to endpoints with the agent
+	@test -f $(GUEST_BIN) || (echo "ERROR: run 'make guest' first" && exit 1)
+	$(call build_linux_static,zedr-prover,--file prover/Dockerfile --build-context guest="$(dir $(GUEST_BIN))")
 
 .PHONY: test-zk
 test-zk: guest prover ## Prove and verify a small window for real, this takes minutes

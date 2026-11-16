@@ -8,6 +8,7 @@ AGENT_VERSION="__ZEDR_AGENT_VERSION__"
 ENROLLMENT_KEY="__ZEDR_ENROLLMENT_KEY__"
 
 BINARY_PATH="/usr/local/bin/zedr-agent"
+PROVER_NAME="zedr-prover"
 STATE_DIR="/var/lib/zedr"
 SERVICE_NAME="zedr-agent"
 UNIT_PATH="/etc/systemd/system/$SERVICE_NAME.service"
@@ -21,10 +22,8 @@ fail() {
 download() {
     if command -v curl >/dev/null 2>&1; then
         printf 'header = "X-Zedr-Enrollment-Key: %s"\n' "$ENROLLMENT_KEY" | curl -fsSL -K - -o "$2" "$1"
-    elif command -v wget >/dev/null 2>&1; then
-        wget -q --header "X-Zedr-Enrollment-Key: $ENROLLMENT_KEY" -O "$2" "$1"
     else
-        fail "curl or wget is required"
+        wget -q --header "X-Zedr-Enrollment-Key: $ENROLLMENT_KEY" -O "$2" "$1"
     fi
 }
 
@@ -34,17 +33,33 @@ prepare_state_dir() {
     chmod 0700 "$STATE_DIR"
 }
 
+# The agent finds its prover next to itself, and the two must come from the same build, so they are replaced together or not at all.
+# The prover is fetched first because the agent download uses up a one-time install key.
 install_binary() {
     staged="$BINARY_PATH.download"
+    prover_path="$(dirname "$BINARY_PATH")/$PROVER_NAME"
+    staged_prover="$prover_path.download"
     mkdir -p "$(dirname "$BINARY_PATH")"
+
+    if ! download "$CONTROL_SERVER_URL/api/installers/binaries/$PLATFORM-$ARCH/prover" "$staged_prover" 2>/dev/null; then
+        rm -f "$staged_prover"
+    fi
+
     if download "$CONTROL_SERVER_URL/api/installers/binaries/$PLATFORM-$ARCH" "$staged"; then
         chmod 0755 "$staged"
         mv -f "$staged" "$BINARY_PATH"
+        if [ -f "$staged_prover" ]; then
+            chmod 0755 "$staged_prover"
+            mv -f "$staged_prover" "$prover_path"
+        else
+            rm -f "$prover_path"
+            echo "zedr install: $CONTROL_SERVER_URL served no prover for $PLATFORM-$ARCH, this endpoint seals its telemetry without proving it" >&2
+        fi
     elif [ "$MODE" = "foreground" ] && [ -x "$BINARY_PATH" ]; then
-        rm -f "$staged"
+        rm -f "$staged" "$staged_prover"
         echo "zedr install: could not download the agent, starting the one installed earlier" >&2
     else
-        rm -f "$staged"
+        rm -f "$staged" "$staged_prover"
         fail "could not download the agent from $CONTROL_SERVER_URL, the enrollment key was refused or the server is unreachable"
     fi
 }
@@ -141,6 +156,7 @@ main() {
     done
 
     [ "$(id -u)" -eq 0 ] || fail "must run as root"
+    command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 || fail "curl or wget is required"
 
     ENROLLMENT_KEY="${ENROLLMENT_KEY:-${ZEDR_ENROLLMENT_KEY:-}}"
     [ -n "$ENROLLMENT_KEY" ] \

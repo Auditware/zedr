@@ -363,36 +363,6 @@ pub mod upgrade {
     use super::*;
     use std::path::PathBuf;
 
-    pub fn download_binary(
-        server_url: &str,
-        os: &str,
-        arch: &str,
-        install_key: &str,
-    ) -> Result<Vec<u8>, String> {
-        let url = format!(
-            "{}/api/installers/binaries/{}-{}?key={}",
-            server_url,
-            os,
-            arch,
-            install_key
-        );
-
-        let response = minreq::get(&url)
-            .with_timeout(300)
-            .send()
-            .map_err(|e| format!("Failed to download binary: {}", e))?;
-
-        if response.status_code != 200 {
-            return Err(format!("Server returned error: {} {}", response.status_code, response.reason_phrase));
-        }
-
-        let binary_data = response.as_bytes().to_vec();
-
-        verify_binary_signature(&binary_data)?;
-
-        Ok(binary_data)
-    }
-
     pub fn download_upgrade_binary(
         server_url: &str,
         agent_id: &str,

@@ -350,6 +350,7 @@ fn create_router_with_appstate(state: AppState, frontend_dist: Option<PathBuf>) 
         .route("/install.ps1", get(install::serve_windows_installer))
         .route("/install.sh", get(install::serve_unix_installer))
         .route("/api/installers/binaries/:platform", get(binaries::serve_authenticated_binary))
+        .route("/api/installers/binaries/:platform/prover", get(binaries::serve_authenticated_prover))
         .route("/api/agents/:agent_id/upgrade-binary", get(binaries::serve_upgrade_binary))
         .merge(protected);
 

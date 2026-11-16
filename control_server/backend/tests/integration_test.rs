@@ -63,6 +63,8 @@ fn agent_template(with_key_slot: bool) -> Vec<u8> {
     template
 }
 
+const TEST_PROVER: &[u8] = b"prover_of_the_linux_x64_agent";
+
 fn test_binaries_dir() -> &'static std::path::Path {
     static DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
     DIR.get_or_init(|| {
@@ -75,6 +77,7 @@ fn test_binaries_dir() -> &'static std::path::Path {
         std::fs::create_dir_all(&linux).unwrap();
         std::fs::write(current.join("zedr-agent.exe"), agent_template(true)).unwrap();
         std::fs::write(linux.join("zedr-agent"), agent_template(true)).unwrap();
+        std::fs::write(linux.join("zedr-prover"), TEST_PROVER).unwrap();
         std::fs::write(predates_key_slot.join("zedr-agent.exe"), agent_template(false)).unwrap();
         dir
     })
@@ -2113,6 +2116,42 @@ async fn test_unix_installer_embeds_only_a_usable_credential() {
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     let (status, _) = get_with_enrollment_key(&app, "/install.ps1", None).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_prover_is_served_with_the_agent_and_only_to_a_usable_credential() {
+    let (app, pool) = create_test_app_with_pool().await;
+    insert_install_key(&pool, "zedr_prover_install_key", 3600).await;
+    let prover = "/api/installers/binaries/linux-x64/prover";
+
+    let (status, _) = get_with_enrollment_key(&app, prover, None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, body) = get_with_enrollment_key(&app, prover, Some("zedr_never_issued")).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(!body.windows(TEST_PROVER.len()).any(|window| window == TEST_PROVER));
+
+    let (status, _) = get_with_enrollment_key(&app, "/api/installers/binaries/windows-arm64/prover", Some("zedr_prover_install_key")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "a platform no prover was built for says so, and the installer goes on without one");
+    let (status, _) = get_with_enrollment_key(&app, "/api/installers/binaries/..-x64/prover", Some("zedr_prover_install_key")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    for _ in 0..2 {
+        let (status, body) = get_with_enrollment_key(&app, prover, Some("zedr_prover_install_key")).await;
+        assert_eq!(status, StatusCode::OK, "the prover does not use up the install key, the agent that follows it does");
+        assert_eq!(body, TEST_PROVER, "the prover is served as built, nothing is patched into it");
+    }
+
+    let (status, _) = download_agent(&app, "linux-x64", "zedr_prover_install_key").await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = get_with_enrollment_key(&app, prover, Some("zedr_prover_install_key")).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "a used install key downloads nothing more");
+
+    let fleet = create_fleet_token(&app, "provers", None).await;
+    let (status, body) = get_with_enrollment_key(&app, prover, Some(&fleet.token)).await;
+    assert_eq!((status, body.as_slice()), (StatusCode::OK, TEST_PROVER));
+    call(&app, "DELETE", &format!("/api/admin/enrollment-tokens/{}", fleet.id), Some(&admin_token("admin")), None).await;
+    let (status, _) = get_with_enrollment_key(&app, prover, Some(&fleet.token)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
