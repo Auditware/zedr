@@ -15,6 +15,7 @@ pub mod incidents;
 pub mod liveness;
 pub mod mfa;
 pub mod proofs;
+pub mod server;
 pub mod signing;
 pub mod signing_key_guard;
 

@@ -242,8 +242,9 @@ pub fn create_router_with_state_and_timeout_manager(
     agent_events_tx: broadcast::Sender<AgentEvent>,
     system_events_tx: broadcast::Sender<SystemEventBroadcast>,
     timeout_manager: Arc<crate::HeartbeatTimeoutManager>,
+    options: RouterOptions,
 ) -> Router {
-    build_router(pool, agent_events_tx, system_events_tx, Some(timeout_manager), RouterOptions::from_env())
+    build_router(pool, agent_events_tx, system_events_tx, Some(timeout_manager), options)
 }
 
 pub fn create_router_with_state(
@@ -269,6 +270,10 @@ fn build_router(
         }
         Arc::new(verifier)
     });
+
+    if receipt_verifier.stands_in() {
+        tracing::warn!("This is a test tenant: an endpoint's own statement is taken for a proof, nothing is verified");
+    }
 
     let state = AppState {
         pool,

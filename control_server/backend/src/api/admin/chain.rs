@@ -389,6 +389,8 @@ pub struct RuleView {
 pub struct RulesetView {
     /// The proof programs this server accepts receipts of, none means no proof can be accepted
     pub image_ids: Vec<String>,
+    /// True on a test tenant only: its server takes an endpoint's own statement for a proof, so its proof states prove nothing
+    pub stand_in: bool,
     pub rules: Vec<RuleView>,
 }
 
@@ -413,5 +415,5 @@ pub async fn ruleset(State(state): State<AppState>) -> Result<Json<RulesetView>>
         })
         .collect();
 
-    Ok(Json(RulesetView { image_ids: state.receipt_verifier.image_ids().iter().map(hash_to_hex).collect(), rules }))
+    Ok(Json(RulesetView { image_ids: state.receipt_verifier.image_ids().iter().map(hash_to_hex).collect(), stand_in: state.receipt_verifier.stands_in(), rules }))
 }

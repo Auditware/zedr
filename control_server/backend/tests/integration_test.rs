@@ -4557,7 +4557,25 @@ async fn test_the_console_reads_the_rules_and_the_proof_programs_the_server_acce
     let (default_app, _) = create_test_app_with_pool().await;
     let (_, from_env) = call(&default_app, "GET", "/api/admin/ruleset", Some(&reader), None).await;
     assert_eq!(from_env["image_ids"], serde_json::json!([TEST_GUEST_IMAGE_ID]), "a deployment names the programs it accepts in ZEDR_GUEST_IMAGE_IDS");
+    assert_eq!((&ruleset["stand_in"], &from_env["stand_in"]), (&serde_json::json!(false), &serde_json::json!(false)), "a server that verifies says so");
     assert_eq!(call(&app, "GET", "/api/admin/ruleset", None, None).await.0, StatusCode::UNAUTHORIZED);
+
+    struct Stated;
+    impl ReceiptVerifier for Stated {
+        fn verify(&self, receipt: &[u8]) -> Result<Verified, String> {
+            Ok(Verified { image_id: [0u8; 32], journal: receipt.to_vec() })
+        }
+        fn image_ids(&self) -> Vec<Hash> {
+            Vec::new()
+        }
+        fn stands_in(&self) -> bool {
+            true
+        }
+    }
+    let options = zedr_control_server::api::RouterOptions { receipt_verifier: Some(Arc::new(Stated)), ..Default::default() };
+    let tenant = zedr_control_server::api::create_router_with_options(create_test_db().await, options);
+    let (_, told) = call(&tenant, "GET", "/api/admin/ruleset", Some(&reader), None).await;
+    assert_eq!((&told["stand_in"], &told["image_ids"]), (&serde_json::json!(true), &serde_json::json!([])), "a test tenant tells the console that its proofs prove nothing");
 }
 
 #[tokio::test]

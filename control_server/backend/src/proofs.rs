@@ -33,6 +33,11 @@ pub trait ReceiptVerifier: Send + Sync {
 
     /// The rule programs a receipt may be about
     fn image_ids(&self) -> Vec<Hash>;
+
+    /// Whether this takes an endpoint's own statement for a proof and verifies nothing, as the server of a test tenant does
+    fn stands_in(&self) -> bool {
+        false
+    }
 }
 
 pub fn parse_image_ids(raw: &str) -> std::result::Result<Vec<Hash>, String> {
