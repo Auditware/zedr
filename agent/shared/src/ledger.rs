@@ -504,6 +504,14 @@ impl Ledger {
     pub fn unproven(&self) -> u64 {
         self.chain.deliver_from.saturating_sub(self.proving.next_window)
     }
+
+    /// How many delivered events wait for a proof
+    pub fn unproven_events(&self) -> u64 {
+        match self.stored(self.proving.next_window) {
+            Ok(Some(first)) if self.unproven() > 0 => self.chain.delivered_index.saturating_sub(first.header.first_index),
+            _ => 0,
+        }
+    }
 }
 
 fn remove_window(dir: &Path, window: u64) -> Result<(), String> {

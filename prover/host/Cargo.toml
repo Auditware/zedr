@@ -20,3 +20,11 @@ risc0-zkvm = { version = "=3.1.0", default-features = false, features = ["prove"
 # On macOS the in-process prover needs the Metal compiler of a full Xcode, so development machines hand the work to the r0vm that rzup installs.
 [target.'cfg(target_os = "macos")'.dependencies]
 risc0-zkvm = { version = "=3.1.0", default-features = false, features = ["client"] }
+
+# The allocator of musl takes one lock for every allocation, and a proof allocates from every core at once.
+# With it the static prover spent more time waiting in the kernel than proving.
+[target.'cfg(target_env = "musl")'.dependencies]
+mimalloc = { version = "0.1", default-features = false }
+
+[profile.release]
+strip = true

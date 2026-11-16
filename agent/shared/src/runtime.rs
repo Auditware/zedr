@@ -20,7 +20,13 @@ const DEFAULT_HEARTBEAT_INTERVAL_SECS: u64 = 30;
 const DEFAULT_SENSOR_INTERVAL_SECS: u64 = 5;
 const DEFAULT_PERSISTENCE_INTERVAL_SECS: u64 = 60;
 const DEFAULT_PACKAGE_INTERVAL_SECS: u64 = 300;
-const DEFAULT_PROOF_EVENTS: u64 = 2000;
+/// Most events one proof covers. A proof costs tens of CPU seconds per event and its receipt tens of kilobytes,
+/// so this many keep one proof to minutes of work on a few cores and to a few megabytes to send
+pub const DEFAULT_PROOF_EVENTS: u64 = 250;
+/// Seconds proving rests after a proof
+pub const DEFAULT_PROOF_REST_SECS: u64 = 900;
+/// A receipt is megabytes, and the control server verifies it before it answers
+const PROOF_TIMEOUT_SECS: u64 = 300;
 const PROOF_RETRY_AFTER: Duration = Duration::from_secs(600);
 const PROOFS_DIR: &str = "proofs";
 const REFUSAL_WAIT_START: Duration = Duration::from_secs(60);
@@ -112,10 +118,12 @@ impl Refusals {
     }
 }
 
-/// The prover if one is installed, how many events one proof may cover and how long a failed one waits
+/// The prover if one is installed, how many events one proof may cover, how long proving rests after a proof and how long a failed one waits.
+/// A window is sealed every minute and a proof takes minutes of every core, so without the rest an endpoint would never stop proving
 struct ProverSettings {
     program: Option<PathBuf>,
     max_events: usize,
+    rest: Duration,
     retry_after: Duration,
 }
 
@@ -129,6 +137,7 @@ impl ProverSettings {
         Self {
             program: named.filter(|program| program.is_file()),
             max_events: setting("ZEDR_PROOF_EVENTS", DEFAULT_PROOF_EVENTS) as usize,
+            rest: interval("ZEDR_PROOF_REST", DEFAULT_PROOF_REST_SECS),
             retry_after: PROOF_RETRY_AFTER,
         }
     }
@@ -146,11 +155,13 @@ struct Prover {
     dir: PathBuf,
     running: Option<Proof>,
     not_before: Instant,
+    rests_until: Instant,
 }
 
 impl Prover {
     fn new(settings: ProverSettings, ledger_dir: &Path) -> Self {
-        let mut prover = Self { settings, dir: ledger_dir.join(PROOFS_DIR), running: None, not_before: Instant::now() };
+        let now = Instant::now();
+        let mut prover = Self { settings, dir: ledger_dir.join(PROOFS_DIR), running: None, not_before: now, rests_until: now };
         prover.discard();
         prover
     }
@@ -168,6 +179,10 @@ impl Prover {
         let Some(program) = &self.settings.program else {
             return Ok(());
         };
+        // The rest ends early once a whole proof's worth of events waits, so a busy endpoint does not fall behind
+        if Instant::now() < self.rests_until && ledger.unproven_events() < self.settings.max_events as u64 {
+            return Ok(());
+        }
         let Some(input) = ledger.proof_input(self.settings.max_events)? else {
             return Ok(());
         };
@@ -181,6 +196,11 @@ impl Prover {
         let receipt = self.dir.join(format!("receipt-{}.bin", attempt));
 
         std::fs::create_dir_all(&self.dir).map_err(|e| format!("Failed to create {}: {}", self.dir.display(), e))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&self.dir, std::fs::Permissions::from_mode(0o700)).map_err(|e| format!("Failed to protect {}: {}", self.dir.display(), e))?;
+        }
         replace_private_file(&self.dir, &input_file, "proof input", &encoded)?;
         let prover = spawn_prover(program, &self.dir.join(input_file), &receipt)
             .map_err(|e| format!("Failed to start {}: {}", program.display(), e))?;
@@ -198,9 +218,10 @@ impl Prover {
         match proof.prover.try_wait() {
             Ok(Some(status)) if status.success() => {
                 let receipt = std::fs::read(&proof.receipt).map_err(|e| format!("The prover left no receipt: {}", e))?;
-                link.send_proof(&receipt, EVENT_TIMEOUT_SECS)?;
+                link.send_proof(&receipt, PROOF_TIMEOUT_SECS)?;
                 ledger.proven(&proof.journal, proof.state)?;
                 self.discard();
+                self.rests_until = Instant::now() + self.settings.rest;
                 Ok(true)
             }
             Ok(Some(status)) => Err(format!("The prover ended with {}", status)),
@@ -961,14 +982,14 @@ mod tests {
     }
 
     fn no_prover() -> ProverSettings {
-        ProverSettings { program: None, max_events: 2000, retry_after: PROOF_RETRY_AFTER }
+        ProverSettings { program: None, max_events: DEFAULT_PROOF_EVENTS as usize, rest: Duration::ZERO, retry_after: PROOF_RETRY_AFTER }
     }
 
     fn stand_in_prover(dir: &std::path::Path, script: &str) -> ProverSettings {
         let program = dir.join("zedr-prover");
         std::fs::write(&program, format!("#!/bin/sh\n{}\n", script)).unwrap();
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
-        ProverSettings { program: Some(program), max_events: 2000, retry_after: Duration::from_secs(1) }
+        ProverSettings { program: Some(program), max_events: DEFAULT_PROOF_EVENTS as usize, rest: Duration::ZERO, retry_after: Duration::from_secs(1) }
     }
 
     fn short_refusal_wait() -> RefusalWait {
@@ -1619,6 +1640,7 @@ printf 'receipt of the stand-in' > "$3""#,
         runtime.start_sensor_with(source.clone(), every_50_milliseconds(), prover, short_refusal_wait());
         assert!(wait_until(|| proof_files(&dir, "input-0-").len() == 1));
         assert_eq!(std::fs::metadata(&proof_files(&dir, "input-0-")[0]).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(std::fs::metadata(dir.join("ledger").join("proofs")).unwrap().permissions().mode() & 0o777, 0o700);
 
         source.run(901, 2, SHELL, &FETCH_AND_RUN);
         assert!(wait_until(|| taken(&server).len() == 2), "the sensor does not wait for the prover");
@@ -1642,6 +1664,34 @@ printf 'receipt of the stand-in' > "$3""#,
         assert!(wait_until(|| !window_file(&dir, 0).exists() && !window_file(&dir, 1).exists()), "proven plaintext is removed");
         assert!(wait_until(|| !dir.join("ledger").join("proofs").exists()), "and so is what was written for the prover");
         assert!(!platform.logged("Proving failed"));
+
+        stop(&runtime, &dir);
+    }
+
+    #[test]
+    fn test_proving_rests_after_a_proof_until_a_whole_proof_of_events_waits() {
+        let server = StubServer::start(accept_everything);
+        let dir = state_dir("proving-rests");
+        let prover = ProverSettings { max_events: 5, rest: Duration::from_secs(3600), ..stand_in_prover(&dir, r#"printf 'receipt of the stand-in' > "$3""#) };
+        let (runtime, _platform) = runtime(&server, &dir);
+        let source = ScriptedSource::with(3);
+        source.run(900, 3, SHELL, &FETCH_AND_RUN);
+
+        runtime.start_sensor_with(source.clone(), every_50_milliseconds(), prover, short_refusal_wait());
+        assert!(wait_until(|| receipts(&server).len() == 1), "the first proof starts at once");
+
+        let delivered = |server: &StubServer| taken(server).iter().map(|window| window.header.count).sum::<u32>();
+        source.run(901, 2, SHELL, &FETCH_AND_RUN);
+        source.run(902, 2, SHELL, &FETCH_AND_RUN);
+        assert!(wait_until(|| delivered(&server) == 6));
+        thread::sleep(Duration::from_millis(400));
+        assert_eq!(receipts(&server).len(), 1, "two events wait, and the prover rests");
+        assert!(proof_files(&dir, "input-").is_empty());
+
+        for pid in 903..906 {
+            source.run(pid, 2, SHELL, &FETCH_AND_RUN);
+        }
+        assert!(wait_until(|| receipts(&server).len() == 2), "five events wait, which is a whole proof, so the rest is over");
 
         stop(&runtime, &dir);
     }

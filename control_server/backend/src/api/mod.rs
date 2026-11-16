@@ -342,7 +342,10 @@ fn create_router_with_appstate(state: AppState, frontend_dist: Option<PathBuf>) 
             "/api/windows",
             post(ingestion::windows::ingest_window).layer(DefaultBodyLimit::max(ingestion::windows::MAX_WINDOW_BYTES)),
         )
-        .route("/api/proofs", post(ingestion::proofs::submit_proof))
+        .route(
+            "/api/proofs",
+            post(ingestion::proofs::submit_proof).layer(DefaultBodyLimit::max(ingestion::proofs::MAX_PROOF_BYTES)),
+        )
         .route("/api/auth/login", post(auth::login))
         .route("/api/auth/login/mfa", post(auth::login_mfa))
         .route("/api/admin/agents/stream", get(admin::agents::stream_agents))

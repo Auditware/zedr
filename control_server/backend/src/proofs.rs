@@ -358,6 +358,28 @@ mod tests {
         assert!(refused.contains("does not verify"), "{}", refused);
     }
 
+    /// A receipt `zedr-prover selftest <file>` wrote, and the rule program that prover carried.
+    /// It stays valid when the rules change. When the journal changes its layout, write a new one and put its image ID here
+    const REAL_RECEIPT: &[u8] = include_bytes!("../tests/fixtures/selftest-receipt.bin");
+    const REAL_RECEIPT_IMAGE_ID: &str = "2e3d3cec4e7f76cac423d39f2e594d0a93df9a8dfa1ba6c1da53d06b7c7a14f5";
+
+    #[test]
+    fn test_a_real_receipt_verifies_against_its_rule_program_and_no_other() {
+        let image_id = hash_from_hex(REAL_RECEIPT_IMAGE_ID).unwrap();
+        let verified = Risc0Verifier::new(vec![[5u8; 32], image_id]).verify(REAL_RECEIPT).unwrap();
+        assert_eq!(verified.image_id, image_id);
+        let journal = Journal::from_bytes(&verified.journal).unwrap();
+        assert_eq!((journal.agent, journal.first_window, journal.next_index, journal.matches.len()), ([7u8; 32], 0, 3, 1));
+
+        let refused = Risc0Verifier::new(vec![[5u8; 32]]).verify(REAL_RECEIPT).unwrap_err();
+        assert!(refused.contains("does not verify"), "{}", refused);
+
+        let mut receipt: Receipt = bincode::deserialize(REAL_RECEIPT).unwrap();
+        *receipt.journal.bytes.last_mut().unwrap() ^= 1;
+        let altered = bincode::serialize(&receipt).unwrap();
+        assert!(Risc0Verifier::new(vec![image_id]).verify(&altered).is_err(), "a journal that was changed after proving");
+    }
+
     #[test]
     fn test_bytes_that_are_not_a_receipt_and_a_server_without_image_ids_accept_nothing() {
         assert!(Risc0Verifier::new(vec![[5u8; 32]]).verify(b"not a receipt").unwrap_err().contains("Not a receipt"));

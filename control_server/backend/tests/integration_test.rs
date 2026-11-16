@@ -4242,6 +4242,12 @@ async fn test_proofs_require_a_valid_signature_and_a_receipt_of_an_accepted_prog
 
     let (status, _) = post_agent(&app, "/api/proofs", "{ not a proof".to_string(), Some("00")).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let megabytes = vec![7u8; 4 * 1024 * 1024];
+    let (status, answer) = host.submit(&app, &megabytes).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "a receipt of several megabytes is read and judged: {}", answer);
+    let too_large = serde_json::json!({ "agent_id": "receipt-host", "session": host.agent.session, "seq": host.agent.seq + 1, "receipt": "x".repeat(zedr_control_server::api::ingestion::proofs::MAX_PROOF_BYTES) });
+    assert_eq!(send_signed(&app, &host.agent, "/api/proofs", too_large.to_string()).await.0, StatusCode::PAYLOAD_TOO_LARGE);
 }
 
 #[tokio::test]
