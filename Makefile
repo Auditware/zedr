@@ -213,6 +213,12 @@ test: ## Run all tests (platform-aware)
 	@echo "=== Protocol Tests ==="
 	@cd protocol && cargo test
 	@echo ""
+	@echo "=== Ledger Tests ==="
+	@cd ledger && cargo test --features seal
+	@echo ""
+	@echo "=== Rules Tests ==="
+	@cd rules && cargo test
+	@echo ""
 	@echo "=== Console Tests ==="
 	@cd control_server/frontend && { [ -d node_modules ] || npm ci --no-audit --no-fund; } && npm test
 	@echo ""

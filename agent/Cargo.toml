@@ -16,6 +16,9 @@ license = "MIT"
 
 [workspace.dependencies]
 zedr-protocol = { path = "../protocol" }
+zedr-ledger = { path = "../ledger", features = ["seal"] }
+zedr-rules = { path = "../rules" }
+borsh = { version = "1", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1.35", features = ["full"] }

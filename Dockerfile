@@ -13,6 +13,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY protocol/ protocol/
+COPY ledger/ ledger/
+COPY rules/ rules/
 WORKDIR /src/control_server/backend
 COPY control_server/backend/Cargo.toml control_server/backend/Cargo.lock* ./
 # Dependencies compile against a stub crate so this layer is reused until the manifest changes.

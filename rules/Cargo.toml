@@ -1,0 +1,19 @@
+[package]
+name = "zedr-rules"
+version = "0.1.0"
+edition = "2021"
+description = "Detection rules for zedr, the same code on the agent, on the control server and inside the proof"
+build = "build.rs"
+
+[dependencies]
+zedr-protocol = { path = "../protocol" }
+zedr-ledger = { path = "../ledger" }
+borsh = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+regex-automata = { version = "0.4", default-features = false, features = ["std", "dfa-search"] }
+
+[build-dependencies]
+regex-automata = { version = "0.4", default-features = false, features = ["std", "syntax", "dfa-build", "dfa-search"] }
+
+[dev-dependencies]
+regex = "1"

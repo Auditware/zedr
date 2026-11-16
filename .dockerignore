@@ -1,6 +1,8 @@
 *
 
 !protocol
+!ledger
+!rules
 !control_server/backend/Cargo.toml
 !control_server/backend/Cargo.lock
 !control_server/backend/src

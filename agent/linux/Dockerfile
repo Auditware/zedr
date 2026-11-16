@@ -4,6 +4,8 @@ FROM rust:1.95-alpine AS build
 RUN apk add --no-cache build-base
 WORKDIR /src
 COPY protocol/ protocol/
+COPY ledger/ ledger/
+COPY rules/ rules/
 COPY agent/ agent/
 WORKDIR /src/agent
 

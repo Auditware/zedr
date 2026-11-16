@@ -2,6 +2,7 @@
 ///
 /// Shared types for communication between agents and control server
 
+use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "utoipa")]
@@ -13,6 +14,7 @@ pub const SIGNATURE_HEADER: &str = "x-zedr-signature";
 pub const MAX_EVENT_BATCH_BYTES: usize = 2 * 1024 * 1024;
 
 const UPGRADE_COMMAND_PURPOSE: &str = "zedr-upgrade-command-v1";
+const WINDOW_ACK_PURPOSE: &str = "zedr-window-ack-v1";
 
 /// Agent registration request
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,8 +68,56 @@ pub enum SystemEvent {
     Package(PackageEvent),
 }
 
+/// A sensor event in the form the agent commits to, seals and evaluates rules over
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+pub enum SensorEvent {
+    Process(ProcessEvent),
+    File(FileEvent),
+    Network(NetworkEvent),
+    Persistence(PersistenceEvent),
+    Package(PackageEvent),
+}
+
+impl SensorEvent {
+    /// Canonical bytes, the exact form that is hashed into a leaf and sealed
+    pub fn to_bytes(&self) -> Vec<u8> {
+        borsh::to_vec(self).expect("a sensor event always encodes")
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
+        borsh::from_slice(bytes).map_err(|e| format!("Not a canonical sensor event: {}", e))
+    }
+}
+
+impl TryFrom<SystemEvent> for SensorEvent {
+    type Error = SystemEvent;
+
+    fn try_from(event: SystemEvent) -> Result<Self, SystemEvent> {
+        match event {
+            SystemEvent::Process(event) => Ok(SensorEvent::Process(event)),
+            SystemEvent::File(event) => Ok(SensorEvent::File(event)),
+            SystemEvent::Network(event) => Ok(SensorEvent::Network(event)),
+            SystemEvent::Persistence(event) => Ok(SensorEvent::Persistence(event)),
+            SystemEvent::Package(event) => Ok(SensorEvent::Package(event)),
+            other => Err(other),
+        }
+    }
+}
+
+impl From<SensorEvent> for SystemEvent {
+    fn from(event: SensorEvent) -> Self {
+        match event {
+            SensorEvent::Process(event) => SystemEvent::Process(event),
+            SensorEvent::File(event) => SystemEvent::File(event),
+            SensorEvent::Network(event) => SystemEvent::Network(event),
+            SensorEvent::Persistence(event) => SystemEvent::Persistence(event),
+            SensorEvent::Package(event) => SystemEvent::Package(event),
+        }
+    }
+}
+
 /// One thing that makes the system start a program without anyone asking, and what happened to it
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
 pub struct PersistenceEvent {
     pub timestamp: u64,
@@ -82,7 +132,7 @@ pub struct PersistenceEvent {
 }
 
 /// What happened to an inventory item since the agent last looked, `Present` for the first look after it starts
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
 pub enum InventoryAction {
     Present,
@@ -92,7 +142,7 @@ pub enum InventoryAction {
 }
 
 /// Where a persistence item lives
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum PersistenceKind {
@@ -107,7 +157,7 @@ pub enum PersistenceKind {
 }
 
 /// One installed package, and what happened to it
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
 pub struct PackageEvent {
     pub timestamp: u64,
@@ -120,7 +170,7 @@ pub struct PackageEvent {
 }
 
 /// The package manager whose database lists a package
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum PackageManager {
@@ -146,7 +196,7 @@ pub enum StopReason {
 }
 
 /// Process event
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
 pub struct ProcessEvent {
     pub timestamp: u64,
@@ -160,7 +210,7 @@ pub struct ProcessEvent {
 }
 
 /// Process action types
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
 pub enum ProcessAction {
     Create,
@@ -169,7 +219,7 @@ pub enum ProcessAction {
 }
 
 /// File event
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
 pub struct FileEvent {
     pub timestamp: u64,
@@ -181,7 +231,7 @@ pub struct FileEvent {
 }
 
 /// File action types
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
 pub enum FileAction {
     Read,
@@ -193,7 +243,7 @@ pub enum FileAction {
 }
 
 /// Network event
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
 pub struct NetworkEvent {
     pub timestamp: u64,
@@ -210,7 +260,7 @@ pub struct NetworkEvent {
 }
 
 /// Network action types
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 #[cfg_attr(feature = "utoipa", derive(ToSchema))]
 pub enum NetworkAction {
     Connect,
@@ -326,6 +376,128 @@ pub fn signing_public_key_from_slot(slot: &[u8; 64]) -> Result<[u8; 32], String>
     hex::decode_to_slice(slot, &mut public_key)
         .map_err(|_| "Binary has not been patched with a signing public key".to_string())?;
     Ok(public_key)
+}
+
+/// Header of one sealed window. Hashes travel as 64 hex characters
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
+pub struct SealedWindowHeader {
+    pub epoch: u64,
+    pub window: u64,
+    pub first_index: u64,
+    pub count: u32,
+    pub fresh: bool,
+    pub gap: bool,
+    pub prev_head: String,
+    pub root: String,
+    pub head: String,
+}
+
+/// One sealed event: the leaf that commits to it in hex, and its ciphertext in base64
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
+pub struct SealedEvent {
+    pub leaf: String,
+    pub sealed: String,
+}
+
+/// The secret that opens one sealed event, in hex
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
+pub struct Opening {
+    pub index: u64,
+    pub seed: String,
+}
+
+/// A rule that fired on the endpoint, with the secrets of the events it opens
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
+pub struct Release {
+    pub trigger: u64,
+    pub rule: String,
+    pub context: Vec<u64>,
+    pub pid: u32,
+    pub started_at: u64,
+    pub openings: Vec<Opening>,
+}
+
+/// One sealed window on its way to the control server, with what the rules opened in it
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
+pub struct SealedWindow {
+    pub agent_id: String,
+    pub session: u64,
+    pub seq: u64,
+    pub header: SealedWindowHeader,
+    pub events: Vec<SealedEvent>,
+    pub releases: Vec<Release>,
+    /// Whether this endpoint has a prover and will prove the window
+    pub proving: bool,
+}
+
+/// The control server's signed word that it holds a window
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
+pub struct SealedWindowAck {
+    pub window: u64,
+    pub next_index: u64,
+    pub head: String,
+    pub signature: Vec<u8>,
+}
+
+#[derive(Serialize)]
+struct WindowAckPayload<'a> {
+    purpose: &'a str,
+    agent_id: &'a str,
+    window: u64,
+    next_index: u64,
+    head: &'a str,
+}
+
+/// Exact bytes signed by the server and verified by the agent for a window acknowledgement
+pub fn window_ack_signing_bytes(agent_id: &str, window: u64, next_index: u64, head: &str) -> Result<Vec<u8>, String> {
+    serde_json::to_vec(&WindowAckPayload { purpose: WINDOW_ACK_PURPOSE, agent_id, window, next_index, head })
+        .map_err(|e| format!("Failed to encode window acknowledgement: {}", e))
+}
+
+/// A proof that the rules ran over a run of sealed windows, the receipt in base64
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
+pub struct ProofSubmission {
+    pub agent_id: String,
+    pub session: u64,
+    pub seq: u64,
+    pub receipt: String,
+}
+
+/// The windows a proof was accepted for
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(ToSchema))]
+pub struct ProofAck {
+    pub first_window: u64,
+    pub last_window: u64,
+}
+
+/// Hex form of a 32-byte hash
+pub fn hash_to_hex(hash: &[u8; 32]) -> String {
+    hex::encode(hash)
+}
+
+pub fn hash_from_hex(text: &str) -> Result<[u8; 32], String> {
+    let mut hash = [0u8; 32];
+    hex::decode_to_slice(text, &mut hash).map_err(|_| "A hash is 64 hex characters".to_string())?;
+    Ok(hash)
+}
+
+/// Base64 form of sealed bytes
+pub fn bytes_to_base64(bytes: &[u8]) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+pub fn bytes_from_base64(text: &str) -> Result<Vec<u8>, String> {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.decode(text).map_err(|_| "Not base64".to_string())
 }
 
 /// API error response
@@ -507,5 +679,77 @@ mod tests {
         let mut slot = signing_public_key_to_slot(&[0xab; 32]).unwrap();
         slot[40..].copy_from_slice(&SIGNING_PUBLIC_KEY_PLACEHOLDER[40..]);
         assert!(signing_public_key_from_slot(&slot).is_err());
+    }
+
+    fn connection() -> NetworkEvent {
+        NetworkEvent {
+            timestamp: 7,
+            pid: 21,
+            process_path: "/bin/sh".to_string(),
+            protocol: "tcp".to_string(),
+            source_ip: "10.0.0.5".to_string(),
+            source_port: 50000,
+            dest_ip: "203.0.113.9".to_string(),
+            dest_port: 443,
+            action: NetworkAction::Connect,
+            bytes_sent: 0,
+            bytes_received: 0,
+        }
+    }
+
+    #[test]
+    fn test_the_canonical_bytes_of_a_sensor_event_are_fixed() {
+        let event = SensorEvent::Network(connection());
+        let bytes = event.to_bytes();
+        assert_eq!(
+            hex::encode(&bytes),
+            "02070000000000000015000000070000002f62696e2f7368030000007463700800000031302e302e302e3550c30b0000003230332e302e3131332e39bb010000000000000000000000000000000000",
+            "committed leaves are taken over these bytes, a change here breaks every chain that exists"
+        );
+        assert_eq!(SensorEvent::from_bytes(&bytes).unwrap(), event);
+    }
+
+    #[test]
+    fn test_bytes_with_anything_added_or_missing_are_not_a_sensor_event() {
+        let bytes = SensorEvent::Network(connection()).to_bytes();
+        let mut longer = bytes.clone();
+        longer.push(0);
+        assert!(SensorEvent::from_bytes(&longer).is_err());
+        assert!(SensorEvent::from_bytes(&bytes[..bytes.len() - 1]).is_err());
+        assert!(SensorEvent::from_bytes(&[9]).is_err(), "an unknown kind of event");
+    }
+
+    #[test]
+    fn test_only_what_the_sensor_reports_becomes_a_sensor_event() {
+        let sensed = SystemEvent::Network(connection());
+        let event = SensorEvent::try_from(sensed).unwrap();
+        assert!(matches!(SystemEvent::from(event), SystemEvent::Network(_)));
+
+        let heartbeat = SystemEvent::Heartbeat(HeartbeatEvent { timestamp: 1 });
+        assert!(matches!(SensorEvent::try_from(heartbeat), Err(SystemEvent::Heartbeat(_))));
+    }
+
+    #[test]
+    fn test_window_ack_signing_bytes_bind_the_agent_and_the_chain_position() {
+        let head = "ab".repeat(32);
+        let bytes = window_ack_signing_bytes("agent-1", 5, 40, &head).unwrap();
+        assert_eq!(bytes, window_ack_signing_bytes("agent-1", 5, 40, &head).unwrap());
+        assert_ne!(bytes, window_ack_signing_bytes("agent-2", 5, 40, &head).unwrap());
+        assert_ne!(bytes, window_ack_signing_bytes("agent-1", 6, 40, &head).unwrap());
+        assert_ne!(bytes, window_ack_signing_bytes("agent-1", 5, 41, &head).unwrap());
+        assert_ne!(bytes, window_ack_signing_bytes("agent-1", 5, 40, &"cd".repeat(32)).unwrap());
+        assert_ne!(bytes, upgrade_command_signing_bytes("agent-1", "5", "40", 0).unwrap(), "an acknowledgement is never a command");
+    }
+
+    #[test]
+    fn test_hashes_and_sealed_bytes_survive_their_text_forms() {
+        let hash: [u8; 32] = std::array::from_fn(|i| i as u8);
+        assert_eq!(hash_from_hex(&hash_to_hex(&hash)).unwrap(), hash);
+        assert!(hash_from_hex("abcd").is_err());
+        assert!(hash_from_hex(&"zz".repeat(32)).is_err());
+
+        let sealed = vec![0u8, 255, 16, 32, 7];
+        assert_eq!(bytes_from_base64(&bytes_to_base64(&sealed)).unwrap(), sealed);
+        assert!(bytes_from_base64("not base64!").is_err());
     }
 }

@@ -1,6 +1,8 @@
 *
 
 !protocol
+!ledger
+!rules
 !agent
 
 **/target
