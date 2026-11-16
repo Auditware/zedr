@@ -112,6 +112,76 @@ pub async fn agent_chain(State(state): State<AppState>, Path(agent_id): Path<Str
     }))
 }
 
+const DEFAULT_SEALED: i64 = 100;
+const MAX_SEALED: i64 = 500;
+
+#[derive(Deserialize, IntoParams, ToSchema)]
+pub struct SealedQuery {
+    /// Only events before this index, to read further back than the page before
+    before: Option<i64>,
+    /// How many events to return, at most 500
+    #[serde(default = "default_sealed")]
+    limit: i64,
+}
+
+fn default_sealed() -> i64 {
+    DEFAULT_SEALED
+}
+
+/// One committed event as the server holds it. The kind and the content are there only when a rule opened it
+#[derive(Serialize, sqlx::FromRow, ToSchema)]
+pub struct SealedRow {
+    pub index: i64,
+    pub window: i64,
+    pub epoch: i64,
+    /// When the server received the window that holds it
+    pub received_at: i64,
+    pub leaf: String,
+    pub ciphertext_bytes: i64,
+    /// Proof state of its window
+    pub proof: String,
+    pub opened: bool,
+    /// The plaintext event it was opened as
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event_type: Option<String>,
+    /// The opened event, as JSON
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<String>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/admin/agents/{id}/sealed",
+    tag = "admin",
+    params(("id" = String, Path, description = "Agent ID"), SealedQuery),
+    responses(
+        (status = 200, description = "The committed events of an agent, newest first: commitment, sealed size and window of each, and the content of those a rule opened", body = Vec<SealedRow>),
+        (status = 404, description = "Agent not found")
+    )
+)]
+pub async fn agent_sealed(State(state): State<AppState>, Path(agent_id): Path<String>, Query(query): Query<SealedQuery>) -> Result<Json<Vec<SealedRow>>> {
+    require_agent(&state, &agent_id).await?;
+
+    let rows = sqlx::query_as::<_, SealedRow>(
+        "SELECT e.idx AS \"index\", e.window, w.epoch, w.received_at, e.leaf, LENGTH(e.ciphertext) AS ciphertext_bytes, w.proof,
+                e.opened_at IS NOT NULL AS opened, e.event_id, o.event_type, o.data
+         FROM sealed_events e
+         JOIN sealed_windows w ON w.agent_id = e.agent_id AND w.window = e.window
+         LEFT JOIN events o ON o.id = e.event_id
+         WHERE e.agent_id = ? AND e.idx < ?
+         ORDER BY e.idx DESC LIMIT ?",
+    )
+    .bind(&agent_id)
+    .bind(query.before.unwrap_or(i64::MAX))
+    .bind(query.limit.clamp(1, MAX_SEALED))
+    .fetch_all(&state.pool)
+    .await?;
+
+    Ok(Json(rows))
+}
+
 #[derive(Serialize, ToSchema)]
 pub struct ProofCounts {
     pub pending: i64,

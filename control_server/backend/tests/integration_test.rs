@@ -4451,6 +4451,41 @@ async fn test_the_console_reads_what_the_server_holds_of_all_chains_together() {
 }
 
 #[tokio::test]
+async fn test_the_console_reads_the_committed_events_of_an_agent_newest_first_and_only_the_opened_in_the_clear() {
+    let (app, pool) = create_proving_app().await;
+    let mut host = enroll_endpoint(&app, &pool, "sealed-host").await;
+    tell_a_story(&app, &mut host).await;
+    let reader = admin_token("user");
+
+    let (status, listed) = call(&app, "GET", "/api/admin/agents/sealed-host/sealed", Some(&reader), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let rows = listed.as_array().unwrap();
+    assert_eq!(rows.iter().map(|row| (row["index"].as_i64().unwrap(), row["window"].as_i64().unwrap(), row["opened"].as_bool().unwrap())).collect::<Vec<_>>(), [(4, 2, false), (3, 1, true), (2, 1, false), (1, 0, false), (0, 0, true)]);
+
+    let leaf: String = sqlx::query_scalar("SELECT leaf FROM sealed_events WHERE agent_id = 'sealed-host' AND idx = 2").fetch_one(&pool).await.unwrap();
+    assert_eq!(
+        rows[2],
+        serde_json::json!({ "index": 2, "window": 1, "epoch": 1, "received_at": rows[2]["received_at"], "leaf": leaf, "ciphertext_bytes": 272, "proof": "pending", "opened": false }),
+        "of a sealed event the server tells where it sits, its commitment and its size, and nothing else"
+    );
+    assert!(rows[2]["received_at"].is_i64());
+
+    let opened_as: String = sqlx::query_scalar("SELECT id FROM events WHERE agent_id = 'sealed-host' AND event_type = 'process' AND data LIKE '%/bin/sh%'").fetch_one(&pool).await.unwrap();
+    assert_eq!((&rows[1]["event_id"], &rows[1]["event_type"]), (&serde_json::json!(opened_as), &serde_json::json!("process")));
+    assert_eq!(serde_json::from_str::<serde_json::Value>(rows[1]["data"].as_str().unwrap()).unwrap(), stored_form(&nginx_and_its_shell().1));
+    assert!(rows[4]["data"].as_str().unwrap().contains("/usr/sbin/nginx"), "the parent the finding opened");
+    assert!(!listed.to_string().contains("sleep"), "what no rule opened is in no answer");
+
+    let (_, page) = call(&app, "GET", "/api/admin/agents/sealed-host/sealed?before=3&limit=2", Some(&reader), None).await;
+    assert_eq!(page.as_array().unwrap().iter().map(|row| row["index"].as_i64().unwrap()).collect::<Vec<_>>(), [2, 1]);
+    let (_, none) = call(&app, "GET", "/api/admin/agents/sealed-host/sealed?before=0", Some(&reader), None).await;
+    assert_eq!(none, serde_json::json!([]));
+
+    assert_eq!(call(&app, "GET", "/api/admin/agents/nobody/sealed", Some(&reader), None).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(call(&app, "GET", "/api/admin/agents/sealed-host/sealed", None, None).await.0, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn test_the_console_reads_one_window_with_its_sealed_events_and_releases() {
     let (app, pool) = create_proving_app().await;
     let mut host = enroll_endpoint(&app, &pool, "window-host").await;
@@ -4531,7 +4566,7 @@ async fn test_the_api_document_describes_the_sealed_telemetry_endpoints() {
     let (status, document) = call(&app, "GET", "/api-docs/openapi.json", None, None).await;
     assert_eq!(status, StatusCode::OK);
 
-    for path in ["/api/windows", "/api/proofs", "/api/admin/agents/{id}/chain", "/api/admin/agents/{id}/windows/{window}", "/api/admin/chain/summary", "/api/admin/ruleset"] {
+    for path in ["/api/windows", "/api/proofs", "/api/admin/agents/{id}/chain", "/api/admin/agents/{id}/windows/{window}", "/api/admin/agents/{id}/sealed", "/api/admin/chain/summary", "/api/admin/ruleset"] {
         assert!(document["paths"][path].is_object(), "{} is documented", path);
     }
     for schema in ["SealedWindow", "Release", "SealedWindowAck", "WindowRefusal", "ProofSubmission", "ProofAck", "ChainView", "WindowSummary", "ChainSummary", "ProofCounts", "WindowView", "SealedEventView", "ReleaseView", "RulesetView", "RuleView"] {

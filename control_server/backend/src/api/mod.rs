@@ -97,6 +97,7 @@ pub struct SystemEventBroadcast {
         admin::agents::stream_agents,
         admin::chain::agent_chain,
         admin::chain::agent_window,
+        admin::chain::agent_sealed,
         admin::chain::chain_summary,
         admin::chain::ruleset,
         admin::events::list_events,
@@ -158,6 +159,8 @@ pub struct SystemEventBroadcast {
             HealthResponse,
             admin::agents::ListQuery,
             admin::chain::ChainQuery,
+            admin::chain::SealedQuery,
+            admin::chain::SealedRow,
             admin::chain::ChainView,
             admin::chain::ChainTotals,
             admin::chain::WindowSummary,
@@ -286,6 +289,7 @@ fn create_router_with_appstate(state: AppState, frontend_dist: Option<PathBuf>) 
         .route("/api/admin/agents/:id", get(admin::agents::get_agent))
         .route("/api/admin/agents/:id/chain", get(admin::chain::agent_chain))
         .route("/api/admin/agents/:id/windows/:window", get(admin::chain::agent_window))
+        .route("/api/admin/agents/:id/sealed", get(admin::chain::agent_sealed))
         .route("/api/admin/chain/summary", get(admin::chain::chain_summary))
         .route("/api/admin/ruleset", get(admin::chain::ruleset))
         .route("/api/admin/events", get(admin::events::list_events))
