@@ -53,29 +53,16 @@ pub fn parse_stat(contents: &str) -> Option<Stat> {
 }
 
 pub fn parse_uid(status: &str) -> Option<u32> {
-    status
-        .lines()
-        .find_map(|line| line.strip_prefix("Uid:"))?
-        .split_whitespace()
-        .next()?
-        .parse()
-        .ok()
+    status.lines().find_map(|line| line.strip_prefix("Uid:"))?.split_whitespace().next()?.parse().ok()
 }
 
 pub fn parse_command_line(raw: &[u8]) -> Vec<String> {
     let raw = &raw[..raw.len().min(MAX_COMMAND_LINE_BYTES)];
-    raw.split(|byte| *byte == 0)
-        .filter(|argument| !argument.is_empty())
-        .map(|argument| String::from_utf8_lossy(argument).to_string())
-        .collect()
+    raw.split(|byte| *byte == 0).filter(|argument| !argument.is_empty()).map(|argument| String::from_utf8_lossy(argument).to_string()).collect()
 }
 
 pub fn parse_boot_time(stat: &str) -> Option<u64> {
-    stat.lines()
-        .find_map(|line| line.strip_prefix("btime "))?
-        .trim()
-        .parse()
-        .ok()
+    stat.lines().find_map(|line| line.strip_prefix("btime "))?.trim().parse().ok()
 }
 
 fn bracketed_number(link: &str, prefix: &str) -> Option<u64> {
@@ -140,11 +127,7 @@ pub fn parse_tcp_table(contents: &str) -> Vec<TcpRow> {
 }
 
 pub fn outbound(rows: Vec<TcpRow>) -> Vec<Socket> {
-    let listening: HashSet<u16> = rows
-        .iter()
-        .filter(|row| row.state == TCP_LISTEN)
-        .map(|row| row.local.port())
-        .collect();
+    let listening: HashSet<u16> = rows.iter().filter(|row| row.state == TCP_LISTEN).map(|row| row.local.port()).collect();
 
     rows.into_iter()
         .filter(|row| !matches!(row.state, TCP_LISTEN | TCP_SYN_RECV | TCP_TIME_WAIT | TCP_CLOSE))
@@ -167,17 +150,10 @@ pub struct ProcSource {
 
 impl ProcSource {
     pub fn new(root: &Path) -> Result<Self, String> {
-        let stat = fs::read_to_string(root.join("stat"))
-            .map_err(|e| format!("Failed to read {}: {}", root.join("stat").display(), e))?;
-        let boot_time = parse_boot_time(&stat)
-            .ok_or_else(|| "The boot time is missing from the kernel statistics".to_string())?;
+        let stat = fs::read_to_string(root.join("stat")).map_err(|e| format!("Failed to read {}: {}", root.join("stat").display(), e))?;
+        let boot_time = parse_boot_time(&stat).ok_or_else(|| "The boot time is missing from the kernel statistics".to_string())?;
 
-        Ok(Self {
-            root: root.to_path_buf(),
-            boot_time,
-            seen: HashMap::new(),
-            socket_namespaces: HashMap::new(),
-        })
+        Ok(Self { root: root.to_path_buf(), boot_time, seen: HashMap::new(), socket_namespaces: HashMap::new() })
     }
 
     fn process_dir(&self, pid: u32) -> PathBuf {
@@ -201,8 +177,7 @@ impl ProcSource {
 
 impl Source for ProcSource {
     fn processes(&mut self) -> Result<Vec<ProcessKey>, String> {
-        let entries = fs::read_dir(&self.root)
-            .map_err(|e| format!("Failed to read {}: {}", self.root.display(), e))?;
+        let entries = fs::read_dir(&self.root).map_err(|e| format!("Failed to read {}: {}", self.root.display(), e))?;
 
         let mut seen = HashMap::new();
         for pid in entries.flatten().filter_map(|entry| entry.file_name().to_str()?.parse::<u32>().ok()) {
@@ -247,13 +222,7 @@ impl Source for ProcSource {
             Err(_) => String::new(),
         };
 
-        Some(ProcessDetails {
-            ppid: stat.ppid,
-            uid,
-            executable_path,
-            command_line,
-            started_at: self.boot_time + process.started / CLOCK_TICKS_PER_SECOND,
-        })
+        Some(ProcessDetails { ppid: stat.ppid, uid, executable_path, command_line, started_at: self.boot_time + process.started / CLOCK_TICKS_PER_SECOND })
     }
 
     fn outbound_sockets(&mut self) -> Result<Vec<Socket>, String> {
@@ -293,10 +262,7 @@ impl Source for ProcSource {
 
     fn socket_holders(&mut self, sockets: &[Socket]) -> HashMap<u64, Vec<u32>> {
         let wanted: HashSet<u64> = sockets.iter().map(|socket| socket.inode).collect();
-        let namespaces: HashSet<Option<u64>> = sockets
-            .iter()
-            .filter_map(|socket| self.socket_namespaces.get(&socket.inode).copied())
-            .collect();
+        let namespaces: HashSet<Option<u64>> = sockets.iter().filter_map(|socket| self.socket_namespaces.get(&socket.inode).copied()).collect();
 
         let mut holders: HashMap<u64, Vec<u32>> = HashMap::new();
         for (pid, process) in &self.seen {

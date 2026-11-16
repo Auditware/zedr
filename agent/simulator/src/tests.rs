@@ -49,7 +49,13 @@ impl StubServer {
                     _ => (200, "{}".to_string()),
                 };
                 sink.lock().unwrap().push(request);
-                let _ = write!(stream, "HTTP/1.1 {} Stub\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", status, body.len(), body);
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 {} Stub\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    status,
+                    body.len(),
+                    body
+                );
             }
         });
 
@@ -61,7 +67,11 @@ impl StubServer {
     }
 
     fn windows_of(&self, agent_id: &str) -> Vec<SealedWindow> {
-        self.sent_to("/api/windows").into_iter().map(|window| serde_json::from_value::<SealedWindow>(window).unwrap()).filter(|window| window.agent_id == agent_id).collect()
+        self.sent_to("/api/windows")
+            .into_iter()
+            .map(|window| serde_json::from_value::<SealedWindow>(window).unwrap())
+            .filter(|window| window.agent_id == agent_id)
+            .collect()
     }
 }
 
@@ -98,7 +108,8 @@ fn acknowledge(request: &Received) -> (u16, String) {
     let window: SealedWindow = serde_json::from_str(&request.body).unwrap();
     let next_index = window.header.first_index + u64::from(window.header.count);
     let signed = window_ack_signing_bytes(&window.agent_id, window.header.window, next_index, &window.header.head).unwrap();
-    let ack = SealedWindowAck { window: window.header.window, next_index, head: window.header.head, signature: deployment_key().sign(&signed).to_bytes().to_vec() };
+    let ack =
+        SealedWindowAck { window: window.header.window, next_index, head: window.header.head, signature: deployment_key().sign(&signed).to_bytes().to_vec() };
     (200, serde_json::to_string(&ack).unwrap())
 }
 
@@ -151,7 +162,14 @@ fn test_endpoints_enroll_as_the_scenario_describes_them_and_what_their_sensors_s
     fleet::run(scenario(&server, &dir, vec![web_server(), quiet]), &mut said).unwrap();
     assert_eq!(String::from_utf8(said).unwrap(), "READY 2 endpoints\nPROVEN 0 endpoints\n");
 
-    let registrations = server.received.lock().unwrap().iter().filter(|request| request.path == "/api/agents/register").map(|request| (request.body.clone(), request.signature.clone())).collect::<Vec<_>>();
+    let registrations = server
+        .received
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|request| request.path == "/api/agents/register")
+        .map(|request| (request.body.clone(), request.signature.clone()))
+        .collect::<Vec<_>>();
     assert_eq!(registrations.len(), 2);
     for (body, signature) in &registrations {
         let registration: serde_json::Value = serde_json::from_str(body).unwrap();
@@ -164,25 +182,50 @@ fn test_endpoints_enroll_as_the_scenario_describes_them_and_what_their_sensors_s
     }
     let enrolled = server.sent_to("/api/agents/register").into_iter().find(|registration| registration["hostname"] == "WEB-SRV-04").unwrap();
     assert_eq!(
-        (enrolled["platform"].as_str(), enrolled["os_version"].as_str(), enrolled["architecture"].as_str(), enrolled["ip_address"].as_str(), enrolled["enrollment_key"].as_str()),
+        (
+            enrolled["platform"].as_str(),
+            enrolled["os_version"].as_str(),
+            enrolled["architecture"].as_str(),
+            enrolled["ip_address"].as_str(),
+            enrolled["enrollment_key"].as_str()
+        ),
         (Some("linux"), Some("Ubuntu 24.04.1 LTS"), Some("x86_64"), Some("10.30.1.14"), Some("install-key-1"))
     );
 
     let web = agent_id(&server, "WEB-SRV-04");
-    let reported: Vec<serde_json::Value> = server.sent_to("/api/events").into_iter().filter(|batch| batch["agent_id"] == web.as_str()).flat_map(|batch| batch["events"].as_array().unwrap().clone()).collect();
+    let reported: Vec<serde_json::Value> = server
+        .sent_to("/api/events")
+        .into_iter()
+        .filter(|batch| batch["agent_id"] == web.as_str())
+        .flat_map(|batch| batch["events"].as_array().unwrap().clone())
+        .collect();
     assert_eq!(reported, vec![heartbeat(T0), heartbeat(T0 + 30), heartbeat(T0 + 210)], "only what the agent says about itself travels unsealed");
 
     let windows = server.windows_of(&web);
-    assert_eq!(windows.iter().map(|window| (window.header.window, window.header.count, window.header.fresh)).collect::<Vec<_>>(), vec![(0, 1, true), (1, 0, false), (2, 0, false), (3, 1, false)], "a window a minute, and one at once when a rule fires");
-    assert!(windows.windows(2).all(|pair| pair[1].header.prev_head == pair[0].header.head && pair[1].header.first_index == pair[0].header.first_index + u64::from(pair[0].header.count)));
+    assert_eq!(
+        windows.iter().map(|window| (window.header.window, window.header.count, window.header.fresh)).collect::<Vec<_>>(),
+        vec![(0, 1, true), (1, 0, false), (2, 0, false), (3, 1, false)],
+        "a window a minute, and one at once when a rule fires"
+    );
+    assert!(windows
+        .windows(2)
+        .all(|pair| pair[1].header.prev_head == pair[0].header.head
+            && pair[1].header.first_index == pair[0].header.first_index + u64::from(pair[0].header.count)));
     assert!(windows.iter().all(|window| !window.proving && window.header.epoch == 1 && window.events.len() == window.header.count as usize));
     assert!(windows[..3].iter().all(|window| window.releases.is_empty()));
     let release = &windows[3].releases[0];
-    assert_eq!((windows[3].releases.len(), release.rule.as_str(), release.trigger, release.context.as_slice(), release.pid), (1, "server-child", 1, [0].as_slice(), 21));
+    assert_eq!(
+        (windows[3].releases.len(), release.rule.as_str(), release.trigger, release.context.as_slice(), release.pid),
+        (1, "server-child", 1, [0].as_slice(), 21)
+    );
     assert_eq!(release.openings.iter().map(|opening| opening.index).collect::<Vec<_>>(), vec![1, 0]);
 
     let silent = server.windows_of(&agent_id(&server, "WEB-SRV-05"));
-    assert_eq!(silent.iter().map(|window| (window.header.window, window.header.count)).collect::<Vec<_>>(), vec![(0, 0), (1, 0)], "a sensor that sees nothing still seals");
+    assert_eq!(
+        silent.iter().map(|window| (window.header.window, window.header.count)).collect::<Vec<_>>(),
+        vec![(0, 0), (1, 0)],
+        "a sensor that sees nothing still seals"
+    );
     assert!(server.sent_to("/api/proofs").is_empty());
 
     std::fs::remove_dir_all(&dir).unwrap();
@@ -203,7 +246,11 @@ fn test_an_agent_that_stops_delivers_what_its_sensor_saw_and_then_says_so_in_a_r
     assert_eq!(after_registration.iter().map(|(path, _)| path.as_str()).collect::<Vec<_>>(), vec!["/api/events", "/api/windows", "/api/events"]);
     assert_eq!(after_registration[0].1["events"], serde_json::json!([heartbeat(T0), heartbeat(T0 + 30)]));
     assert_eq!(after_registration[1].1["header"]["count"], 1, "the window is sealed at the stop, well before its minute is over");
-    assert_eq!(after_registration[2].1["events"], serde_json::json!([{ "AgentStopping": { "timestamp": T0 + 30, "reason": "ServiceStop" } }]), "a stop notice in a batch with a heartbeat would be read as an agent that is back");
+    assert_eq!(
+        after_registration[2].1["events"],
+        serde_json::json!([{ "AgentStopping": { "timestamp": T0 + 30, "reason": "ServiceStop" } }]),
+        "a stop notice in a batch with a heartbeat would be read as an agent that is back"
+    );
 
     std::fs::remove_dir_all(&dir).unwrap();
 }
@@ -241,7 +288,10 @@ fn test_on_a_test_tenant_an_endpoint_states_its_journal_where_a_receipt_goes_and
     assert_eq!(String::from_utf8(said).unwrap(), "READY 2 endpoints\nPROVEN 1 endpoints\n");
 
     assert!(server.windows_of(&agent_id(&server, "WEB-SRV-04")).iter().all(|window| window.proving));
-    assert!(server.windows_of(&agent_id(&server, "WEB-SRV-05")).iter().all(|window| !window.proving), "an endpoint that is not marked as proving states nothing");
+    assert!(
+        server.windows_of(&agent_id(&server, "WEB-SRV-05")).iter().all(|window| !window.proving),
+        "an endpoint that is not marked as proving states nothing"
+    );
 
     let stated = server.sent_to("/api/proofs");
     assert_eq!(stated.len(), 1);
@@ -283,10 +333,15 @@ fn test_the_dishonest_endpoint_seals_its_window_without_the_match_and_its_proof_
 
     let proofs = server.sent_to("/api/proofs");
     assert_eq!(proofs.len(), 1);
-    let input = Input::from_bytes(&bytes_from_base64(proofs[0]["receipt"].as_str().unwrap()).unwrap()).expect("the stand-in prover hands back what it was given to prove");
+    let input = Input::from_bytes(&bytes_from_base64(proofs[0]["receipt"].as_str().unwrap()).unwrap())
+        .expect("the stand-in prover hands back what it was given to prove");
     let (journal, _) = proof::run(input).unwrap();
     assert_eq!((journal.first_window, journal.last_window, journal.next_index), (0, 3, 2));
-    assert_eq!(journal.matches.iter().map(|found| (found.rule, found.trigger, found.pid)).collect::<Vec<_>>(), vec![(RuleId::ServerChild, 1, 21)], "the proof is about the committed events, so it tells the match");
+    assert_eq!(
+        journal.matches.iter().map(|found| (found.rule, found.trigger, found.pid)).collect::<Vec<_>>(),
+        vec![(RuleId::ServerChild, 1, 21)],
+        "the proof is about the committed events, so it tells the match"
+    );
 
     std::fs::remove_dir_all(&dir).unwrap();
 }

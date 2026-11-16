@@ -14,7 +14,7 @@ fn service_main(arguments: Vec<std::ffi::OsString>) {
         service::log("This agent has been tampered with and will not execute.");
         return;
     }
-    
+
     service::log("Service main entry point reached");
     if let Err(e) = service::run_service_loop(arguments) {
         service::log(&format!("Service error: {:?}", e));
@@ -29,7 +29,7 @@ fn staging_service_main(arguments: Vec<std::ffi::OsString>) {
         service::log("This staging agent has been tampered with and will not execute.");
         return;
     }
-    
+
     service::log("Staging service main entry point reached");
     if let Err(e) = service::run_staging_service(arguments) {
         service::log(&format!("Staging service error: {:?}", e));
@@ -44,7 +44,7 @@ fn main() -> windows_service::Result<()> {
     }
 
     let args: Vec<String> = env::args().collect();
-    
+
     if args.len() > 1 {
         match args[1].as_str() {
             "install-service" => {
@@ -73,12 +73,8 @@ fn main() -> windows_service::Result<()> {
                     }
                 }
             }
-            "staging-service" => {
-                windows_service::service_dispatcher::start("zedr-agent-staging", ffi_staging_service_main)
-            }
-            "--console" => {
-                windows_service::service_dispatcher::start("zedr-agent-staging", ffi_staging_service_main)
-            }
+            "staging-service" => windows_service::service_dispatcher::start("zedr-agent-staging", ffi_staging_service_main),
+            "--console" => windows_service::service_dispatcher::start("zedr-agent-staging", ffi_staging_service_main),
             _ => {
                 print_usage();
                 Ok(())
@@ -93,7 +89,7 @@ fn run_console_mode() {
     println!("zedr Windows Agent v{}", env!("CARGO_PKG_VERSION"));
     println!("Running in console mode (for testing)");
     println!("Platform: {} {}", env::consts::OS, env::consts::ARCH);
-    
+
     if let Some(version) = get_windows_version() {
         println!("Windows Version: {}", version);
     }
@@ -113,8 +109,8 @@ fn print_usage() {
 }
 
 pub fn get_windows_version() -> Option<String> {
-    use windows::Win32::System::SystemInformation::{GetVersionExW, OSVERSIONINFOEXW};
     use std::mem::zeroed;
+    use windows::Win32::System::SystemInformation::{GetVersionExW, OSVERSIONINFOEXW};
 
     unsafe {
         let mut info: OSVERSIONINFOEXW = zeroed();
@@ -129,4 +125,3 @@ pub fn get_windows_version() -> Option<String> {
         }
     }
 }
-

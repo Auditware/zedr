@@ -10,20 +10,14 @@ pub const STATE_DIR: &str = "/var/lib/zedr";
 const OWNER_ONLY: u32 = 0o700;
 
 pub fn own_uid() -> Result<u32, String> {
-    fs::metadata("/proc/self")
-        .map(|metadata| metadata.uid())
-        .map_err(|e| format!("Failed to read the agent's own user id: {}", e))
+    fs::metadata("/proc/self").map(|metadata| metadata.uid()).map_err(|e| format!("Failed to read the agent's own user id: {}", e))
 }
 
 pub fn ensure_private_dir(path: &Path) -> Result<(), String> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(e) if e.kind() == ErrorKind::NotFound => {
-            return fs::DirBuilder::new()
-                .recursive(true)
-                .mode(OWNER_ONLY)
-                .create(path)
-                .map_err(|e| format!("Failed to create {}: {}", path.display(), e));
+            return fs::DirBuilder::new().recursive(true).mode(OWNER_ONLY).create(path).map_err(|e| format!("Failed to create {}: {}", path.display(), e));
         }
         Err(e) => return Err(format!("Failed to inspect {}: {}", path.display(), e)),
     };
@@ -38,17 +32,14 @@ pub fn ensure_private_dir(path: &Path) -> Result<(), String> {
     }
 
     if metadata.mode() & 0o777 != OWNER_ONLY {
-        fs::set_permissions(path, fs::Permissions::from_mode(OWNER_ONLY))
-            .map_err(|e| format!("Failed to restrict {}: {}", path.display(), e))?;
+        fs::set_permissions(path, fs::Permissions::from_mode(OWNER_ONLY)).map_err(|e| format!("Failed to restrict {}: {}", path.display(), e))?;
     }
 
     Ok(())
 }
 
 pub fn kernel_version() -> Option<String> {
-    fs::read_to_string("/proc/sys/kernel/osrelease")
-        .ok()
-        .map(|release| release.trim().to_string())
+    fs::read_to_string("/proc/sys/kernel/osrelease").ok().map(|release| release.trim().to_string())
 }
 
 fn hostname() -> String {
@@ -71,9 +62,7 @@ pub fn distribution_name(os_release: &str) -> Option<String> {
 }
 
 fn os_version() -> String {
-    let distribution = fs::read_to_string("/etc/os-release")
-        .ok()
-        .and_then(|contents| distribution_name(&contents));
+    let distribution = fs::read_to_string("/etc/os-release").ok().and_then(|contents| distribution_name(&contents));
 
     match (distribution, kernel_version()) {
         (Some(distribution), Some(kernel)) => format!("{} (kernel {})", distribution, kernel),
@@ -84,9 +73,5 @@ fn os_version() -> String {
 }
 
 pub fn describe() -> HostDescription {
-    HostDescription {
-        hostname: hostname(),
-        os_version: os_version(),
-        agent_version: env!("CARGO_PKG_VERSION").to_string(),
-    }
+    HostDescription { hostname: hostname(), os_version: os_version(), agent_version: env!("CARGO_PKG_VERSION").to_string() }
 }

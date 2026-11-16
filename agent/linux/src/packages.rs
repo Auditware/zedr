@@ -6,10 +6,7 @@ use zedr_shared::PackageManager;
 
 use crate::files::{self, clip, Opened};
 
-const DATABASES: [(PackageManager, &str); 2] = [
-    (PackageManager::Dpkg, "/var/lib/dpkg/status"),
-    (PackageManager::Apk, "/lib/apk/db/installed"),
-];
+const DATABASES: [(PackageManager, &str); 2] = [(PackageManager::Dpkg, "/var/lib/dpkg/status"), (PackageManager::Apk, "/lib/apk/db/installed")];
 const MAX_DATABASE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_FIELD_BYTES: usize = 256;
 const DPKG_STATES_WITHOUT_FILES: [&str; 2] = ["not-installed", "config-files"];
@@ -53,12 +50,7 @@ impl Entry {
         if self.without_files {
             return None;
         }
-        Some(PackageItem {
-            manager,
-            name: self.name?,
-            version: self.version?,
-            architecture: self.architecture.unwrap_or_default(),
-        })
+        Some(PackageItem { manager, name: self.name?, version: self.version?, architecture: self.architecture.unwrap_or_default() })
     }
 }
 

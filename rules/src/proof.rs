@@ -148,7 +148,16 @@ mod tests {
     fn process(timestamp: u64, pid: u32, ppid: u32, path: &str, args: &[&str]) -> SensorEvent {
         let mut command_line = vec![path.to_string()];
         command_line.extend(args.iter().map(|arg| arg.to_string()));
-        SensorEvent::Process(ProcessEvent { timestamp, pid, ppid, executable_path: path.to_string(), command_line, action: ProcessAction::Create, uid: 0, hash: None })
+        SensorEvent::Process(ProcessEvent {
+            timestamp,
+            pid,
+            ppid,
+            executable_path: path.to_string(),
+            command_line,
+            action: ProcessAction::Create,
+            uid: 0,
+            hash: None,
+        })
     }
 
     fn committed(index: u64, event: &SensorEvent) -> Committed {
@@ -156,7 +165,12 @@ mod tests {
     }
 
     fn window(window: u64, first_index: u64, events: &[SensorEvent]) -> WindowInput {
-        WindowInput { window, first_index, gap: false, events: events.iter().enumerate().map(|(offset, event)| committed(first_index + offset as u64, event)).collect() }
+        WindowInput {
+            window,
+            first_index,
+            gap: false,
+            events: events.iter().enumerate().map(|(offset, event)| committed(first_index + offset as u64, event)).collect(),
+        }
     }
 
     fn story() -> Vec<SensorEvent> {
@@ -177,7 +191,8 @@ mod tests {
         let events = story();
         let (journal, _) = run(fresh_input(vec![window(0, 0, &events[..2]), window(1, 2, &events[2..])])).unwrap();
 
-        let leaves: Vec<Hash> = events.iter().enumerate().map(|(index, event)| leaf(&AGENT, EPOCH, index as u64, &[index as u8; 32], &event.to_bytes())).collect();
+        let leaves: Vec<Hash> =
+            events.iter().enumerate().map(|(index, event)| leaf(&AGENT, EPOCH, index as u64, &[index as u8; 32], &event.to_bytes())).collect();
         let first = WindowHeader::seal(&AGENT, EPOCH, 0, 0, true, false, GENESIS, &leaves[..2]).unwrap();
         let second = WindowHeader::seal(&AGENT, EPOCH, 1, 2, false, false, first.head, &leaves[2..]).unwrap();
         assert_eq!(journal.head_in, GENESIS);
@@ -202,7 +217,16 @@ mod tests {
         let mut first_input = fresh_input(vec![window(0, 0, &events[..2])]);
         first_input.salt_out = [6u8; 32];
         let (first, state) = run(first_input).unwrap();
-        let second_input = Input { agent: AGENT, epoch: EPOCH, fresh: false, head_in: first.head_out, state, salt_in: [6u8; 32], salt_out: [8u8; 32], windows: vec![window(1, 2, &events[2..3]), window(2, 3, &events[3..])] };
+        let second_input = Input {
+            agent: AGENT,
+            epoch: EPOCH,
+            fresh: false,
+            head_in: first.head_out,
+            state,
+            salt_in: [6u8; 32],
+            salt_out: [8u8; 32],
+            windows: vec![window(1, 2, &events[2..3]), window(2, 3, &events[3..])],
+        };
         let (second, state) = run(second_input).unwrap();
 
         assert_eq!(second.state_in, first.state_out, "the second proof starts from the state the first one left");
@@ -226,7 +250,16 @@ mod tests {
     fn test_a_state_other_than_the_committed_one_shows_in_the_journal() {
         let events = story();
         let (first, state) = run(fresh_input(vec![window(0, 0, &events[..2])])).unwrap();
-        let honest = Input { agent: AGENT, epoch: EPOCH, fresh: false, head_in: first.head_out, state, salt_in: [8u8; 32], salt_out: [9u8; 32], windows: vec![window(1, 2, &events[2..])] };
+        let honest = Input {
+            agent: AGENT,
+            epoch: EPOCH,
+            fresh: false,
+            head_in: first.head_out,
+            state,
+            salt_in: [8u8; 32],
+            salt_out: [9u8; 32],
+            windows: vec![window(1, 2, &events[2..])],
+        };
         let (journal, _) = run(honest.clone()).unwrap();
         assert_eq!(journal.state_in, first.state_out);
         assert_eq!(journal.matches.len(), 1);

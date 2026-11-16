@@ -65,8 +65,7 @@ pub fn stop_reason(signal: i32, system_is_stopping: Result<bool, String>) -> Sto
 
 fn watch_signals(stop: mpsc::Sender<StopReason>) -> Result<(), String> {
     let uid = host::own_uid()?;
-    let mut signals = Signals::new([SIGTERM, SIGINT])
-        .map_err(|e| format!("Failed to install signal handlers: {}", e))?;
+    let mut signals = Signals::new([SIGTERM, SIGINT]).map_err(|e| format!("Failed to install signal handlers: {}", e))?;
 
     thread::spawn(move || {
         if let Some(signal) = signals.forever().next() {

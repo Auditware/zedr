@@ -378,8 +378,8 @@ fn create_router_with_appstate(state: AppState, frontend_dist: Option<PathBuf>) 
         .with_state(state)
 }
 
-async fn swagger_ui() -> axum::response::Html<String> {
-    axum::response::Html(format!(r#"
+async fn swagger_ui() -> axum::response::Html<&'static str> {
+    axum::response::Html(r#"
 <!DOCTYPE html>
 <html>
 <head>
@@ -390,14 +390,14 @@ async fn swagger_ui() -> axum::response::Html<String> {
     <div id="swagger-ui"></div>
     <script src="https://unpkg.com/swagger-ui-dist@5.11.0/swagger-ui-bundle.js"></script>
     <script>
-        SwaggerUIBundle({{
+        SwaggerUIBundle({
             url: '/api-docs/openapi.json',
             dom_id: '#swagger-ui',
             presets: [SwaggerUIBundle.presets.apis, SwaggerUIBundle.SwaggerUIStandalonePreset],
             layout: 'BaseLayout'
-        }})
+        })
     </script>
 </body>
 </html>
-"#))
+"#)
 }

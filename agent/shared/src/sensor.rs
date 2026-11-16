@@ -2,8 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 
 use zedr_protocol::{
-    InventoryAction, NetworkAction, NetworkEvent, PackageEvent, PackageManager, PersistenceEvent, PersistenceKind,
-    ProcessAction, ProcessEvent, SystemEvent,
+    InventoryAction, NetworkAction, NetworkEvent, PackageEvent, PackageManager, PersistenceEvent, PersistenceKind, ProcessAction, ProcessEvent, SystemEvent,
 };
 
 const REPEAT_CONNECTION_AFTER_SECS: u64 = 300;
@@ -108,20 +107,12 @@ impl<K: Ord + Clone, V: PartialEq + Clone> Inventory<K, V> {
             found.entry(key).or_insert(item);
         }
 
-        let change = |action, key: &K, item: &V, previous: Option<&V>| Change {
-            action,
-            key: key.clone(),
-            item: item.clone(),
-            previous: previous.cloned(),
-        };
+        let change = |action, key: &K, item: &V, previous: Option<&V>| Change { action, key: key.clone(), item: item.clone(), previous: previous.cloned() };
         let changes = match &self.known {
             None => found.iter().map(|(key, item)| change(InventoryAction::Present, key, item, None)).collect(),
             Some(known) => {
-                let mut changes: Vec<Change<K, V>> = known
-                    .iter()
-                    .filter(|(key, _)| !found.contains_key(*key))
-                    .map(|(key, item)| change(InventoryAction::Removed, key, item, None))
-                    .collect();
+                let mut changes: Vec<Change<K, V>> =
+                    known.iter().filter(|(key, _)| !found.contains_key(*key)).map(|(key, item)| change(InventoryAction::Removed, key, item, None)).collect();
                 for (key, item) in &found {
                     match known.get(key) {
                         None => changes.push(change(InventoryAction::Added, key, item, None)),
@@ -207,21 +198,18 @@ impl<S: Source> Sensor<S> {
         }
 
         if self.persistence.is_due(now) {
-            let current = self.source.persistence().map(|items| {
-                items.into_iter().map(|item| ((item.kind, item.path.clone(), item.name.clone()), item)).collect()
-            });
+            let current =
+                self.source.persistence().map(|items| items.into_iter().map(|item| ((item.kind, item.path.clone(), item.name.clone()), item)).collect());
             let changes = self.persistence.read(now, current);
             observation.events.extend(changes.iter().map(|change| persistence_event(&change.item, change.action, now)));
         }
         observation.errors.extend(self.persistence.error.iter().map(|e| format!("Persistence inventory unavailable: {}", e)));
 
         if self.packages.is_due(now) {
-            let current = self.source.packages().map(|packages| {
-                packages
-                    .into_iter()
-                    .map(|package| ((package.manager, package.name, package.architecture), package.version))
-                    .collect()
-            });
+            let current = self
+                .source
+                .packages()
+                .map(|packages| packages.into_iter().map(|package| ((package.manager, package.name, package.architecture), package.version)).collect());
             let changes = self.packages.read(now, current);
             observation.events.extend(changes.into_iter().map(|change| package_event(change, now)));
         }
@@ -271,22 +259,11 @@ impl<S: Source> Sensor<S> {
     }
 
     fn observe_sockets(&mut self, current: Vec<Socket>, now: u64, events: &mut Vec<SystemEvent>) {
-        let current: Vec<Socket> = current
-            .into_iter()
-            .filter(|socket| !socket.remote.ip().is_loopback() && !socket.remote.ip().is_unspecified())
-            .collect();
+        let current: Vec<Socket> = current.into_iter().filter(|socket| !socket.remote.ip().is_loopback() && !socket.remote.ip().is_unspecified()).collect();
 
-        let unseen: Vec<Socket> = current
-            .iter()
-            .filter(|socket| !self.open_sockets.contains(*socket))
-            .cloned()
-            .collect();
+        let unseen: Vec<Socket> = current.iter().filter(|socket| !self.open_sockets.contains(*socket)).cloned().collect();
 
-        let holders = if unseen.is_empty() {
-            HashMap::new()
-        } else {
-            self.source.socket_holders(&unseen)
-        };
+        let holders = if unseen.is_empty() { HashMap::new() } else { self.source.socket_holders(&unseen) };
 
         let mut still_unattributed = HashSet::new();
         for socket in &unseen {
@@ -300,10 +277,8 @@ impl<S: Source> Sensor<S> {
             }
 
             let destination = (pid, socket.remote.ip(), socket.remote.port());
-            let reported_recently = self
-                .reported_connections
-                .get(&destination)
-                .is_some_and(|reported_at| now.saturating_sub(*reported_at) < REPEAT_CONNECTION_AFTER_SECS);
+            let reported_recently =
+                self.reported_connections.get(&destination).is_some_and(|reported_at| now.saturating_sub(*reported_at) < REPEAT_CONNECTION_AFTER_SECS);
             if reported_recently {
                 continue;
             }
@@ -325,8 +300,7 @@ impl<S: Source> Sensor<S> {
         }
 
         self.open_sockets = current.into_iter().filter(|socket| !still_unattributed.contains(socket)).collect();
-        self.reported_connections
-            .retain(|_, reported_at| now.saturating_sub(*reported_at) < REPEAT_CONNECTION_AFTER_SECS);
+        self.reported_connections.retain(|_, reported_at| now.saturating_sub(*reported_at) < REPEAT_CONNECTION_AFTER_SECS);
     }
 
     fn first_holder(&self, holders: Option<&Vec<u32>>) -> Option<(u32, String)> {
@@ -405,13 +379,7 @@ mod tests {
         fn start(&self, pid: u32, ppid: u32, started_at: u64, path: &str) {
             self.0.lock().unwrap().processes.push((
                 ProcessKey { pid, started: started_at, image: 1 },
-                ProcessDetails {
-                    ppid,
-                    uid: 1000,
-                    executable_path: path.to_string(),
-                    command_line: vec![path.to_string(), "--flag".to_string()],
-                    started_at,
-                },
+                ProcessDetails { ppid, uid: 1000, executable_path: path.to_string(), command_line: vec![path.to_string(), "--flag".to_string()], started_at },
             ));
         }
 
@@ -429,11 +397,7 @@ mod tests {
 
         fn connect(&self, inode: u64, holders: &[u32], remote: &str) {
             let mut world = self.0.lock().unwrap();
-            world.sockets.push(Socket {
-                inode,
-                local: format!("10.0.0.5:{}", 40000 + inode).parse().unwrap(),
-                remote: remote.parse().unwrap(),
-            });
+            world.sockets.push(Socket { inode, local: format!("10.0.0.5:{}", 40000 + inode).parse().unwrap(), remote: remote.parse().unwrap() });
             world.holders.insert(inode, holders.to_vec());
         }
 
@@ -495,10 +459,7 @@ mod tests {
         fn socket_holders(&mut self, sockets: &[Socket]) -> HashMap<u64, Vec<u32>> {
             let mut world = self.0.lock().unwrap();
             world.holder_lookups += 1;
-            sockets
-                .iter()
-                .filter_map(|socket| world.holders.get(&socket.inode).map(|pids| (socket.inode, pids.clone())))
-                .collect()
+            sockets.iter().filter_map(|socket| world.holders.get(&socket.inode).map(|pids| (socket.inode, pids.clone()))).collect()
         }
 
         fn persistence(&mut self) -> Result<Vec<PersistenceItem>, String> {
@@ -533,13 +494,9 @@ mod tests {
             .events
             .iter()
             .filter_map(|event| match event {
-                SystemEvent::Process(process) => Some((
-                    format!("{:?}", process.action),
-                    process.pid,
-                    process.ppid,
-                    process.executable_path.clone(),
-                    process.timestamp,
-                )),
+                SystemEvent::Process(process) => {
+                    Some((format!("{:?}", process.action), process.pid, process.ppid, process.executable_path.clone(), process.timestamp))
+                }
                 _ => None,
             })
             .collect()
@@ -550,9 +507,7 @@ mod tests {
             .events
             .iter()
             .filter_map(|event| match event {
-                SystemEvent::Network(network) => {
-                    Some((network.pid, network.process_path.clone(), network.dest_ip.clone(), network.dest_port))
-                }
+                SystemEvent::Network(network) => Some((network.pid, network.process_path.clone(), network.dest_ip.clone(), network.dest_port)),
                 _ => None,
             })
             .collect()
@@ -639,10 +594,7 @@ mod tests {
 
         assert_eq!(
             processes(&sensor.poll(2_005)),
-            vec![
-                ("Terminate".to_string(), 600, 1, "/usr/bin/old".to_string(), 2_005),
-                ("Create".to_string(), 600, 1, "/usr/bin/new".to_string(), 2_004),
-            ]
+            vec![("Terminate".to_string(), 600, 1, "/usr/bin/old".to_string(), 2_005), ("Create".to_string(), 600, 1, "/usr/bin/new".to_string(), 2_004),]
         );
     }
 
@@ -915,10 +867,7 @@ mod tests {
 
         assert_eq!(
             changes(&sensor.poll(2_060)),
-            vec![
-                (InventoryAction::Removed, "@reboot root /opt/boot.sh".to_string()),
-                (InventoryAction::Added, "@reboot root /tmp/.boot".to_string()),
-            ],
+            vec![(InventoryAction::Removed, "@reboot root /opt/boot.sh".to_string()), (InventoryAction::Added, "@reboot root /tmp/.boot".to_string()),],
             "an edited line is one entry gone and another one new, the untouched entry is not mentioned"
         );
     }
@@ -974,19 +923,21 @@ mod tests {
             .events
             .iter()
             .filter_map(|event| match event {
-                SystemEvent::Package(package) => Some((
-                    package.action,
-                    package.name.clone(),
-                    package.version.clone(),
-                    package.architecture.clone(),
-                    package.previous_version.clone(),
-                )),
+                SystemEvent::Package(package) => {
+                    Some((package.action, package.name.clone(), package.version.clone(), package.architecture.clone(), package.previous_version.clone()))
+                }
                 _ => None,
             })
             .collect()
     }
 
-    fn package(action: InventoryAction, name: &str, version: &str, architecture: &str, previous: Option<&str>) -> (InventoryAction, String, String, String, Option<String>) {
+    fn package(
+        action: InventoryAction,
+        name: &str,
+        version: &str,
+        architecture: &str,
+        previous: Option<&str>,
+    ) -> (InventoryAction, String, String, String, Option<String>) {
         (action, name.to_string(), version.to_string(), architecture.to_string(), previous.map(str::to_string))
     }
 
@@ -1108,7 +1059,11 @@ mod tests {
         let again = sensor.poll(2_010);
         assert_eq!(processes(&again), processes(&first), "running processes are reported as started, with their start time");
         assert_eq!(connections(&again), connections(&first), "an open connection is reported inside the window that would hold it back");
-        assert_eq!(changes(&again), vec![(InventoryAction::Present, "alpha.service".to_string())], "the inventories are read at once, not when their interval is over");
+        assert_eq!(
+            changes(&again),
+            vec![(InventoryAction::Present, "alpha.service".to_string())],
+            "the inventories are read at once, not when their interval is over"
+        );
         assert_eq!(packages(&again), vec![package(InventoryAction::Present, "openssl", "3.0.13-0ubuntu3", "amd64", None)]);
 
         assert!(sensor.poll(2_015).events.is_empty());

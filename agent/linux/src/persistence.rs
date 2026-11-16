@@ -17,19 +17,9 @@ const MAX_LIBRARY_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_COMMAND_BYTES: usize = 4096;
 const MAX_NAME_BYTES: usize = 256;
 
-const SYSTEM_UNITS: [&str; 5] = [
-    "/etc/systemd/system",
-    "/run/systemd/system",
-    "/usr/local/lib/systemd/system",
-    "/usr/lib/systemd/system",
-    "/lib/systemd/system",
-];
-const USER_UNITS: [&str; 4] = [
-    "/etc/systemd/user",
-    "/run/systemd/user",
-    "/usr/local/lib/systemd/user",
-    "/usr/lib/systemd/user",
-];
+const SYSTEM_UNITS: [&str; 5] =
+    ["/etc/systemd/system", "/run/systemd/system", "/usr/local/lib/systemd/system", "/usr/lib/systemd/system", "/lib/systemd/system"];
+const USER_UNITS: [&str; 4] = ["/etc/systemd/user", "/run/systemd/user", "/usr/local/lib/systemd/user", "/usr/lib/systemd/user"];
 const USER_UNITS_IN_HOME: &str = ".config/systemd/user";
 const MASKED: &str = "/dev/null";
 
@@ -380,9 +370,7 @@ impl Scan<'_> {
 
         let mut bytes = Vec::new();
         match file.take(MAX_FILE_BYTES + 1).read_to_end(&mut bytes) {
-            Ok(read) if read as u64 <= MAX_FILE_BYTES => {
-                Loaded::File(Contents { bytes, executable: metadata.permissions().mode() & 0o111 != 0 })
-            }
+            Ok(read) if read as u64 <= MAX_FILE_BYTES => Loaded::File(Contents { bytes, executable: metadata.permissions().mode() & 0o111 != 0 }),
             _ => Loaded::Unreadable,
         }
     }
@@ -407,11 +395,8 @@ impl Scan<'_> {
 
         match fs::read_dir(location) {
             Ok(entries) => {
-                let mut names: Vec<OsString> = entries
-                    .flatten()
-                    .map(|entry| entry.file_name())
-                    .filter(|name| !name.to_string_lossy().starts_with('.'))
-                    .collect();
+                let mut names: Vec<OsString> =
+                    entries.flatten().map(|entry| entry.file_name()).filter(|name| !name.to_string_lossy().starts_with('.')).collect();
                 names.sort();
                 Listing::Entries(names)
             }
@@ -526,8 +511,7 @@ impl Scan<'_> {
         let files: Vec<UnitFile> = sources
             .into_iter()
             .map(|(kind, effective, name, path, contents)| {
-                let fragments: Vec<&Contents> =
-                    std::iter::once(&contents).chain(drop_ins.get(&name).into_iter().flat_map(BTreeMap::values)).collect();
+                let fragments: Vec<&Contents> = std::iter::once(&contents).chain(drop_ins.get(&name).into_iter().flat_map(BTreeMap::values)).collect();
                 let texts: Vec<Cow<str>> = fragments.iter().map(|fragment| fragment.text()).collect();
                 let texts: Vec<&str> = texts.iter().map(|text| text.as_ref()).collect();
                 let mut hasher = Sha256::new();
@@ -659,11 +643,8 @@ impl Scan<'_> {
     fn boot_scripts(&mut self) {
         self.whole_file(PersistenceKind::RcLocal, Path::new(RC_LOCAL), ROOT, |script| script.executable);
 
-        let mut started: HashSet<String> = START_LEVELS
-            .iter()
-            .flat_map(|level| self.names_in(Path::new(level)))
-            .filter_map(|link| started_by(&link.to_string_lossy()))
-            .collect();
+        let mut started: HashSet<String> =
+            START_LEVELS.iter().flat_map(|level| self.names_in(Path::new(level))).filter_map(|link| started_by(&link.to_string_lossy())).collect();
         for level in self.names_in(Path::new(OPENRC_LEVELS)) {
             let services = self.names_in(&Path::new(OPENRC_LEVELS).join(level));
             started.extend(services.iter().map(|service| service.to_string_lossy().into_owned()));

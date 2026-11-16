@@ -130,11 +130,18 @@ mod tests {
     use super::*;
 
     fn scenario(endpoints: &str) -> String {
-        format!(r#"{{ "server": "http://127.0.0.1:1", "deployment_key": "{}", "state_dir": "/nowhere", "endpoints": [{}] }}"#, crate::tests::deployment_key_hex(), endpoints)
+        format!(
+            r#"{{ "server": "http://127.0.0.1:1", "deployment_key": "{}", "state_dir": "/nowhere", "endpoints": [{}] }}"#,
+            crate::tests::deployment_key_hex(),
+            endpoints
+        )
     }
 
     fn endpoint(hostname: &str, more: &str) -> String {
-        format!(r#"{{ "hostname": "{}", "platform": "linux", "os_version": "Ubuntu 24.04.1 LTS", "architecture": "x86_64", "version": "0.1.0"{} }}"#, hostname, more)
+        format!(
+            r#"{{ "hostname": "{}", "platform": "linux", "os_version": "Ubuntu 24.04.1 LTS", "architecture": "x86_64", "version": "0.1.0"{} }}"#,
+            hostname, more
+        )
     }
 
     #[test]

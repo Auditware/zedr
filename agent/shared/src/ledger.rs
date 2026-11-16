@@ -173,7 +173,15 @@ impl Ledger {
             None => None,
         };
 
-        let mut chain = known_chain.unwrap_or(Chain { epoch: 0, next_window: 0, next_index: 0, head: GENESIS, deliver_from: 0, delivered_index: 0, delivered_head: GENESIS });
+        let mut chain = known_chain.unwrap_or(Chain {
+            epoch: 0,
+            next_window: 0,
+            next_index: 0,
+            head: GENESIS,
+            deliver_from: 0,
+            delivered_index: 0,
+            delivered_head: GENESIS,
+        });
         chain.epoch += 1;
         let proving = known_proving.clone().unwrap_or(Proving { next_window: chain.deliver_from, state: State::default(), needs_fresh: true });
         sweep(dir, proving.next_window.min(chain.deliver_from)..chain.next_window)?;
@@ -307,7 +315,16 @@ impl Ledger {
     }
 
     fn store(&self, open: OpenWindow) -> Result<WindowHeader, String> {
-        let header = WindowHeader::seal(&self.agent, self.chain.epoch, self.chain.next_window, self.chain.next_index, self.fresh, open.gap, self.chain.head, &open.leaves)?;
+        let header = WindowHeader::seal(
+            &self.agent,
+            self.chain.epoch,
+            self.chain.next_window,
+            self.chain.next_index,
+            self.fresh,
+            open.gap,
+            self.chain.head,
+            &open.leaves,
+        )?;
         let stored = StoredWindow { header, events: open.events, releases: open.releases };
         write(&self.dir.join(WINDOWS_DIR), &window_file(stored.header.window), "ledger window", &stored)?;
         Ok(stored.header)
@@ -492,7 +509,10 @@ impl Ledger {
     /// Records that a proof with this journal reached the control server, and drops the plaintext it covered
     pub fn proven(&mut self, journal: &Journal, state: State) -> Result<(), String> {
         if journal.first_window != self.proving.next_window || journal.last_window >= self.chain.deliver_from || self.proving.needs_fresh {
-            return Err(format!("The proof covers windows {} to {} while proving stands at window {}", journal.first_window, journal.last_window, self.proving.next_window));
+            return Err(format!(
+                "The proof covers windows {} to {} while proving stands at window {}",
+                journal.first_window, journal.last_window, self.proving.next_window
+            ));
         }
         for window in journal.first_window..=journal.last_window {
             remove_window(&self.dir, window)?;
@@ -540,7 +560,16 @@ mod tests {
     fn process(timestamp: u64, pid: u32, ppid: u32, path: &str, args: &[&str]) -> SensorEvent {
         let mut command_line = vec![path.to_string()];
         command_line.extend(args.iter().map(|arg| arg.to_string()));
-        SensorEvent::Process(ProcessEvent { timestamp, pid, ppid, executable_path: path.to_string(), command_line, action: ProcessAction::Create, uid: 0, hash: None })
+        SensorEvent::Process(ProcessEvent {
+            timestamp,
+            pid,
+            ppid,
+            executable_path: path.to_string(),
+            command_line,
+            action: ProcessAction::Create,
+            uid: 0,
+            hash: None,
+        })
     }
 
     fn quiet(pid: u32) -> SensorEvent {
@@ -548,11 +577,14 @@ mod tests {
     }
 
     fn open_all(agent: &Hash, window: &SealedWindow) -> Vec<Option<SensorEvent>> {
-        let opened: BTreeMap<u64, Hash> = window.releases.iter().flat_map(|release| release.openings.iter().map(|opening| (opening.index, opening.seed))).collect();
+        let opened: BTreeMap<u64, Hash> =
+            window.releases.iter().flat_map(|release| release.openings.iter().map(|opening| (opening.index, opening.seed))).collect();
         (0..window.header.count as u64)
             .map(|offset| {
                 let index = window.header.first_index + offset;
-                opened.get(&index).map(|seed| SensorEvent::from_bytes(&seal::open(seed, agent, window.header.epoch, index, &window.sealed[offset as usize]).unwrap()).unwrap())
+                opened.get(&index).map(|seed| {
+                    SensorEvent::from_bytes(&seal::open(seed, agent, window.header.epoch, index, &window.sealed[offset as usize]).unwrap()).unwrap()
+                })
             })
             .collect()
     }
@@ -641,7 +673,11 @@ mod tests {
         ledger.seal_now(2001).unwrap();
         let after = ledger.next_undelivered().unwrap().unwrap();
         assert!(after.header.fresh, "the sensor starts over, so does the rule state");
-        assert_eq!((after.header.epoch, after.header.window, after.header.first_index, after.header.prev_head), (2, 1, 2, before.header.head), "the event that was never sealed left no trace in the chain");
+        assert_eq!(
+            (after.header.epoch, after.header.window, after.header.first_index, after.header.prev_head),
+            (2, 1, 2, before.header.head),
+            "the event that was never sealed left no trace in the chain"
+        );
         assert!(ledger.delivered(5, true).is_err(), "windows are acknowledged in order");
 
         fs::remove_dir_all(&dir).unwrap();
@@ -878,7 +914,11 @@ mod tests {
         let mut ledger = Ledger::open(&dir, AGENT, MASTER, 3000).unwrap();
         ledger.seal_now(3001).unwrap();
         let next = ledger.next_undelivered().unwrap().unwrap();
-        assert_eq!((next.header.epoch, next.header.window, next.header.first_index, next.header.prev_head), (3, 1, 51, window.header.head), "the position survives a restart");
+        assert_eq!(
+            (next.header.epoch, next.header.window, next.header.first_index, next.header.prev_head),
+            (3, 1, 51, window.header.head),
+            "the position survives a restart"
+        );
 
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -902,7 +942,11 @@ mod tests {
         ledger.seal_now(2001).unwrap();
         let window = ledger.next_undelivered().unwrap().unwrap();
         assert!(window.header.fresh && window.header.gap);
-        assert_eq!((window.header.epoch, window.header.window, window.header.first_index, window.header.prev_head), (59, 40, 900, head), "a position that cannot be taken up changes nothing");
+        assert_eq!(
+            (window.header.epoch, window.header.window, window.header.first_index, window.header.prev_head),
+            (59, 40, 900, head),
+            "a position that cannot be taken up changes nothing"
+        );
 
         ledger.delivered(40, true).unwrap();
         let input = ledger.proof_input(100).unwrap().unwrap();
@@ -955,14 +999,20 @@ mod tests {
         ledger.seal_now(1005).unwrap();
         assert_eq!((ledger.undelivered(), ledger.epoch()), (0, 2));
         assert!((1..=4).all(|window| !window_path(&dir, window).exists()));
-        assert_eq!(ledger.take_notices(), vec!["Gave up 4 sealed windows and continue at window 1 with a gap: more than 3 waited for the control server".to_string()]);
+        assert_eq!(
+            ledger.take_notices(),
+            vec!["Gave up 4 sealed windows and continue at window 1 with a gap: more than 3 waited for the control server".to_string()]
+        );
 
         ledger.admit(&[process(2, 21, 20, "/bin/sh", &["-c", "id"])]);
         ledger.seal_now(1006).unwrap();
         let window = ledger.next_undelivered().unwrap().unwrap();
         assert!(window.header.fresh && window.header.gap);
         assert!(window.releases.is_empty(), "the rules started over, the server process is not remembered");
-        assert_eq!((window.header.epoch, window.header.window, window.header.first_index, window.header.prev_head), (2, 1, acknowledged.next_index(), acknowledged.head));
+        assert_eq!(
+            (window.header.epoch, window.header.window, window.header.first_index, window.header.prev_head),
+            (2, 1, acknowledged.next_index(), acknowledged.head)
+        );
 
         let input = ledger.proof_input(100).unwrap().unwrap();
         assert_eq!(input.windows.iter().map(|window| window.window).collect::<Vec<_>>(), vec![0], "what the server acknowledged still gets its proof");
@@ -1056,7 +1106,10 @@ mod tests {
         fs::remove_file(window_path(&dir, 1)).unwrap();
 
         assert_eq!(ledger.next_undelivered().unwrap(), None);
-        assert_eq!(ledger.take_notices(), vec!["Gave up 2 sealed windows and continue at window 1 with a gap: window 1 cannot be read, its file is gone".to_string()]);
+        assert_eq!(
+            ledger.take_notices(),
+            vec!["Gave up 2 sealed windows and continue at window 1 with a gap: window 1 cannot be read, its file is gone".to_string()]
+        );
         assert_eq!((ledger.epoch(), ledger.undelivered()), (2, 0));
         assert!(!window_path(&dir, 2).exists(), "the window after it chains to it and cannot be delivered either");
 
@@ -1064,7 +1117,10 @@ mod tests {
         ledger.seal_now(1004).unwrap();
         let window = ledger.next_undelivered().unwrap().unwrap();
         assert!(window.header.fresh && window.header.gap);
-        assert_eq!((window.header.epoch, window.header.window, window.header.first_index, window.header.prev_head), (2, 1, acknowledged.next_index(), acknowledged.head));
+        assert_eq!(
+            (window.header.epoch, window.header.window, window.header.first_index, window.header.prev_head),
+            (2, 1, acknowledged.next_index(), acknowledged.head)
+        );
 
         fs::write(window_path(&dir, 1), b"not a window").unwrap();
         assert_eq!(ledger.next_undelivered().unwrap(), None);

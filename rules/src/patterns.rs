@@ -85,7 +85,10 @@ mod tests {
         ("encoded", r"(?i)\s-e(c|nc|nco\w*)?\s+[a-z0-9+/=]{8,}|frombase64string"),
         ("hidden", r"(?i)\s-w(in|indowstyle)?\s+h(idden)?\b"),
         ("reverse", r"(?i)/dev/(tcp|udp)/|\bn(c|cat)\b.*\s-e\s|\bbash\s+-i\b|\bsocat\b.*\bexec\b|\bmkfifo\b.*\bn(c|cat)\b"),
-        ("fetched", r"(?i)\b(curl|wget)\b[^|]*\|\s*(ba|z|da)?sh\b|\biex\b|invoke-expression|downloadstring|certutil(\.exe)?\s.*-urlcache|bitsadmin(\.exe)?\s.*/transfer"),
+        (
+            "fetched",
+            r"(?i)\b(curl|wget)\b[^|]*\|\s*(ba|z|da)?sh\b|\biex\b|invoke-expression|downloadstring|certutil(\.exe)?\s.*-urlcache|bitsadmin(\.exe)?\s.*/transfer",
+        ),
     ];
 
     fn table(name: &str) -> fn(&str) -> bool {
@@ -153,14 +156,58 @@ mod tests {
             state ^= state << 17;
             state
         };
-        let alphabet: Vec<&str> = vec![" ", "-", "e", "w", "h", "i", "|", "/", "\\", ".", "sh", "nc", "ncat", "bash", "curl", "wget", "tmp", "dev", "tcp", "exec", "socat", "mkfifo", "enc", "hidden", "iex", "exe", "dll", "\n", "A", "b", "0", "=", "+", "certutil", "-urlcache", "downloads", "users", "public", "\t", "\u{e9}"];
+        let alphabet: Vec<&str> = vec![
+            " ",
+            "-",
+            "e",
+            "w",
+            "h",
+            "i",
+            "|",
+            "/",
+            "\\",
+            ".",
+            "sh",
+            "nc",
+            "ncat",
+            "bash",
+            "curl",
+            "wget",
+            "tmp",
+            "dev",
+            "tcp",
+            "exec",
+            "socat",
+            "mkfifo",
+            "enc",
+            "hidden",
+            "iex",
+            "exe",
+            "dll",
+            "\n",
+            "A",
+            "b",
+            "0",
+            "=",
+            "+",
+            "certutil",
+            "-urlcache",
+            "downloads",
+            "users",
+            "public",
+            "\t",
+            "\u{e9}",
+        ];
         let mut samples: Vec<String> = SAMPLES.iter().map(|sample| sample.to_string()).collect();
         for _ in 0..20_000 {
             let parts = 1 + next() % 12;
             samples.push((0..parts).map(|_| alphabet[(next() % alphabet.len() as u64) as usize]).collect());
         }
 
-        assert_eq!(PATTERNS.iter().map(|(name, _)| *name).filter(|name| *name != "gate").collect::<Vec<_>>(), WHOLE.iter().map(|(name, _)| *name).collect::<Vec<_>>());
+        assert_eq!(
+            PATTERNS.iter().map(|(name, _)| *name).filter(|name| *name != "gate").collect::<Vec<_>>(),
+            WHOLE.iter().map(|(name, _)| *name).collect::<Vec<_>>()
+        );
         for (name, pattern) in WHOLE {
             let reference = regex::bytes::RegexBuilder::new(pattern).unicode(false).build().unwrap();
             let matches = table(name);

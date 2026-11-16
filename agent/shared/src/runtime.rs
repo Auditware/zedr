@@ -199,11 +199,11 @@ impl Prover {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&self.dir, std::fs::Permissions::from_mode(0o700)).map_err(|e| format!("Failed to protect {}: {}", self.dir.display(), e))?;
+            std::fs::set_permissions(&self.dir, std::fs::Permissions::from_mode(0o700))
+                .map_err(|e| format!("Failed to protect {}: {}", self.dir.display(), e))?;
         }
         replace_private_file(&self.dir, &input_file, "proof input", &encoded)?;
-        let prover = spawn_prover(program, &self.dir.join(input_file), &receipt)
-            .map_err(|e| format!("Failed to start {}: {}", program.display(), e))?;
+        let prover = spawn_prover(program, &self.dir.join(input_file), &receipt).map_err(|e| format!("Failed to start {}: {}", program.display(), e))?;
         self.running = Some(Proof { prover, receipt, journal, state });
         Ok(())
     }
@@ -269,19 +269,12 @@ impl<P: Platform> Runtime<P> {
             link,
             platform,
             host,
-            registration_retry: Mutex::new(RegistrationRetry {
-                not_before: Instant::now(),
-                delay: REGISTRATION_RETRY_START,
-            }),
+            registration_retry: Mutex::new(RegistrationRetry { not_before: Instant::now(), delay: REGISTRATION_RETRY_START }),
             sensor_stop: Mutex::new(None),
         }
     }
 
-    pub fn run_until_stopped(
-        self: &Arc<Self>,
-        stop: &mpsc::Receiver<StopReason>,
-        heartbeat_interval: Duration,
-    ) -> Option<StopReason> {
+    pub fn run_until_stopped(self: &Arc<Self>, stop: &mpsc::Receiver<StopReason>, heartbeat_interval: Duration) -> Option<StopReason> {
         self.register();
 
         loop {
@@ -551,8 +544,7 @@ impl<P: Platform> Runtime<P> {
 
         match response.status_code {
             200 => {
-                let reply: HeartbeatReply = serde_json::from_slice(response.as_bytes())
-                    .map_err(|e| format!("Unreadable heartbeat response: {}", e))?;
+                let reply: HeartbeatReply = serde_json::from_slice(response.as_bytes()).map_err(|e| format!("Unreadable heartbeat response: {}", e))?;
                 self.dispatch(reply);
                 Ok(())
             }
@@ -714,11 +706,7 @@ mod tests {
     }
 
     fn host() -> HostDescription {
-        HostDescription {
-            hostname: "test-host".to_string(),
-            os_version: "Test OS 1".to_string(),
-            agent_version: "0.1.0".to_string(),
-        }
+        HostDescription { hostname: "test-host".to_string(), os_version: "Test OS 1".to_string(), agent_version: "0.1.0".to_string() }
     }
 
     fn deployment_key() -> SigningKey {
@@ -747,7 +735,13 @@ mod tests {
     }
 
     /// What a control server answers to a window it does not take: where its copy of the chain stands, signed for the request with this sequence number
-    fn signed_refusal(key: &SigningKey, status: u16, window: &SealedWindow, seq: u64, (epoch, next_window, next_index, head): (u64, u64, u64, &str)) -> (u16, String) {
+    fn signed_refusal(
+        key: &SigningKey,
+        status: u16,
+        window: &SealedWindow,
+        seq: u64,
+        (epoch, next_window, next_index, head): (u64, u64, u64, &str),
+    ) -> (u16, String) {
         let signed = window_refusal_signing_bytes(&window.agent_id, window.session, seq, epoch, next_window, next_index, head).unwrap();
         let refusal = WindowRefusal { epoch, next_window, next_index, head: head.to_string(), signature: key.sign(&signed).to_bytes().to_vec() };
         (status, serde_json::to_string(&refusal).unwrap())
@@ -974,11 +968,7 @@ mod tests {
     }
 
     fn every_50_milliseconds() -> SensorIntervals {
-        SensorIntervals {
-            poll: Duration::from_millis(50),
-            persistence: Duration::from_secs(60),
-            packages: Duration::from_secs(300),
-        }
+        SensorIntervals { poll: Duration::from_millis(50), persistence: Duration::from_secs(60), packages: Duration::from_secs(300) }
     }
 
     fn no_prover() -> ProverSettings {
@@ -1047,7 +1037,11 @@ mod tests {
             let sealed = bytes_from_base64(&event.sealed).unwrap();
             for seed in &seeds {
                 if let Ok(bytes) = seal::open(seed, agent, window.header.epoch, index, &sealed) {
-                    assert_eq!(hash_to_hex(&leaf(agent, window.header.epoch, index, &seal::blind(seed), &bytes)), event.leaf, "what opens is what the leaf commits to");
+                    assert_eq!(
+                        hash_to_hex(&leaf(agent, window.header.epoch, index, &seal::blind(seed), &bytes)),
+                        event.leaf,
+                        "what opens is what the leaf commits to"
+                    );
                     opened.insert(index, SensorEvent::from_bytes(&bytes).unwrap());
                 }
             }
@@ -1078,13 +1072,19 @@ mod tests {
         runtime.notify_stopping(StopReason::ServiceStop);
 
         let windows = taken(&server);
-        assert_eq!(windows.iter().map(|window| (window.header.window, window.header.first_index, window.header.count)).collect::<Vec<_>>(), vec![(0, 0, 1000), (1, 1000, 200)]);
+        assert_eq!(
+            windows.iter().map(|window| (window.header.window, window.header.first_index, window.header.count)).collect::<Vec<_>>(),
+            vec![(0, 0, 1000), (1, 1000, 200)]
+        );
         assert!(windows[0].header.fresh && !windows[1].header.fresh);
         assert_eq!(windows[1].header.prev_head, windows[0].header.head);
         for window in &windows {
             assert!(window.releases.is_empty() && !window.header.gap && !window.proving);
             assert_eq!(window.events.len(), window.header.count as usize);
-            assert!(window.events.iter().all(|event| event.leaf.len() == 64 && seal::BUCKETS.contains(&(bytes_from_base64(&event.sealed).unwrap().len() - 16))));
+            assert!(window
+                .events
+                .iter()
+                .all(|event| event.leaf.len() == 64 && seal::BUCKETS.contains(&(bytes_from_base64(&event.sealed).unwrap().len() - 16))));
         }
 
         let received = server.received.lock().unwrap();
@@ -1093,7 +1093,8 @@ mod tests {
                 assert!(!request.body.contains(plaintext), "{} left the endpoint in a request to {}", plaintext, request.path);
             }
         }
-        let unsealed: Vec<serde_json::Value> = received.iter().filter(|request| request.path == "/api/events").flat_map(|request| request.json()["events"].as_array().cloned().unwrap()).collect();
+        let unsealed: Vec<serde_json::Value> =
+            received.iter().filter(|request| request.path == "/api/events").flat_map(|request| request.json()["events"].as_array().cloned().unwrap()).collect();
         assert_eq!(unsealed.len(), 2);
         assert!(unsealed[0].get("Heartbeat").is_some() && unsealed[1].get("AgentStopping").is_some(), "nothing the sensor saw goes to the event endpoint");
         drop(received);
@@ -1163,7 +1164,11 @@ mod tests {
 
         *accepting.lock().unwrap() = true;
         assert!(wait_until(|| platform.logged("Sensor windows are being delivered again")));
-        assert_eq!(taken(&server).iter().map(|window| (window.header.window, window.header.count)).collect::<Vec<_>>(), vec![(0, 4)], "the queued window arrives once and complete");
+        assert_eq!(
+            taken(&server).iter().map(|window| (window.header.window, window.header.count)).collect::<Vec<_>>(),
+            vec![(0, 4)],
+            "the queued window arrives once and complete"
+        );
 
         stop(&runtime, &dir);
     }
@@ -1302,7 +1307,10 @@ mod tests {
         source.run(900, 3, SHELL, &FETCH_AND_RUN);
 
         start(&runtime, &source);
-        assert!(wait_until(|| platform.logged("Sensor windows are queued, 1 waiting: Window refusal is not signed by this deployment")), "a refusal signed for an earlier request moves nothing");
+        assert!(
+            wait_until(|| platform.logged("Sensor windows are queued, 1 waiting: Window refusal is not signed by this deployment")),
+            "a refusal signed for an earlier request moves nothing"
+        );
         assert!(wait_until(|| offered(&server).len() >= 3));
         assert!(offered(&server).iter().all(|(_, window)| window.header.window == 0 && window.header.epoch == 1) && window_file(&dir, 0).exists());
 
@@ -1365,7 +1373,11 @@ mod tests {
         *kind.lock().unwrap() = Malformed::ByAnotherKey;
         assert!(wait_until(|| platform.logged("Sensor windows are queued, 1 waiting: Window refusal is not signed by this deployment")));
         let refused = offered(&server);
-        assert!(refused.len() >= 2 && refused.iter().all(|(answer, window)| *answer == 422 && (window.header.window, window.header.epoch, window.header.gap) == (0, 1, false)), "the window is offered again as it is");
+        assert!(
+            refused.len() >= 2
+                && refused.iter().all(|(answer, window)| *answer == 422 && (window.header.window, window.header.epoch, window.header.gap) == (0, 1, false)),
+            "the window is offered again as it is"
+        );
         assert!(window_file(&dir, 0).exists());
 
         *kind.lock().unwrap() = Malformed::Signed;
@@ -1428,15 +1440,28 @@ mod tests {
         let source = ScriptedSource::with(3);
         source.run(900, 3, SHELL, &FETCH_AND_RUN);
         let first = Duration::from_millis(150);
-        let asked = || -> Vec<(u16, Instant)> { server.received.lock().unwrap().iter().filter(|request| request.path == "/api/windows").map(|request| (request.answer, request.at)).collect() };
+        let asked = || -> Vec<(u16, Instant)> {
+            server.received.lock().unwrap().iter().filter(|request| request.path == "/api/windows").map(|request| (request.answer, request.at)).collect()
+        };
 
         runtime.start_sensor_with(source.clone(), every_50_milliseconds(), no_prover(), RefusalWait { first, limit: Duration::from_secs(60) });
         assert!(wait_until(|| taken(&server).len() == 1));
         let requests = asked();
-        assert_eq!(requests.iter().map(|(answer, _)| *answer).collect::<Vec<_>>(), vec![409, 409, 409, 200], "a refused window is not sent again, the next one is");
+        assert_eq!(
+            requests.iter().map(|(answer, _)| *answer).collect::<Vec<_>>(),
+            vec![409, 409, 409, 200],
+            "a refused window is not sent again, the next one is"
+        );
         let waited: Vec<Duration> = requests.windows(2).map(|pair| pair[1].1 - pair[0].1).collect();
-        assert!(waited[0] >= first && waited[1] >= first * 2 && waited[2] >= first * 4, "every refusal in a row keeps windows back twice as long: {:?}", waited);
-        assert_eq!(offered(&server).iter().map(|(_, window)| (window.header.epoch, window.header.window)).collect::<Vec<_>>(), vec![(1, 0), (2, 0), (3, 0), (4, 0)]);
+        assert!(
+            waited[0] >= first && waited[1] >= first * 2 && waited[2] >= first * 4,
+            "every refusal in a row keeps windows back twice as long: {:?}",
+            waited
+        );
+        assert_eq!(
+            offered(&server).iter().map(|(_, window)| (window.header.epoch, window.header.window)).collect::<Vec<_>>(),
+            vec![(1, 0), (2, 0), (3, 0), (4, 0)]
+        );
         assert!(platform.logged("Server refused window 0, starting over at its window 0"));
         assert!(wait_until(|| platform.logged("Sensor windows are being delivered again")));
 
@@ -1457,13 +1482,18 @@ mod tests {
         for platform in ["linux", "macos", "windows"] {
             for source in std::fs::read_dir(agents.join(platform).join("src")).unwrap() {
                 let source = source.unwrap().path();
-                assert!(!std::fs::read_to_string(&source).unwrap().contains("open_trusting"), "{} opens a link that trusts a key it is given", source.display());
+                assert!(
+                    !std::fs::read_to_string(&source).unwrap().contains("open_trusting"),
+                    "{} opens a link that trusts a key it is given",
+                    source.display()
+                );
             }
         }
 
         let server = StubServer::start(accept_everything);
         let dir = state_dir("link-unpatched");
-        let opened_by_agents = [ControlLink::open_with_key_id(server.url.clone(), &dir).unwrap(), ControlLink::open(server.url.clone(), &dir, "agent-a".to_string()).unwrap()];
+        let opened_by_agents =
+            [ControlLink::open_with_key_id(server.url.clone(), &dir).unwrap(), ControlLink::open(server.url.clone(), &dir, "agent-a".to_string()).unwrap()];
         for link in opened_by_agents {
             let mut ledger = link.open_ledger(1_000).unwrap();
             ledger.seal_now(1_001).unwrap();
@@ -1526,7 +1556,9 @@ mod tests {
         }
         let notices = ledger.take_notices();
         assert_eq!(notices.len(), 2, "ten windows, given up every time a fourth one waited");
-        assert!(notices.iter().all(|notice| notice == "Gave up 4 sealed windows and continue at window 1 with a gap: more than 3 waited for the control server"));
+        assert!(notices
+            .iter()
+            .all(|notice| notice == "Gave up 4 sealed windows and continue at window 1 with a gap: more than 3 waited for the control server"));
         assert_eq!((ledger.undelivered(), taken(&server).len()), (2, 1));
 
         *answering.lock().unwrap() = true;
@@ -1565,7 +1597,9 @@ mod tests {
         source.run(901, 2, SHELL, &FETCH_AND_RUN);
         assert!(wait_until(|| window_file(&dir, 1).exists()));
         std::fs::remove_file(window_file(&dir, 1)).unwrap();
-        assert!(wait_until(|| platform.logged("Sensor: Gave up 1 sealed windows and continue at window 1 with a gap: window 1 cannot be read, its file is gone")));
+        assert!(wait_until(
+            || platform.logged("Sensor: Gave up 1 sealed windows and continue at window 1 with a gap: window 1 cannot be read, its file is gone")
+        ));
 
         *answering.lock().unwrap() = true;
         assert!(wait_until(|| taken(&server).len() == 2));
@@ -1576,7 +1610,13 @@ mod tests {
             (1, 4, 5, &first.header.head),
             "the chain continues where the server stands, with everything the sensor sees reported again"
         );
-        let said = platform.logs.lock().unwrap().iter().filter(|line| line.starts_with("Sensor: Ledger chain cannot be used, starting over at the first window with a gap")).count();
+        let said = platform
+            .logs
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|line| line.starts_with("Sensor: Ledger chain cannot be used, starting over at the first window with a gap"))
+            .count();
         assert_eq!(said, 1);
 
         stop(&runtime, &dir);
@@ -1725,8 +1765,14 @@ if [ -e "$0.failed" ]; then printf 'second attempt' > "$3"; else : > "$0.failed"
         let files: Vec<&std::path::Path> = attempts.lines().map(std::path::Path::new).collect();
         let name = |file: &std::path::Path| file.file_name().unwrap().to_str().unwrap().to_string();
         assert!(files[..4].iter().all(|file| file.parent() == Some(dir.join("ledger").join("proofs").as_path())));
-        assert!(name(files[0]).starts_with("input-0-") && name(files[2]).starts_with("input-0-") && files[0] != files[2], "the same windows, and an input file of its own");
-        assert!(name(files[1]).starts_with("receipt-0-") && name(files[3]).starts_with("receipt-0-") && files[1] != files[3], "a prover left over from the first attempt cannot write the receipt of the second");
+        assert!(
+            name(files[0]).starts_with("input-0-") && name(files[2]).starts_with("input-0-") && files[0] != files[2],
+            "the same windows, and an input file of its own"
+        );
+        assert!(
+            name(files[1]).starts_with("receipt-0-") && name(files[3]).starts_with("receipt-0-") && files[1] != files[3],
+            "a prover left over from the first attempt cannot write the receipt of the second"
+        );
         assert!(wait_until(|| !window_file(&dir, 0).exists() && !window_file(&dir, 1).exists()));
 
         stop(&runtime, &dir);

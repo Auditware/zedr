@@ -219,7 +219,10 @@ impl Endpoint {
                 WindowDelivery::Refused(position) => {
                     self.discard_proof();
                     self.ledger.rebase(position.epoch, position.next_window, position.next_index, position.head, now)?;
-                    return Err(format!("The control server refused window {}, its copy of the chain stands at window {}", window.header.window, position.next_window));
+                    return Err(format!(
+                        "The control server refused window {}, its copy of the chain stands at window {}",
+                        window.header.window, position.next_window
+                    ));
                 }
             }
         }

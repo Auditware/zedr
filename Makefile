@@ -421,8 +421,11 @@ fmt-check: ## Check code formatting
 	cd agent && cargo fmt --all -- --check
 
 .PHONY: clippy
-clippy: ## Run clippy linter
-	cd agent && cargo clippy --workspace -- -D warnings
+AGENT_ELSEWHERE := $(if $(filter Darwin,$(shell uname)),--exclude zedr-agent-windows --exclude zedr-agent-linux,--exclude zedr-agent-windows --exclude zedr-agent-macos)
+
+clippy: ## Run clippy on the agent of this platform, its shared crates and the control server
+	cd agent && cargo clippy --workspace $(AGENT_ELSEWHERE) --all-targets -- -D warnings
+	cd control_server/backend && cargo clippy --all-targets -- -D warnings
 
 .PHONY: ci
 ci: fmt-check clippy test ## Run CI checks

@@ -6,9 +6,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use zedr_ledger::{Hash, WindowHeader};
 use zedr_protocol::{
-    bytes_to_base64, hash_from_hex, hash_to_hex, window_ack_signing_bytes, window_refusal_signing_bytes, AgentRegistration, AgentStoppingEvent,
-    EventBatch, ProofSubmission, SealedEvent, SealedWindowAck, SealedWindowHeader, StopReason, SystemEvent, UpgradeCommand, WindowRefusal,
-    SIGNATURE_HEADER,
+    bytes_to_base64, hash_from_hex, hash_to_hex, window_ack_signing_bytes, window_refusal_signing_bytes, AgentRegistration, AgentStoppingEvent, EventBatch,
+    ProofSubmission, SealedEvent, SealedWindowAck, SealedWindowHeader, StopReason, SystemEvent, UpgradeCommand, WindowRefusal, SIGNATURE_HEADER,
 };
 
 use crate::identity::{self, Identity};
@@ -93,12 +92,8 @@ impl ControlLink {
         &self.server_url
     }
 
-    fn with_accepted_commands<T>(
-        &self,
-        act: impl FnOnce(&mut CommandJournal) -> Result<T, String>,
-    ) -> Result<T, String> {
-        let mut journal = self.accepted_commands.lock()
-            .map_err(|e| format!("Failed to lock the record of accepted commands: {}", e))?;
+    fn with_accepted_commands<T>(&self, act: impl FnOnce(&mut CommandJournal) -> Result<T, String>) -> Result<T, String> {
+        let mut journal = self.accepted_commands.lock().map_err(|e| format!("Failed to lock the record of accepted commands: {}", e))?;
 
         match journal.as_mut() {
             Ok(journal) => act(journal),
@@ -114,11 +109,7 @@ impl ControlLink {
         self.verify_upgrade_command_with_key(self.deployment_key.as_ref().map_err(String::clone)?, command)
     }
 
-    pub(crate) fn verify_upgrade_command_with_key(
-        &self,
-        public_key: &VerifyingKey,
-        command: &UpgradeCommand,
-    ) -> Result<(), String> {
+    pub(crate) fn verify_upgrade_command_with_key(&self, public_key: &VerifyingKey, command: &UpgradeCommand) -> Result<(), String> {
         crate::verify_upgrade_command_with_key(public_key, command, &self.agent_id)?;
         self.with_accepted_commands(|journal| journal.accept_upgrade(command, unix_now()))
     }
@@ -129,13 +120,11 @@ impl ControlLink {
         timeout_secs: u64,
         build_body: impl FnOnce(u64, u64, String) -> Result<String, serde_json::Error>,
     ) -> Result<Answered, String> {
-        let mut identity = self.identity.lock()
-            .map_err(|e| format!("Failed to lock identity: {}", e))?;
+        let mut identity = self.identity.lock().map_err(|e| format!("Failed to lock identity: {}", e))?;
 
         let session = identity.session();
         let seq = identity.next_seq();
-        let body = build_body(session, seq, identity.public_key_hex())
-            .map_err(|e| format!("Failed to encode request: {}", e))?;
+        let body = build_body(session, seq, identity.public_key_hex()).map_err(|e| format!("Failed to encode request: {}", e))?;
         let signature = identity.sign(body.as_bytes());
 
         let response = minreq::post(format!("{}{}", self.server_url, path))
@@ -159,15 +148,12 @@ impl ControlLink {
         }
 
         let agent_id = self.agent_id.clone();
-        self.post_signed("/api/events", timeout_secs, |session, seq, _| {
-            serde_json::to_string(&EventBatch { agent_id, session, seq, events })
-        })
-        .map(|answered| answered.response)
+        self.post_signed("/api/events", timeout_secs, |session, seq, _| serde_json::to_string(&EventBatch { agent_id, session, seq, events }))
+            .map(|answered| answered.response)
     }
 
     pub fn open_ledger(&self, now: u64) -> Result<Ledger, String> {
-        let identity = self.identity.lock()
-            .map_err(|e| format!("Failed to lock identity: {}", e))?;
+        let identity = self.identity.lock().map_err(|e| format!("Failed to lock identity: {}", e))?;
 
         Ledger::open(&self.state_dir.join(LEDGER_DIR), identity.key_hash(), identity.ledger_key(), now)
     }
@@ -178,7 +164,8 @@ impl ControlLink {
         let deployment_key = self.deployment_key.as_ref().map_err(String::clone)?;
         let sent = &window.header;
         let header = wire_header(sent);
-        let events = window.leaves.iter().zip(&window.sealed).map(|(leaf, sealed)| SealedEvent { leaf: hash_to_hex(leaf), sealed: bytes_to_base64(sealed) }).collect();
+        let events =
+            window.leaves.iter().zip(&window.sealed).map(|(leaf, sealed)| SealedEvent { leaf: hash_to_hex(leaf), sealed: bytes_to_base64(sealed) }).collect();
         let releases = window.releases.iter().map(wire_release).collect();
 
         let answered = self.post_signed("/api/windows", timeout_secs, |session, seq, _| {
@@ -188,8 +175,7 @@ impl ControlLink {
 
         match answered.response.status_code {
             200 => {
-                let ack: SealedWindowAck = serde_json::from_slice(body)
-                    .map_err(|e| format!("Unreadable window acknowledgement: {}", e))?;
+                let ack: SealedWindowAck = serde_json::from_slice(body).map_err(|e| format!("Unreadable window acknowledgement: {}", e))?;
                 let signed = window_ack_signing_bytes(&self.agent_id, ack.window, ack.next_index, &ack.head)?;
                 verify_answer(deployment_key, &signed, &ack.signature, "Window acknowledgement")?;
 
@@ -199,9 +185,16 @@ impl ControlLink {
                 Ok(WindowDelivery::Accepted)
             }
             status @ (409 | 422) => {
-                let refusal: WindowRefusal = serde_json::from_slice(body)
-                    .map_err(|e| format!("HTTP {} without a signed refusal: {}", status, e))?;
-                let signed = window_refusal_signing_bytes(&self.agent_id, answered.session, answered.seq, refusal.epoch, refusal.next_window, refusal.next_index, &refusal.head)?;
+                let refusal: WindowRefusal = serde_json::from_slice(body).map_err(|e| format!("HTTP {} without a signed refusal: {}", status, e))?;
+                let signed = window_refusal_signing_bytes(
+                    &self.agent_id,
+                    answered.session,
+                    answered.seq,
+                    refusal.epoch,
+                    refusal.next_window,
+                    refusal.next_index,
+                    &refusal.head,
+                )?;
                 verify_answer(deployment_key, &signed, &refusal.signature, "Window refusal")?;
 
                 Ok(WindowDelivery::Refused(ServerPosition {
@@ -218,9 +211,8 @@ impl ControlLink {
     pub fn send_proof(&self, receipt: &[u8], timeout_secs: u64) -> Result<(), String> {
         let agent_id = self.agent_id.clone();
         let receipt = bytes_to_base64(receipt);
-        let answered = self.post_signed("/api/proofs", timeout_secs, |session, seq, _| {
-            serde_json::to_string(&ProofSubmission { agent_id, session, seq, receipt })
-        })?;
+        let answered =
+            self.post_signed("/api/proofs", timeout_secs, |session, seq, _| serde_json::to_string(&ProofSubmission { agent_id, session, seq, receipt }))?;
 
         match answered.response.status_code {
             200 => Ok(()),
@@ -231,22 +223,23 @@ impl ControlLink {
     pub fn register(&self, host: &HostDescription) -> Result<(), String> {
         let enrollment_key = identity::read_enrollment_key(&self.state_dir);
 
-        let response = self.post_signed("/api/agents/register", REGISTRATION_TIMEOUT_SECS, |session, seq, public_key| {
-            serde_json::to_string(&AgentRegistration {
-                agent_id: self.agent_id.clone(),
-                hostname: host.hostname.clone(),
-                platform: std::env::consts::OS.to_string(),
-                os_version: host.os_version.clone(),
-                architecture: std::env::consts::ARCH.to_string(),
-                version: host.agent_version.clone(),
-                ip_address: local_ip(),
-                public_key,
-                enrollment_key,
-                session,
-                seq,
-            })
-        })?
-        .response;
+        let response = self
+            .post_signed("/api/agents/register", REGISTRATION_TIMEOUT_SECS, |session, seq, public_key| {
+                serde_json::to_string(&AgentRegistration {
+                    agent_id: self.agent_id.clone(),
+                    hostname: host.hostname.clone(),
+                    platform: std::env::consts::OS.to_string(),
+                    os_version: host.os_version.clone(),
+                    architecture: std::env::consts::ARCH.to_string(),
+                    version: host.agent_version.clone(),
+                    ip_address: local_ip(),
+                    public_key,
+                    enrollment_key,
+                    session,
+                    seq,
+                })
+            })?
+            .response;
 
         if response.status_code != 200 {
             return Err(format!("Registration rejected: HTTP {}", response.status_code));
@@ -257,8 +250,7 @@ impl ControlLink {
 
     pub fn notify_stopping(&self, reason: StopReason) -> Result<i32, String> {
         let event = SystemEvent::AgentStopping(AgentStoppingEvent { timestamp: unix_now(), reason });
-        self.send_events(vec![event], STOP_NOTICE_TIMEOUT_SECS)
-            .map(|response| response.status_code)
+        self.send_events(vec![event], STOP_NOTICE_TIMEOUT_SECS).map(|response| response.status_code)
     }
 }
 
@@ -288,11 +280,9 @@ fn wire_release(release: &Release) -> zedr_protocol::Release {
 }
 
 fn verify_answer(deployment_key: &VerifyingKey, signed: &[u8], signature: &[u8], what: &str) -> Result<(), String> {
-    let signature = Signature::from_slice(signature)
-        .map_err(|e| format!("{} carries no signature: {}", what, e))?;
+    let signature = Signature::from_slice(signature).map_err(|e| format!("{} carries no signature: {}", what, e))?;
 
-    deployment_key.verify(signed, &signature)
-        .map_err(|_| format!("{} is not signed by this deployment", what))
+    deployment_key.verify(signed, &signature).map_err(|_| format!("{} is not signed by this deployment", what))
 }
 
 pub fn unix_now() -> u64 {

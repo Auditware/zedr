@@ -18,8 +18,7 @@ pub async fn auth_middleware(
     mut request: Request<Body>,
     next: Next,
 ) -> Result<Response, AppError> {
-    let jwt_secret = JwtSecret::from_env()
-        .map_err(|e| AppError::Config(e))?;
+    let jwt_secret = JwtSecret::from_env().map_err(AppError::Config)?;
 
     // Try JWT token first
     if let Some(auth_header) = request.headers().get("authorization") {

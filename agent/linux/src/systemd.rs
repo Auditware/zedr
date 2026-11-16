@@ -25,24 +25,22 @@ pub fn system_is_stopping(socket: &Path, uid: u32) -> Result<bool, String> {
 }
 
 fn system_state(socket: &Path, uid: u32) -> Result<String, String> {
-    let mut stream = UnixStream::connect(socket)
-        .map_err(|e| format!("Failed to connect to {}: {}", socket.display(), e))?;
-    stream.set_read_timeout(Some(IO_TIMEOUT))
+    let mut stream = UnixStream::connect(socket).map_err(|e| format!("Failed to connect to {}: {}", socket.display(), e))?;
+    stream
+        .set_read_timeout(Some(IO_TIMEOUT))
         .and_then(|_| stream.set_write_timeout(Some(IO_TIMEOUT)))
         .map_err(|e| format!("Failed to set socket timeouts: {}", e))?;
 
     authenticate(&mut stream, uid)?;
 
-    stream.write_all(&system_state_request())
-        .map_err(|e| format!("Failed to ask systemd for its state: {}", e))?;
+    stream.write_all(&system_state_request()).map_err(|e| format!("Failed to ask systemd for its state: {}", e))?;
 
     read_string_reply(&mut stream, Instant::now() + REPLY_DEADLINE)
 }
 
 fn authenticate(stream: &mut UnixStream, uid: u32) -> Result<(), String> {
     let request = format!("\0AUTH EXTERNAL {}\r\nBEGIN\r\n", hex::encode(uid.to_string()));
-    stream.write_all(request.as_bytes())
-        .map_err(|e| format!("Failed to authenticate to systemd: {}", e))?;
+    stream.write_all(request.as_bytes()).map_err(|e| format!("Failed to authenticate to systemd: {}", e))?;
 
     let mut reply = Vec::new();
     let mut byte = [0u8; 1];
@@ -50,8 +48,7 @@ fn authenticate(stream: &mut UnixStream, uid: u32) -> Result<(), String> {
         if reply.len() >= MAX_AUTH_REPLY {
             return Err("systemd sent an oversized authentication reply".to_string());
         }
-        stream.read_exact(&mut byte)
-            .map_err(|e| format!("Failed to read the authentication reply: {}", e))?;
+        stream.read_exact(&mut byte).map_err(|e| format!("Failed to read the authentication reply: {}", e))?;
         reply.push(byte[0]);
     }
 
@@ -127,9 +124,7 @@ fn system_state_request() -> Vec<u8> {
 }
 
 fn read_u32(bytes: &[u8], offset: usize, endianness: u8) -> Result<u32, String> {
-    let raw: [u8; 4] = bytes.get(offset..offset + 4)
-        .and_then(|slice| slice.try_into().ok())
-        .ok_or_else(|| "systemd sent a truncated message".to_string())?;
+    let raw: [u8; 4] = bytes.get(offset..offset + 4).and_then(|slice| slice.try_into().ok()).ok_or_else(|| "systemd sent a truncated message".to_string())?;
 
     match endianness {
         b'l' => Ok(u32::from_le_bytes(raw)),
@@ -143,8 +138,7 @@ fn read_part(stream: &mut impl Read, length: usize) -> Result<Vec<u8>, String> {
         return Err("systemd sent an oversized message".to_string());
     }
     let mut part = vec![0u8; length];
-    stream.read_exact(&mut part)
-        .map_err(|e| format!("Failed to read the systemd reply: {}", e))?;
+    stream.read_exact(&mut part).map_err(|e| format!("Failed to read the systemd reply: {}", e))?;
     Ok(part)
 }
 
@@ -174,8 +168,7 @@ fn variant_string(body: &[u8], endianness: u8) -> Result<String, String> {
     }
 
     let length = read_u32(body, 4, endianness)? as usize;
-    let text = body.get(8..8 + length)
-        .ok_or_else(|| "systemd sent a truncated string".to_string())?;
+    let text = body.get(8..8 + length).ok_or_else(|| "systemd sent a truncated string".to_string())?;
 
     String::from_utf8(text.to_vec()).map_err(|_| "systemd sent a string that is not UTF-8".to_string())
 }
@@ -187,10 +180,8 @@ mod tests {
     use std::path::PathBuf;
 
     const STOPPING_REPLY: &[u8] = &[
-        b'l', 2, 1, 1, 17, 0, 0, 0, 9, 0, 0, 0, 15, 0, 0, 0,
-        5, 1, b'u', 0, 1, 0, 0, 0,
-        8, 1, b'g', 0, 1, b'v', 0, 0,
-        1, b's', 0, 0, 8, 0, 0, 0, b's', b't', b'o', b'p', b'p', b'i', b'n', b'g', 0,
+        b'l', 2, 1, 1, 17, 0, 0, 0, 9, 0, 0, 0, 15, 0, 0, 0, 5, 1, b'u', 0, 1, 0, 0, 0, 8, 1, b'g', 0, 1, b'v', 0, 0, 1, b's', 0, 0, 8, 0, 0, 0, b's', b't',
+        b'o', b'p', b'p', b'i', b'n', b'g', 0,
     ];
 
     fn state_reply(state: &str) -> Vec<u8> {
@@ -264,10 +255,7 @@ mod tests {
 
     #[test]
     fn test_big_endian_reply_is_understood() {
-        let reply: &[u8] = &[
-            b'B', 2, 1, 1, 0, 0, 0, 16, 0, 0, 0, 9, 0, 0, 0, 0,
-            1, b's', 0, 0, 0, 0, 0, 7, b'r', b'u', b'n', b'n', b'i', b'n', b'g', 0,
-        ];
+        let reply: &[u8] = &[b'B', 2, 1, 1, 0, 0, 0, 16, 0, 0, 0, 9, 0, 0, 0, 0, 1, b's', 0, 0, 0, 0, 0, 7, b'r', b'u', b'n', b'n', b'i', b'n', b'g', 0];
         assert_eq!(read_string_reply(&mut &reply[..], soon()).unwrap(), "running");
     }
 

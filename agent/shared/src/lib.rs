@@ -2,11 +2,10 @@
 ///
 /// This library contains common functionality used across all platform-specific agents
 /// including data structures, protocols, and utilities.
-
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use std::collections::HashMap;
 use std::fs;
 use std::sync::Mutex;
-use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub use zedr_protocol::*;
@@ -24,8 +23,7 @@ static SIGNING_PUBLIC_KEY_SLOT: [u8; 64] = zedr_protocol::SIGNING_PUBLIC_KEY_PLA
 
 fn signing_public_key_in(slot: &[u8; 64]) -> Result<VerifyingKey, String> {
     let key_bytes = signing_public_key_from_slot(slot)?;
-    VerifyingKey::from_bytes(&key_bytes)
-        .map_err(|e| format!("Invalid signing public key: {}", e))
+    VerifyingKey::from_bytes(&key_bytes).map_err(|e| format!("Invalid signing public key: {}", e))
 }
 
 fn signing_public_key() -> Result<VerifyingKey, String> {
@@ -39,21 +37,17 @@ fn verify_binary_signature_with_key(public_key: &VerifyingKey, binary_data: &[u8
 
     let (data, signature_bytes) = binary_data.split_at(binary_data.len() - 64);
 
-    let signature = Signature::from_slice(signature_bytes)
-        .map_err(|e| format!("Invalid signature format: {}", e))?;
+    let signature = Signature::from_slice(signature_bytes).map_err(|e| format!("Invalid signature format: {}", e))?;
 
-    public_key.verify(data, &signature)
-        .map_err(|_| "Signature verification failed: binary has been tampered with".to_string())?;
+    public_key.verify(data, &signature).map_err(|_| "Signature verification failed: binary has been tampered with".to_string())?;
 
     Ok(())
 }
 
 pub fn verify_self_signature() -> Result<(), String> {
-    let exe_path = std::env::current_exe()
-        .map_err(|e| format!("Failed to get executable path: {}", e))?;
+    let exe_path = std::env::current_exe().map_err(|e| format!("Failed to get executable path: {}", e))?;
 
-    let binary_data = fs::read(&exe_path)
-        .map_err(|e| format!("Failed to read executable: {}", e))?;
+    let binary_data = fs::read(&exe_path).map_err(|e| format!("Failed to read executable: {}", e))?;
 
     verify_binary_signature(&binary_data)
 }
@@ -67,20 +61,10 @@ static NONCE_CACHE: Mutex<Option<HashMap<String, u64>>> = Mutex::new(None);
 const COMMAND_MAX_AGE_SECS: u64 = 300;
 const COMMAND_MAX_FUTURE_SECS: u64 = 60;
 
-fn verify_command(
-    public_key: &VerifyingKey,
-    signed_bytes: &[u8],
-    signature: &[u8],
-    issued_at: u64,
-    nonce: &str,
-) -> Result<(), String> {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|e| format!("System time error: {}", e))?
-        .as_secs();
+fn verify_command(public_key: &VerifyingKey, signed_bytes: &[u8], signature: &[u8], issued_at: u64, nonce: &str) -> Result<(), String> {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|e| format!("System time error: {}", e))?.as_secs();
 
-    let mut cache_guard = NONCE_CACHE.lock()
-        .map_err(|e| format!("Failed to lock nonce cache: {}", e))?;
+    let mut cache_guard = NONCE_CACHE.lock().map_err(|e| format!("Failed to lock nonce cache: {}", e))?;
 
     let cache = cache_guard.get_or_insert_with(HashMap::new);
 
@@ -107,11 +91,9 @@ fn verify_command_at(
     issued_at: u64,
     nonce: &str,
 ) -> Result<(), String> {
-    let signature = Signature::from_slice(signature)
-        .map_err(|e| format!("Invalid signature format: {}", e))?;
+    let signature = Signature::from_slice(signature).map_err(|e| format!("Invalid signature format: {}", e))?;
 
-    public_key.verify(signed_bytes, &signature)
-        .map_err(|_| "Signature verification failed: command has been tampered with".to_string())?;
+    public_key.verify(signed_bytes, &signature).map_err(|_| "Signature verification failed: command has been tampered with".to_string())?;
 
     if issued_at > now + COMMAND_MAX_FUTURE_SECS {
         return Err("Command timestamp is in the future".to_string());
@@ -132,21 +114,12 @@ fn verify_command_at(
     Ok(())
 }
 
-fn verify_upgrade_command_with_key(
-    public_key: &VerifyingKey,
-    cmd: &UpgradeCommand,
-    own_agent_id: &str,
-) -> Result<(), String> {
+fn verify_upgrade_command_with_key(public_key: &VerifyingKey, cmd: &UpgradeCommand, own_agent_id: &str) -> Result<(), String> {
     if cmd.agent_id != own_agent_id {
         return Err("Command was issued for a different agent".to_string());
     }
 
-    let signed_bytes = upgrade_command_signing_bytes(
-        &cmd.agent_id,
-        &cmd.target_version,
-        &cmd.nonce,
-        cmd.issued_at,
-    )?;
+    let signed_bytes = upgrade_command_signing_bytes(&cmd.agent_id, &cmd.target_version, &cmd.nonce, cmd.issued_at)?;
 
     verify_command(public_key, &signed_bytes, &cmd.signature, cmd.issued_at, &cmd.nonce)
 }
@@ -180,12 +153,8 @@ pub mod identity {
             let path = dir.join(IDENTITY_FILE);
 
             let previous = match fs::read_to_string(&path) {
-                Ok(raw) => serde_json::from_str::<StoredIdentity>(&raw)
-                    .map_err(|e| format!("Identity file is corrupt: {}", e))?,
-                Err(e) if e.kind() == ErrorKind::NotFound => StoredIdentity {
-                    seed: hex::encode(new_seed()?),
-                    session: 0,
-                },
+                Ok(raw) => serde_json::from_str::<StoredIdentity>(&raw).map_err(|e| format!("Identity file is corrupt: {}", e))?,
+                Err(e) if e.kind() == ErrorKind::NotFound => StoredIdentity { seed: hex::encode(new_seed()?), session: 0 },
                 Err(e) => return Err(format!("Failed to read identity file: {}", e)),
             };
 
@@ -194,16 +163,11 @@ pub mod identity {
                 .try_into()
                 .map_err(|_| "Identity seed must be 32 bytes".to_string())?;
 
-            let session = previous.session.checked_add(1)
-                .ok_or_else(|| "Identity session counter exhausted".to_string())?;
+            let session = previous.session.checked_add(1).ok_or_else(|| "Identity session counter exhausted".to_string())?;
 
             persist(dir, &StoredIdentity { seed: previous.seed, session })?;
 
-            Ok(Self {
-                signing_key: SigningKey::from_bytes(&seed),
-                session,
-                seq: 0,
-            })
+            Ok(Self { signing_key: SigningKey::from_bytes(&seed), session, seq: 0 })
         }
 
         pub fn public_key_hex(&self) -> String {
@@ -261,30 +225,23 @@ pub mod identity {
 
     fn new_seed() -> Result<[u8; 32], String> {
         let mut seed = [0u8; 32];
-        getrandom::getrandom(&mut seed)
-            .map_err(|e| format!("Failed to gather randomness: {}", e))?;
+        getrandom::getrandom(&mut seed).map_err(|e| format!("Failed to gather randomness: {}", e))?;
         Ok(seed)
     }
 
     fn persist(dir: &Path, identity: &StoredIdentity) -> Result<(), String> {
-        let encoded = serde_json::to_vec(identity)
-            .map_err(|e| format!("Failed to encode identity: {}", e))?;
+        let encoded = serde_json::to_vec(identity).map_err(|e| format!("Failed to encode identity: {}", e))?;
 
         replace_private_file(dir, IDENTITY_FILE, "identity file", &encoded)
     }
 
     pub(crate) fn replace_private_file(dir: &Path, name: &str, what: &str, contents: &[u8]) -> Result<(), String> {
         let staged = dir.join(format!("{}.tmp", name));
-        let mut file = owner_only_options()
-            .open(&staged)
-            .map_err(|e| format!("Failed to open {}: {}", what, e))?;
-        file.write_all(contents)
-            .map_err(|e| format!("Failed to write {}: {}", what, e))?;
-        file.sync_all()
-            .map_err(|e| format!("Failed to flush {}: {}", what, e))?;
+        let mut file = owner_only_options().open(&staged).map_err(|e| format!("Failed to open {}: {}", what, e))?;
+        file.write_all(contents).map_err(|e| format!("Failed to write {}: {}", what, e))?;
+        file.sync_all().map_err(|e| format!("Failed to flush {}: {}", what, e))?;
 
-        fs::rename(&staged, dir.join(name))
-            .map_err(|e| format!("Failed to commit {}: {}", what, e))
+        fs::rename(&staged, dir.join(name)).map_err(|e| format!("Failed to commit {}: {}", what, e))
     }
 
     #[cfg(unix)]
@@ -308,20 +265,19 @@ static SERVER_URL_PLACEHOLDER: &[u8; 64] = b"ZEDR_SERVER_PLACEHOLDER_URL_DO_NOT_
 /// Get the control server URL from the patched binary
 pub fn get_server_url() -> String {
     let url_bytes = SERVER_URL_PLACEHOLDER;
-    let url_str = std::str::from_utf8(url_bytes)
-        .expect("Invalid UTF-8 in server URL");
-    
+    let url_str = std::str::from_utf8(url_bytes).expect("Invalid UTF-8 in server URL");
+
     if url_str.contains("PLACEHOLDER") {
         panic!("FATAL: Binary has not been patched with server URL. This binary must be downloaded from the control server with a valid install key.");
     }
-    
+
     let first_null = url_str.find('\0').unwrap_or(url_str.len());
     let url = url_str[..first_null].to_string();
-    
+
     if url.is_empty() {
         panic!("FATAL: Server URL is empty in patched binary. Binary may be corrupted.");
     }
-    
+
     url
 }
 
@@ -344,17 +300,13 @@ pub struct AgentConfig {
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
-            control_server_url: std::env::var("ZEDR_CONTROL_SERVER_URL")
-                .expect("ZEDR_CONTROL_SERVER_URL must be set"),
+            control_server_url: std::env::var("ZEDR_CONTROL_SERVER_URL").expect("ZEDR_CONTROL_SERVER_URL must be set"),
             agent_id: std::env::var("ZEDR_AGENT_ID").ok(),
             heartbeat_interval: std::env::var("ZEDR_HEARTBEAT_INTERVAL")
                 .expect("ZEDR_HEARTBEAT_INTERVAL must be set")
                 .parse()
                 .expect("ZEDR_HEARTBEAT_INTERVAL must be a valid u64"),
-            debug: std::env::var("ZEDR_DEBUG")
-                .expect("ZEDR_DEBUG must be set")
-                .parse()
-                .expect("ZEDR_DEBUG must be a valid boolean"),
+            debug: std::env::var("ZEDR_DEBUG").expect("ZEDR_DEBUG must be set").parse().expect("ZEDR_DEBUG must be a valid boolean"),
         }
     }
 }
@@ -363,22 +315,10 @@ pub mod upgrade {
     use super::*;
     use std::path::PathBuf;
 
-    pub fn download_upgrade_binary(
-        server_url: &str,
-        agent_id: &str,
-        version: &str,
-    ) -> Result<Vec<u8>, String> {
-        let url = format!(
-            "{}/api/agents/{}/upgrade-binary?key={}",
-            server_url,
-            agent_id,
-            version
-        );
+    pub fn download_upgrade_binary(server_url: &str, agent_id: &str, version: &str) -> Result<Vec<u8>, String> {
+        let url = format!("{}/api/agents/{}/upgrade-binary?key={}", server_url, agent_id, version);
 
-        let response = minreq::get(&url)
-            .with_timeout(300)
-            .send()
-            .map_err(|e| format!("Failed to download binary: {}", e))?;
+        let response = minreq::get(&url).with_timeout(300).send().map_err(|e| format!("Failed to download binary: {}", e))?;
 
         if response.status_code != 200 {
             return Err(format!("Server returned error: {} {}", response.status_code, response.reason_phrase));
@@ -392,13 +332,11 @@ pub mod upgrade {
     }
 
     pub fn save_temp_binary(data: &[u8]) -> Result<PathBuf, String> {
-        let exe_path = std::env::current_exe()
-            .map_err(|e| format!("Failed to get executable path: {}", e))?;
+        let exe_path = std::env::current_exe().map_err(|e| format!("Failed to get executable path: {}", e))?;
 
         let temp_path = exe_path.with_extension("new");
 
-        fs::write(&temp_path, data)
-            .map_err(|e| format!("Failed to write temp binary: {}", e))?;
+        fs::write(&temp_path, data).map_err(|e| format!("Failed to write temp binary: {}", e))?;
 
         Ok(temp_path)
     }
@@ -415,7 +353,7 @@ mod tests {
         std::env::remove_var("ZEDR_CONTROL_SERVER_URL");
         std::env::remove_var("ZEDR_HEARTBEAT_INTERVAL");
         std::env::remove_var("ZEDR_DEBUG");
-        
+
         let _config = AgentConfig::default();
     }
 
@@ -429,9 +367,8 @@ mod tests {
             description: String::from("Test detection"),
             metadata: std::collections::HashMap::new(),
         };
-        assert!(true);
     }
-    
+
     #[test]
     fn test_unpatched_binary_trusts_no_signing_key() {
         let err = verify_self_signature().unwrap_err();
@@ -480,28 +417,28 @@ mod tests {
         slot[10] = b'z';
         assert!(signing_public_key_in(&slot).is_err());
     }
-    
-    #[test] 
+
+    #[test]
     #[should_panic(expected = "FATAL: Binary has not been patched")]
     fn test_get_server_url_panics_for_unpatched_binary() {
         // Test that unpatched binary panics (security feature)
         get_server_url();
     }
-    
+
     #[test]
     fn test_server_url_placeholder_format() {
         // Test that placeholder has correct format and length
         let placeholder = SERVER_URL_PLACEHOLDER;
         assert_eq!(placeholder.len(), 64, "Placeholder must be exactly 64 bytes");
-        
+
         let placeholder_str = std::str::from_utf8(placeholder).unwrap();
         assert!(placeholder_str.contains("PLACEHOLDER"), "Should contain PLACEHOLDER marker");
         assert!(placeholder_str.contains("ZEDR_SERVER"), "Should contain ZEDR_SERVER prefix");
-        
+
         // Verify it ends with null byte for string termination
         assert_eq!(placeholder[63], 0, "Should end with null byte");
     }
-    
+
     fn test_dir(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("zedr-shared-{}-{}", std::process::id(), name));
         let _ = std::fs::remove_dir_all(&dir);
@@ -828,16 +765,13 @@ mod tests {
     fn test_signature_verification_prevents_execution() {
         // Test that signature verification is called and has expected behavior
         let result = verify_self_signature();
-        
+
         // Function should exist and handle verification appropriately
         assert!(result.is_ok() || result.is_err(), "Function should return a result");
-        
+
         if let Err(msg) = result {
             // In test environment, should fail with security-related error
-            assert!(
-                !msg.is_empty(),
-                "Error message should not be empty"
-            );
+            assert!(!msg.is_empty(), "Error message should not be empty");
         }
     }
 }

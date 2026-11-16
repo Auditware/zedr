@@ -3,7 +3,7 @@ use std::ptr;
 
 pub fn run() {
     println!("\n=== Userspace Process Monitor ===");
-    
+
     match enumerate_processes() {
         Ok(processes) => {
             println!("Sample processes (top 10):");
@@ -15,7 +15,7 @@ pub fn run() {
             println!("Error enumerating processes: {}", e);
         }
     }
-    
+
     println!("\nAgent running successfully");
 }
 
@@ -145,77 +145,50 @@ const KERN_PROC: i32 = 14;
 const KERN_PROC_ALL: i32 = 0;
 
 extern "C" {
-    fn sysctl(
-        name: *const i32,
-        namelen: u32,
-        oldp: *mut libc::c_void,
-        oldlenp: *mut libc::size_t,
-        newp: *mut libc::c_void,
-        newlen: libc::size_t,
-    ) -> i32;
+    fn sysctl(name: *const i32, namelen: u32, oldp: *mut libc::c_void, oldlenp: *mut libc::size_t, newp: *mut libc::c_void, newlen: libc::size_t) -> i32;
 }
 
 fn enumerate_processes() -> Result<Vec<ProcessInfo>, String> {
     let mut processes = Vec::new();
-    
+
     unsafe {
         let mib = [CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0];
         let mut size: libc::size_t = 0;
-        
-        if sysctl(
-            mib.as_ptr(),
-            4,
-            ptr::null_mut(),
-            &mut size,
-            ptr::null_mut(),
-            0,
-        ) != 0 {
+
+        if sysctl(mib.as_ptr(), 4, ptr::null_mut(), &mut size, ptr::null_mut(), 0) != 0 {
             return Err("Failed to get process list size".to_string());
         }
-        
+
         if size == 0 {
             return Err("No processes found".to_string());
         }
-        
+
         let mut buffer = vec![0u8; size];
-        
-        if sysctl(
-            mib.as_ptr(),
-            4,
-            buffer.as_mut_ptr() as *mut libc::c_void,
-            &mut size,
-            ptr::null_mut(),
-            0,
-        ) != 0 {
+
+        if sysctl(mib.as_ptr(), 4, buffer.as_mut_ptr() as *mut libc::c_void, &mut size, ptr::null_mut(), 0) != 0 {
             return Err("Failed to get process list".to_string());
         }
-        
+
         let kinfo_size = std::mem::size_of::<KinfoProc>();
         let num_processes = size / kinfo_size;
-        
+
         for i in 0..num_processes {
             let offset = i * kinfo_size;
             if offset + kinfo_size <= buffer.len() {
                 let proc_ptr = buffer.as_ptr().add(offset) as *const KinfoProc;
                 let proc_info = &*proc_ptr;
-                
+
                 let pid = proc_info.kp_proc.p_pid;
                 let comm_ptr = proc_info.kp_proc.p_comm.as_ptr();
-                let name = if !comm_ptr.is_null() {
-                    CStr::from_ptr(comm_ptr)
-                        .to_string_lossy()
-                        .to_string()
-                } else {
-                    "unknown".to_string()
-                };
-                
+                let name = if !comm_ptr.is_null() { CStr::from_ptr(comm_ptr).to_string_lossy().to_string() } else { "unknown".to_string() };
+
                 if pid > 0 {
                     processes.push(ProcessInfo { pid, name });
                 }
             }
         }
     }
-    
+
     if processes.is_empty() {
         Err("No valid processes found".to_string())
     } else {

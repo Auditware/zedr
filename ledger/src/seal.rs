@@ -58,7 +58,8 @@ fn bound(agent: &Hash, epoch: u64, index: u64) -> Vec<u8> {
 
 fn pad(event: &[u8]) -> Result<Vec<u8>, String> {
     let needed = event.len() + LENGTH_BYTES;
-    let bucket = BUCKETS.iter().copied().find(|bucket| *bucket >= needed).ok_or_else(|| format!("An event of {} bytes is larger than any bucket", event.len()))?;
+    let bucket =
+        BUCKETS.iter().copied().find(|bucket| *bucket >= needed).ok_or_else(|| format!("An event of {} bytes is larger than any bucket", event.len()))?;
     let mut padded = Vec::with_capacity(bucket);
     padded.extend_from_slice(&(event.len() as u32).to_le_bytes());
     padded.extend_from_slice(event);
@@ -84,9 +85,7 @@ fn unpad(mut padded: Vec<u8>) -> Result<Vec<u8>, String> {
 pub fn seal(seed: &Hash, agent: &Hash, epoch: u64, index: u64, event: &[u8]) -> Result<Vec<u8>, String> {
     let padded = pad(event)?;
     let cipher = ChaCha20Poly1305::new(Key::from_slice(&key(seed)));
-    cipher
-        .encrypt(Nonce::from_slice(&[0u8; 12]), Payload { msg: &padded, aad: &bound(agent, epoch, index) })
-        .map_err(|_| "Sealing failed".to_string())
+    cipher.encrypt(Nonce::from_slice(&[0u8; 12]), Payload { msg: &padded, aad: &bound(agent, epoch, index) }).map_err(|_| "Sealing failed".to_string())
 }
 
 /// Opens a sealed event with its seed, and fails for any other seed, place or ciphertext

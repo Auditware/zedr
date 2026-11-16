@@ -355,16 +355,12 @@ mod tests {
             let result = patch_server_url(template, url);
             
             if should_succeed && url.len() <= 63 {
-                assert!(result.is_ok(), "Valid URL '{}' should patch successfully", url);
-                
-                if result.is_ok() {
-                    let patched = result.unwrap();
-                    // Verify URL was embedded correctly
-                    let url_section = &patched[0..64];
-                    assert_eq!(&url_section[..url.len()], url.as_bytes());
-                    // Rest should be null-padded
-                    assert!(url_section[url.len()..].iter().all(|&b| b == 0));
-                }
+                let patched = result.unwrap_or_else(|e| panic!("Valid URL '{}' should patch successfully: {}", url, e));
+                // Verify URL was embedded correctly
+                let url_section = &patched[0..64];
+                assert_eq!(&url_section[..url.len()], url.as_bytes());
+                // Rest should be null-padded
+                assert!(url_section[url.len()..].iter().all(|&b| b == 0));
             } else if url.len() > 63 {
                 assert!(result.is_err(), "URL '{}' too long should fail", url);
             }

@@ -200,7 +200,11 @@ mod tests {
     fn test_an_empty_window_still_advances_the_chain() {
         let empty = WindowHeader::seal(&AGENT, 1, 5, 40, false, false, [3u8; 32], &[]).unwrap();
         empty.verify(&AGENT, &[]).unwrap();
-        assert_ne!(empty.head, WindowHeader::seal(&[8u8; 32], 1, 5, 40, false, false, [3u8; 32], &[]).unwrap().head, "an empty window is still bound to its agent");
+        assert_ne!(
+            empty.head,
+            WindowHeader::seal(&[8u8; 32], 1, 5, 40, false, false, [3u8; 32], &[]).unwrap().head,
+            "an empty window is still bound to its agent"
+        );
         assert_eq!(empty.next_index(), 40);
         assert_ne!(empty.head, empty.prev_head);
     }

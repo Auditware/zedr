@@ -23,8 +23,7 @@ pub struct CommandJournal {
 impl CommandJournal {
     pub fn open(dir: &Path) -> Result<Self, String> {
         let commands = match fs::read_to_string(dir.join(JOURNAL_FILE)) {
-            Ok(raw) => serde_json::from_str(&raw)
-                .map_err(|e| format!("Record of accepted commands is corrupt: {}", e))?,
+            Ok(raw) => serde_json::from_str(&raw).map_err(|e| format!("Record of accepted commands is corrupt: {}", e))?,
             Err(e) if e.kind() == ErrorKind::NotFound => Vec::new(),
             Err(e) => return Err(format!("Failed to read the record of accepted commands: {}", e)),
         };
@@ -49,8 +48,7 @@ impl CommandJournal {
     fn persist(&mut self, now: u64) -> Result<(), String> {
         self.commands.retain(|command| !crate::command_expired(command.issued_at, now));
 
-        let encoded = serde_json::to_vec(&self.commands)
-            .map_err(|e| format!("Failed to encode the record of accepted commands: {}", e))?;
+        let encoded = serde_json::to_vec(&self.commands).map_err(|e| format!("Failed to encode the record of accepted commands: {}", e))?;
         replace_private_file(&self.dir, JOURNAL_FILE, "record of accepted commands", &encoded)
     }
 }
@@ -69,13 +67,7 @@ mod tests {
     }
 
     fn upgrade(nonce: &str, issued_at: u64) -> UpgradeCommand {
-        UpgradeCommand {
-            agent_id: "agent-a".to_string(),
-            target_version: "0.2.0".to_string(),
-            signature: Vec::new(),
-            issued_at,
-            nonce: nonce.to_string(),
-        }
+        UpgradeCommand { agent_id: "agent-a".to_string(), target_version: "0.2.0".to_string(), signature: Vec::new(), issued_at, nonce: nonce.to_string() }
     }
 
     fn nonces(commands: &[AcceptedCommand]) -> Vec<&str> {

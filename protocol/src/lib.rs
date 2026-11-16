@@ -1,7 +1,6 @@
 /// zedr Protocol Types
 ///
 /// Shared types for communication between agents and control server
-
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
 
@@ -343,39 +342,25 @@ struct UpgradeCommandPayload<'a> {
 }
 
 /// Exact bytes signed by the server and verified by the agent for an upgrade command
-pub fn upgrade_command_signing_bytes(
-    agent_id: &str,
-    target_version: &str,
-    nonce: &str,
-    issued_at: u64,
-) -> Result<Vec<u8>, String> {
-    serde_json::to_vec(&UpgradeCommandPayload {
-        purpose: UPGRADE_COMMAND_PURPOSE,
-        agent_id,
-        target_version,
-        nonce,
-        issued_at,
-    })
-    .map_err(|e| format!("Failed to encode upgrade command: {}", e))
+pub fn upgrade_command_signing_bytes(agent_id: &str, target_version: &str, nonce: &str, issued_at: u64) -> Result<Vec<u8>, String> {
+    serde_json::to_vec(&UpgradeCommandPayload { purpose: UPGRADE_COMMAND_PURPOSE, agent_id, target_version, nonce, issued_at })
+        .map_err(|e| format!("Failed to encode upgrade command: {}", e))
 }
 
 /// Bytes the agent is built with where its signing public key belongs, replaced by the control server on download
-pub const SIGNING_PUBLIC_KEY_PLACEHOLDER: [u8; 64] =
-    *b"ZEDR_SIGNING_PUBLIC_KEY_PLACEHOLDER_DO_NOT_MODIFY_64_BYTES_LONG\0";
+pub const SIGNING_PUBLIC_KEY_PLACEHOLDER: [u8; 64] = *b"ZEDR_SIGNING_PUBLIC_KEY_PLACEHOLDER_DO_NOT_MODIFY_64_BYTES_LONG\0";
 
 /// Slot contents the control server writes over the placeholder
 pub fn signing_public_key_to_slot(public_key: &[u8; 32]) -> Result<[u8; 64], String> {
     let mut slot = [0u8; 64];
-    hex::encode_to_slice(public_key, &mut slot)
-        .map_err(|e| format!("Failed to encode signing public key: {}", e))?;
+    hex::encode_to_slice(public_key, &mut slot).map_err(|e| format!("Failed to encode signing public key: {}", e))?;
     Ok(slot)
 }
 
 /// Signing public key the agent reads back from its slot
 pub fn signing_public_key_from_slot(slot: &[u8; 64]) -> Result<[u8; 32], String> {
     let mut public_key = [0u8; 32];
-    hex::decode_to_slice(slot, &mut public_key)
-        .map_err(|_| "Binary has not been patched with a signing public key".to_string())?;
+    hex::decode_to_slice(slot, &mut public_key).map_err(|_| "Binary has not been patched with a signing public key".to_string())?;
     Ok(public_key)
 }
 
@@ -486,7 +471,15 @@ struct WindowRefusalPayload<'a> {
 }
 
 /// Exact bytes signed by the server and verified by the agent for a refused window
-pub fn window_refusal_signing_bytes(agent_id: &str, session: u64, seq: u64, epoch: u64, next_window: u64, next_index: u64, head: &str) -> Result<Vec<u8>, String> {
+pub fn window_refusal_signing_bytes(
+    agent_id: &str,
+    session: u64,
+    seq: u64,
+    epoch: u64,
+    next_window: u64,
+    next_index: u64,
+    head: &str,
+) -> Result<Vec<u8>, String> {
     serde_json::to_vec(&WindowRefusalPayload { purpose: WINDOW_REFUSAL_PURPOSE, agent_id, session, seq, epoch, next_window, next_index, head })
         .map_err(|e| format!("Failed to encode window refusal: {}", e))
 }
@@ -776,7 +769,11 @@ mod tests {
     fn test_window_refusal_signing_bytes_bind_the_request_they_answer() {
         let head = "ab".repeat(32);
         let bytes = window_refusal_signing_bytes("agent-1", 3, 9, 2, 5, 40, &head).unwrap();
-        assert_ne!(bytes, window_refusal_signing_bytes("agent-1", 3, 10, 2, 5, 40, &head).unwrap(), "a refusal signed for an earlier request is not valid for this one");
+        assert_ne!(
+            bytes,
+            window_refusal_signing_bytes("agent-1", 3, 10, 2, 5, 40, &head).unwrap(),
+            "a refusal signed for an earlier request is not valid for this one"
+        );
         assert_ne!(bytes, window_refusal_signing_bytes("agent-1", 4, 9, 2, 5, 40, &head).unwrap());
         assert_ne!(bytes, window_refusal_signing_bytes("agent-2", 3, 9, 2, 5, 40, &head).unwrap());
         assert_ne!(bytes, window_refusal_signing_bytes("agent-1", 3, 9, 3, 5, 40, &head).unwrap(), "the epoch is signed too");

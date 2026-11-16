@@ -401,7 +401,7 @@ async fn test_install_key_reuse_prevention() {
         .clone()
         .oneshot(
             Request::builder()
-                .uri(&format!("/api/installers/binaries/windows-arm64?key={}", key_plaintext))
+                .uri(format!("/api/installers/binaries/windows-arm64?key={}", key_plaintext))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -423,7 +423,7 @@ async fn test_install_key_reuse_prevention() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri(&format!("/api/installers/binaries/windows-arm64?key={}", key_plaintext))
+                .uri(format!("/api/installers/binaries/windows-arm64?key={}", key_plaintext))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -464,7 +464,7 @@ async fn test_install_key_expiration() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri(&format!("/api/installers/binaries/windows-arm64?key={}", key_plaintext))
+                .uri(format!("/api/installers/binaries/windows-arm64?key={}", key_plaintext))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -503,7 +503,7 @@ async fn test_install_key_revocation() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri(&format!("/api/installers/binaries/windows-arm64?key={}", key_plaintext))
+                .uri(format!("/api/installers/binaries/windows-arm64?key={}", key_plaintext))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -3128,7 +3128,8 @@ async fn test_a_process_with_a_finding_keeps_the_hunt_row_of_that_finding_when_i
 
     host.deliver(&app, &[became(30, 21, 20, "/usr/bin/sleep", &["25"]), ended(41, 21)]).await;
 
-    let rows: Vec<(String, String, Option<String>, i64, Option<i64>)> =
+    type HuntRow = (String, String, Option<String>, i64, Option<i64>);
+    let rows: Vec<HuntRow> =
         sqlx::query_as("SELECT name, command, parent_name, started_at, ended_at FROM hunt_processes WHERE agent_id = 'exec-host' AND pid = 21").fetch_all(&pool).await.unwrap();
     assert_eq!(
         rows,
