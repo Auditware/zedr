@@ -636,6 +636,9 @@ pub struct Described {
     pub parent_name: Option<String>,
     pub parent_path: Option<String>,
     pub started_at: u64,
+    /// Whether a finding is about this process. Its entry in the index then shows what the finding saw, and stays that way:
+    /// the same process opened later as a parent, or with the program it replaced its image with before it ended, changes nothing
+    pub found: bool,
 }
 
 impl Described {
@@ -647,7 +650,12 @@ impl Described {
             parent_name: parent.map(|parent| base_name(&parent.executable_path)),
             parent_path: parent.map(|parent| parent.executable_path.clone()),
             started_at,
+            found: false,
         }
+    }
+
+    pub fn found(self) -> Self {
+        Described { found: true, ..self }
     }
 }
 
@@ -671,11 +679,19 @@ pub async fn index<'e>(executor: impl SqliteExecutor<'e>, agent_id: &str, event:
             let Some(described) = described else {
                 return Ok(());
             };
-            sqlx::query(
-                "INSERT OR REPLACE INTO hunt_processes
+            let on_conflict = if described.found {
+                "DO UPDATE SET name = excluded.name, path = excluded.path, command = excluded.command, uid = excluded.uid,
+                 parent_pid = excluded.parent_pid, parent_name = excluded.parent_name, parent_path = excluded.parent_path"
+            } else {
+                "DO NOTHING"
+            };
+            sqlx::query(&format!(
+                "INSERT INTO hunt_processes
                  (agent_id, pid, started_at, name, path, command, uid, parent_pid, parent_name, parent_path)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            )
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 ON CONFLICT(agent_id, pid, started_at) {}",
+                on_conflict
+            ))
             .bind(agent_id)
             .bind(process.pid)
             .bind(described.started_at as i64)

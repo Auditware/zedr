@@ -266,7 +266,7 @@ async fn apply_release(
     let opened = detections::roles(rule, release.pid, &events[0], &events[1..])?;
 
     let (owner, owner_at) = match &opened {
-        Opened::Process { process, parent, .. } => (Some(Described::new(process, *parent, release.started_at)), usize::from(!matches!(events[0], SensorEvent::Process(_)))),
+        Opened::Process { process, parent, .. } => (Some(Described::new(process, *parent, release.started_at).found()), usize::from(!matches!(events[0], SensorEvent::Process(_)))),
         Opened::End { process, .. } => (Some(Described::new(process, None, release.started_at)), 1),
         Opened::Item(_) => (None, 0),
     };
