@@ -421,6 +421,8 @@ dev-logs: ## Show logs for all services
 
 .PHONY: dev-logs-backend
 dev-logs-backend: ## Show backend logs
+	@pm2 logs zedr-backend --lines 50 --nostream
+
 .PHONY: frontend-dev
 frontend-dev: ## Start frontend development server only
 	@echo "Starting frontend dev server on http://localhost:7771..."
@@ -455,11 +457,6 @@ control-server-status: ## Show control server status
 frontend-deps: ## Install frontend dependencies
 	@echo "Installing frontend dependencies..."
 	@cd control_server/frontend && npm install
-
-.PHONY: frontend-dev
-frontend-dev: ## Start frontend development server
-	@echo "Starting frontend dev server on http://localhost:3000..."
-	@cd control_server/frontend && npm run dev
 
 .PHONY: frontend-build
 frontend-build: ## Build frontend for production
