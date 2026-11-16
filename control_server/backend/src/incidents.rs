@@ -20,6 +20,7 @@ pub const PROOF_INVALID: &str = "proof_invalid";
 pub const MATCH_NOT_RELEASED: &str = "match_not_released";
 pub const RELEASE_NOT_PROVEN: &str = "release_not_proven";
 pub const PROOF_OVERDUE: &str = "proof_overdue";
+pub const PROVING_STOPPED: &str = "proving_stopped";
 
 #[derive(Debug, Clone, Serialize, sqlx::FromRow, ToSchema)]
 pub struct Incident {

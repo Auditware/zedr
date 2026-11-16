@@ -198,6 +198,17 @@ async fn repeats(conn: &mut SqliteConnection, agent_id: &str, finding: &Finding)
 
 /// Opens what a release names, checks it against the stored leaves and the shape of its rule, and only then records it.
 /// A release that is refused has written nothing
+/// Whether the endpoint said it would prove this window. One that proved and no longer does has lost its prover,
+/// or wants its windows taken without a proof that would tell what it held back
+async fn proved(conn: &mut SqliteConnection, agent_id: &str, window: u64) -> Result<bool> {
+    let proving: Option<bool> = sqlx::query_scalar("SELECT proving FROM sealed_windows WHERE agent_id = ? AND window = ?")
+        .bind(agent_id)
+        .bind(window as i64)
+        .fetch_optional(conn)
+        .await?;
+    Ok(proving == Some(true))
+}
+
 async fn apply_release(
     conn: &mut SqliteConnection,
     agent_id: &str,
@@ -393,6 +404,10 @@ pub async fn admit(state: &AppState, agent: &Hash, window: &SealedWindow) -> Res
     store(&mut tx, agent_id, &decoded, window.proving, now).await?;
 
     let mut announce = Vec::new();
+    if !window.proving && header.window > 0 && proved(&mut tx, agent_id, header.window - 1).await? {
+        let evidence = serde_json::json!({ "window": header.window, "epoch": header.epoch });
+        announce.extend(incidents::open_within(&mut tx, agent_id, incidents::PROVING_STOPPED, evidence).await?);
+    }
     if header.gap {
         let evidence = serde_json::json!({ "window": header.window, "epoch": header.epoch, "first_index": header.first_index });
         announce.extend(incidents::open_within(&mut tx, agent_id, incidents::CHAIN_GAP, evidence).await?);

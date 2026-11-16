@@ -4238,6 +4238,31 @@ async fn test_a_proof_tells_a_release_no_rule_stands_behind() {
 }
 
 #[tokio::test]
+async fn test_an_endpoint_that_stops_proving_opens_an_incident() {
+    let (app, pool) = create_proving_app().await;
+    let mut host = enroll_endpoint(&app, &pool, "stopped-proving-host").await;
+    host.deliver(&app, &[quiet(30)]).await;
+    assert!(open_incidents(&pool, "stopped-proving-host").await.is_empty());
+
+    for pid in [31, 32] {
+        let mut window = host.ledger.seal(&[quiet(pid)]);
+        window.proving = false;
+        assert_eq!(host.send(&app, window).await.0, StatusCode::OK, "the window is held all the same");
+    }
+    assert_eq!(open_incidents(&pool, "stopped-proving-host").await, vec!["proving_stopped"]);
+    assert_eq!(incident_evidence(&pool, "stopped-proving-host", "proving_stopped").await, serde_json::json!({ "window": 1, "epoch": 1 }));
+    assert_eq!(proof_states(&pool, "stopped-proving-host").await, ["pending", "none", "none"]);
+
+    let mut never = enroll_endpoint(&app, &pool, "never-proving-host").await;
+    for pid in [30, 31] {
+        let mut window = never.ledger.seal(&[quiet(pid)]);
+        window.proving = false;
+        assert_eq!(never.send(&app, window).await.0, StatusCode::OK);
+    }
+    assert!(open_incidents(&pool, "never-proving-host").await.is_empty(), "an endpoint that was installed without a prover is no incident");
+}
+
+#[tokio::test]
 async fn test_windows_of_an_endpoint_without_a_prover_wait_for_no_proof_and_take_none() {
     let (app, pool) = create_proving_app().await;
     let mut host = enroll_endpoint(&app, &pool, "unproving-host").await;
