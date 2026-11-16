@@ -1,77 +1,110 @@
-# zedr
+<p align="center">
+  <img src="docs/assets/hero.png" width="100%" alt="The zedr console showing what the control server holds of one endpoint: sealed rows it cannot read, and two events that a rule opened">
+</p>
 
-Zero-knowledge endpoint detection and response.
+<h1 align="center">zedr</h1>
 
-zedr is an open source EDR that stays in user space and keeps endpoint telemetry private. The control server can read an event only when a detection rule matched it, and it can check that the rules ran over everything else without reading any of it.
+<p align="center">Zero-knowledge endpoint detection and response.</p>
 
-This is a proof of concept. The sealed pipeline runs end to end on Linux. The Windows and macOS agents enroll and heartbeat and have no sensor yet.
+<p align="center">
+  <a href="https://github.com/auditware/zedr/actions/workflows/ci.yml"><img src="https://github.com/auditware/zedr/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License: MIT"></a>
+  <a href="#status"><img src="https://img.shields.io/badge/status-proof_of_concept-orange" alt="Status: proof of concept"></a>
+  <img src="https://img.shields.io/badge/platform-Linux-lightgrey" alt="Platform: Linux">
+</p>
+
+zedr is an open source EDR that stays in user space and keeps endpoint telemetry private from its own control server.
+
+## What it does
+
+- The agent reads processes, outbound connections, autostart items and packages without a kernel driver.
+- Every event is encrypted on the endpoint, so the control server stores ciphertext and commitments.
+- A detection rule that matches releases the keys of the events it opens, and the server reads only those.
+- A zero-knowledge proof shows the server that the rules ran over everything else.
+- The console shows opened events in the clear and the rest as sealed rows with their proof state.
 
 ## How it works
 
-1. The agent reads processes, outbound connections, autostart items and installed packages from `/proc` and the file system. There is no kernel driver.
-2. Every event is encrypted on the endpoint with a key that never leaves it, and committed to in a hash chain of one-minute windows. The control server stores ciphertext and commitments.
-3. The detection rules run in the agent. When one matches, the agent releases the keys of the events that rule opens. The control server checks them against the commitments and builds the finding from the opened events.
-4. A prover on the endpoint runs the same rules in a zkVM ([RISC Zero](https://risczero.com)) over the committed events. The control server verifies the proof and compares it with what was released. A match that was not released, or a release no proof stands behind, opens an incident.
-5. The console shows what was opened: findings, the process tree around them and hunts over them. Everything else shows as sealed rows with their place in the chain and the state of their proof.
+```mermaid
+sequenceDiagram
+    participant E as Endpoint
+    participant S as Control server
+    Note left of E: Agent encrypts every event<br/>and commits it to a chain<br/>of one-minute windows
+    E->>S: Ciphertext and commitments
+    Note left of E: A detection rule matches
+    E->>S: Keys of the events that rule opens
+    Note right of S: Builds the finding<br/>from the opened events
+    Note left of E: Prover runs the same rules<br/>in a RISC Zero zkVM
+    E->>S: Proof over every committed event
+    Note right of S: Verifies the proof and compares<br/>it with the keys it received
+```
 
-The design and its limits are in [ADR 031](./docs/adr/031-sealed-telemetry-opened-by-proven-rules.md), the messages in [AGENT_PROTOCOL.md](./docs/architecture/AGENT_PROTOCOL.md), the rules and the cost of proving in [DETECTIONS.md](./docs/DETECTIONS.md).
+A match that an endpoint held back is named by its own proof, and the server opens an incident for it.
 
-## What a proof says
+## Screenshots
 
-A proof says that the pinned rule program ran over every event the endpoint committed, in order and without a hidden gap, and names every match. It does not say that the endpoint committed everything that happened: whoever has root on an endpoint can keep an event from being sealed. The other known ways around the agent and the control server are listed in [BYPASSES.md](./docs/BYPASSES.md).
+<p align="center">
+  <img src="docs/assets/proof.png" width="100%" alt="Commitment chain of an endpoint with window 14 proven and the two findings released in it"><br>
+  <sub>A window of an endpoint's chain, proven, with the two findings released in it.</sub>
+</p>
 
-## Try it
+<p align="center">
+  <img src="docs/assets/caught.png" width="100%" alt="Incident on an endpoint whose proof named a match it did not report"><br>
+  <sub>An endpoint that held a match back, caught by its own proof.</sub>
+</p>
 
-The Makefile assumes a macOS development machine with Docker, Rust and Node 22. Anything that proves also needs the RISC Zero build tool in the version the rule program is pinned to: install [rzup](https://dev.risczero.com/api/zkvm/install), then `rzup install cargo-risczero 3.1.0` and `rzup install r0vm 3.1.0`.
+The endpoints in these images are simulated, as they are in `make demo`.
+
+## Quick start
+
+The Makefile assumes a macOS machine with Docker, Rust and Node 22. Anything that proves also needs RISC Zero 3.1.0 from [rzup](https://dev.risczero.com/api/zkvm/install): `rzup install cargo-risczero 3.1.0` and `rzup install r0vm 3.1.0`.
 
 ```bash
 cp secrets/.env.local.example secrets/.env.local
+make test             # unit and integration tests, needs neither Docker nor RISC Zero
+make test-e2e-linux   # the whole flow for real in containers, about ten minutes once built
+make demo             # console on http://localhost:7771 with a simulated fleet
+make help             # every other target
 ```
 
-```bash
-make test
-```
+Sign in to the demo with the test tenant button.
 
-runs the unit and integration tests of the protocol, the ledger, the rules, the agent and the control server. It needs neither Docker nor RISC Zero.
+## Status
 
-```bash
-make test-e2e-linux
-```
+This is a proof of concept.
 
-runs the whole flow for real: it builds the rule program, the agent and the prover, starts a control server, lets the installer set up an endpoint in a container, runs an ordinary command and a download piped into a shell there, and waits until the finding is open, the ordinary command is nowhere in the database and the server has verified the proofs. It takes about ten minutes once everything is built.
+| Part | State |
+|---|---|
+| Linux agent | The whole flow runs end to end. `make test-e2e-linux` does it for real in containers, including an endpoint that hides a match and is caught by its own proof. |
+| Detection rules | 16 rules, of which 15 are detections with MITRE ATT&CK ids and one is a follow-up. |
+| Proving | About 20 CPU-seconds per event, so a quiet server keeps up and a busy workstation does not yet. |
+| Windows and macOS agents | They enroll and heartbeat and have no sensor yet. |
 
-```bash
-make demo
-```
-
-opens the console on http://localhost:7771 against a test tenant: a control server and a fleet of about 190 endpoints played by the development simulator in `agent/simulator`, which commits, seals and releases with the agent's own code. Sign in with the test tenant button. After `make guest prover`, two of the endpoints prove for real, and one of them holds a match back and is caught by its own proof a few minutes later. The fleet includes Windows and macOS machines to show the rules that are about them. Their real agents seal nothing yet.
-
-`make help` lists the other targets.
+A proof covers what the endpoint committed, so whoever has root on an endpoint can still keep an event from being sealed.
 
 ## Layout
 
 | Path | What |
 |---|---|
-| `agent/` | The agents: `shared` holds the sensor loop, the ledger and the link to the control server, `linux`, `windows` and `macos` the platform parts |
-| `protocol/` | The messages between agent and control server, and the canonical form of a sensor event |
-| `ledger/` | Commitments, the window chain and sealing |
-| `rules/` | The detection rules and the function a proof is about |
-| `prover/` | `guest` is the rule program for the zkVM, `host` the `zedr-prover` binary that runs on an endpoint |
-| `control_server/backend/` | The control server: Axum and SQLite |
-| `control_server/frontend/` | The console: React and Vite |
-| `deploy/` | Container image, Helm chart, Terraform and the recipes for installing agents |
-| `e2e/` | The run behind `make test-e2e-linux` |
-| `docs/` | Decision records, the protocol, what is collected and detected, and what is not |
+| `agent/` | The agents in Rust: a shared sensor loop, ledger and server link, and the Linux, Windows and macOS parts |
+| `protocol/` `ledger/` `rules/` | Messages, the commitment chain with sealing, and the detection rules a proof is about |
+| `prover/` | The rule program for the RISC Zero zkVM and the `zedr-prover` binary that runs on an endpoint |
+| `control_server/` | The control server in Rust with Axum and SQLite, and the console in React |
+| `deploy/` `e2e/` | Container image, Helm chart and Terraform, and the run behind `make test-e2e-linux` |
 
-## Standards
+## Documentation
 
-- [Core agent capabilities](.github/instructions/agent.instructions.md#core-agent-uncompromisable-capabilities)
-- [Central management capabilities](.github/instructions/control_server_backend.instructions.md#central-management-uncompromisable-capabilities)
-- [Operating system capabilities](./docs/OS_CAPABILITIES.md)
-- [Development and deployment standards](.github/copilot-instructions.md#developments-and-deployment-standards)
-
-What is done and what is open is in [TODO.md](./TODO.md).
+| Document | What it covers |
+|---|---|
+| [ADR 031](docs/adr/031-sealed-telemetry-opened-by-proven-rules.md) | The design and its limits |
+| [AGENT_PROTOCOL.md](docs/architecture/AGENT_PROTOCOL.md) | The messages between agent and control server |
+| [DETECTIONS.md](docs/DETECTIONS.md) | What is collected, the rules and what proving costs |
+| [BYPASSES.md](docs/BYPASSES.md) | Known ways around the agent and the control server |
+| [ANTI_TAMPERING.md](docs/ANTI_TAMPERING.md) | What the agent and the server do against tampering |
+| [TODO.md](TODO.md) | What is done and what is open |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Who can contribute today |
+| [SECURITY.md](SECURITY.md) | How to report a vulnerability |
 
 ## License
 
-MIT, see [LICENSE](./LICENSE).
+MIT, see [LICENSE](LICENSE).
