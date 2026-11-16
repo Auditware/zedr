@@ -20,6 +20,8 @@ const NAME_BYTES: usize = 64;
 pub enum Level {
     High,
     Medium,
+    /// Not a finding of its own: it follows up on one
+    Info,
 }
 
 impl Level {
@@ -27,6 +29,7 @@ impl Level {
         match self {
             Level::High => "high",
             Level::Medium => "medium",
+            Level::Info => "info",
         }
     }
 }
@@ -40,6 +43,8 @@ pub enum Opens {
     EventProcessAndParent,
     /// The autostart item
     Item,
+    /// The event that ended a process, and the event that process entered with
+    EndAndProcess,
 }
 
 impl Opens {
@@ -48,6 +53,7 @@ impl Opens {
             Opens::ProcessAndParent => "process and parent",
             Opens::EventProcessAndParent => "event, process and parent",
             Opens::Item => "autostart item",
+            Opens::EndAndProcess => "end of the process and the process",
         }
     }
 }
@@ -71,10 +77,11 @@ pub enum RuleId {
     AutostartWritable = 12,
     PreloadAdded = 13,
     RootKeyAdded = 14,
+    FlaggedProcessEnded = 15,
 }
 
 impl RuleId {
-    pub const ALL: [RuleId; 15] = [
+    pub const ALL: [RuleId; 16] = [
         RuleId::OfficeChild,
         RuleId::ServerChild,
         RuleId::EncodedCommand,
@@ -90,6 +97,7 @@ impl RuleId {
         RuleId::AutostartWritable,
         RuleId::PreloadAdded,
         RuleId::RootKeyAdded,
+        RuleId::FlaggedProcessEnded,
     ];
 
     pub fn id(self) -> &'static str {
@@ -109,6 +117,7 @@ impl RuleId {
             RuleId::AutostartWritable => "autostart-writable",
             RuleId::PreloadAdded => "preload-added",
             RuleId::RootKeyAdded => "root-key-added",
+            RuleId::FlaggedProcessEnded => "flagged-process-ended",
         }
     }
 
@@ -133,9 +142,11 @@ impl RuleId {
             RuleId::AutostartWritable => "Autostart item runs from a temporary folder",
             RuleId::PreloadAdded => "Library preloaded into every process",
             RuleId::RootKeyAdded => "SSH key added for root",
+            RuleId::FlaggedProcessEnded => "Process with a finding ended",
         }
     }
 
+    /// ATT&CK technique of a finding, empty for a rule that only follows up on one
     pub fn technique(self) -> &'static str {
         match self {
             RuleId::OfficeChild => "T1204.002",
@@ -153,6 +164,7 @@ impl RuleId {
             RuleId::AutostartWritable => "T1547",
             RuleId::PreloadAdded => "T1574.006",
             RuleId::RootKeyAdded => "T1098.004",
+            RuleId::FlaggedProcessEnded => "",
         }
     }
 
@@ -175,6 +187,7 @@ impl RuleId {
     pub fn level(self) -> Level {
         match self {
             RuleId::HiddenWindow | RuleId::ShellNetwork | RuleId::RootKeyAdded => Level::Medium,
+            RuleId::FlaggedProcessEnded => Level::Info,
             _ => Level::High,
         }
     }
@@ -183,6 +196,7 @@ impl RuleId {
         match self {
             RuleId::ProxyNetwork | RuleId::ShellNetwork | RuleId::DropsExecutable => Opens::EventProcessAndParent,
             RuleId::AutostartFetch | RuleId::AutostartWritable | RuleId::PreloadAdded | RuleId::RootKeyAdded => Opens::Item,
+            RuleId::FlaggedProcessEnded => Opens::EndAndProcess,
             _ => Opens::ProcessAndParent,
         }
     }
@@ -296,8 +310,10 @@ impl State {
 
     fn process(&mut self, index: u64, event: &ProcessEvent) -> Vec<Match> {
         if matches!(event.action, ProcessAction::Terminate) {
+            let ended = self.live.get(&event.pid).filter(|process| self.fired.iter().any(|(_, pid, started_at)| *pid == event.pid && *started_at == process.started_at));
+            let follow_up = ended.map(|process| Match { trigger: index, rule: RuleId::FlaggedProcessEnded, context: vec![process.index], pid: event.pid, started_at: process.started_at });
             self.forget(event.pid);
-            return Vec::new();
+            return follow_up.into_iter().collect();
         }
 
         let started_at = match (&event.action, self.live.get(&event.pid)) {
@@ -536,7 +552,25 @@ mod tests {
         let shell = run(100, 40, 0, "/bin/bash", &["deploy.sh"]);
         assert_eq!(rules(&mut state, &[shell.clone(), connect(101, 40), connect(102, 40), shell, connect(103, 40)]), vec!["shell-network"]);
 
-        assert_eq!(rules(&mut state, &[end(110, 40), run(120, 40, 0, "/bin/bash", &["deploy.sh"]), connect(121, 40)]), vec!["shell-network"]);
+        assert_eq!(rules(&mut state, &[end(110, 40), run(120, 40, 0, "/bin/bash", &["deploy.sh"]), connect(121, 40)]), vec!["flagged-process-ended", "shell-network"]);
+    }
+
+    #[test]
+    fn test_the_end_of_a_process_is_opened_only_when_that_process_had_a_finding() {
+        let mut state = State::default();
+        let found = matches(&mut state, 50, &[run(1, 20, 0, "/usr/sbin/nginx", &[]), run(2, 21, 20, "/bin/sh", &["-c", "id"]), run(3, 22, 0, "/usr/bin/sleep", &["60"]), end(4, 22), end(5, 21), end(6, 20), end(7, 21)]);
+        assert_eq!(
+            found,
+            vec![
+                Match { trigger: 51, rule: RuleId::ServerChild, context: vec![50], pid: 21, started_at: 2 },
+                Match { trigger: 54, rule: RuleId::FlaggedProcessEnded, context: vec![51], pid: 21, started_at: 2 },
+            ],
+            "the quiet process, the parent and an end reported twice open nothing"
+        );
+        assert!(state.fired.is_empty() && state.live.is_empty());
+
+        let reused = matches(&mut state, 60, &[run(8, 21, 0, "/usr/bin/sleep", &["60"]), end(9, 21)]);
+        assert!(reused.is_empty(), "a later process with the same pid carries no finding");
     }
 
     #[test]
@@ -656,12 +690,14 @@ mod tests {
         for rule in RuleId::ALL {
             assert_eq!(RuleId::from_id(rule.id()), Some(rule));
             assert_eq!(borsh::from_slice::<RuleId>(&borsh::to_vec(&rule).unwrap()).unwrap(), rule);
-            assert!(!rule.title().is_empty() && rule.technique().starts_with('T'));
+            assert!(!rule.title().is_empty());
+            assert_eq!(rule.technique().starts_with('T'), rule.level() != Level::Info, "a finding names its technique, a follow-up has none");
         }
         assert_eq!(RuleId::from_id("no-such-rule"), None);
         assert_eq!(RuleId::ShellNetwork.level(), Level::Medium);
         assert_eq!(RuleId::FetchAndRun.opens(), Opens::ProcessAndParent);
         assert_eq!(RuleId::ProxyNetwork.opens(), Opens::EventProcessAndParent);
         assert_eq!(RuleId::RootKeyAdded.opens(), Opens::Item);
+        assert_eq!((RuleId::FlaggedProcessEnded.level(), RuleId::FlaggedProcessEnded.opens()), (Level::Info, Opens::EndAndProcess));
     }
 }
