@@ -3,22 +3,48 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use ed25519_dalek::VerifyingKey;
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use zedr_ledger::{Hash, WindowHeader};
 use zedr_protocol::{
-    AgentRegistration, AgentStoppingEvent, EventBatch, StopReason, SystemEvent, UpgradeCommand,
-    MAX_EVENT_BATCH_BYTES, SIGNATURE_HEADER,
+    bytes_to_base64, chain_position_signing_bytes, hash_from_hex, hash_to_hex, window_ack_signing_bytes, AgentRegistration, AgentStoppingEvent,
+    ChainPosition, EventBatch, ProofSubmission, SealedEvent, SealedWindowAck, SealedWindowHeader, StopReason, SystemEvent, UpgradeCommand,
+    SIGNATURE_HEADER,
 };
 
 use crate::identity::{self, Identity};
 use crate::journal::CommandJournal;
+use crate::ledger::{Ledger, Release, SealedWindow};
 
 const REGISTRATION_TIMEOUT_SECS: u64 = 30;
 const STOP_NOTICE_TIMEOUT_SECS: u64 = 5;
+const LEDGER_DIR: &str = "ledger";
 
 pub struct HostDescription {
     pub hostname: String,
     pub os_version: String,
     pub agent_version: String,
+}
+
+/// Where the control server's copy of this agent's chain stands, as it signed it in answer to one window
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerPosition {
+    pub next_window: u64,
+    pub next_index: u64,
+    pub head: Hash,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WindowDelivery {
+    Accepted,
+    Refused(ServerPosition),
+    /// The control server read the window and will not take it as it is, sending it again changes nothing
+    Unacceptable,
+}
+
+struct Answered {
+    session: u64,
+    seq: u64,
+    response: minreq::Response,
 }
 
 pub struct ControlLink {
@@ -27,6 +53,7 @@ pub struct ControlLink {
     agent_id: String,
     identity: Mutex<Identity>,
     accepted_commands: Mutex<Result<CommandJournal, String>>,
+    deployment_key: Result<VerifyingKey, String>,
 }
 
 impl ControlLink {
@@ -48,7 +75,14 @@ impl ControlLink {
             agent_id,
             identity: Mutex::new(identity),
             accepted_commands: Mutex::new(CommandJournal::open(state_dir)),
+            deployment_key: crate::signing_public_key(),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn trusting(mut self, deployment_key: VerifyingKey) -> Self {
+        self.deployment_key = Ok(deployment_key);
+        self
     }
 
     pub fn agent_id(&self) -> &str {
@@ -77,7 +111,7 @@ impl ControlLink {
     }
 
     pub fn verify_upgrade_command(&self, command: &UpgradeCommand) -> Result<(), String> {
-        self.verify_upgrade_command_with_key(&crate::signing_public_key()?, command)
+        self.verify_upgrade_command_with_key(self.deployment_key.as_ref().map_err(String::clone)?, command)
     }
 
     pub(crate) fn verify_upgrade_command_with_key(
@@ -94,43 +128,104 @@ impl ControlLink {
         path: &str,
         timeout_secs: u64,
         build_body: impl FnOnce(u64, u64, String) -> Result<String, serde_json::Error>,
-    ) -> Result<minreq::Response, String> {
+    ) -> Result<Answered, String> {
         let mut identity = self.identity.lock()
             .map_err(|e| format!("Failed to lock identity: {}", e))?;
 
+        let session = identity.session();
         let seq = identity.next_seq();
-        let body = build_body(identity.session(), seq, identity.public_key_hex())
+        let body = build_body(session, seq, identity.public_key_hex())
             .map_err(|e| format!("Failed to encode request: {}", e))?;
         let signature = identity.sign(body.as_bytes());
 
-        minreq::post(format!("{}{}", self.server_url, path))
+        let response = minreq::post(format!("{}{}", self.server_url, path))
             .with_header("Content-Type", "application/json")
             .with_header(SIGNATURE_HEADER, signature)
             .with_body(body)
             .with_timeout(timeout_secs)
             .send()
-            .map_err(|e| format!("Request to {} failed: {}", path, e))
+            .map_err(|e| format!("Request to {} failed: {}", path, e))?;
+
+        Ok(Answered { session, seq, response })
     }
 
-    pub fn event_bytes_per_batch(&self) -> Result<usize, String> {
-        let envelope = serde_json::to_vec(&EventBatch {
-            agent_id: self.agent_id.clone(),
-            session: u64::MAX,
-            seq: u64::MAX,
-            events: Vec::new(),
-        })
-        .map_err(|e| format!("Failed to encode request: {}", e))?;
-
-        MAX_EVENT_BATCH_BYTES
-            .checked_sub(envelope.len())
-            .ok_or_else(|| "Agent id leaves no room for events in a batch".to_string())
-    }
-
+    /// Sends what the agent says about itself. What the sensor saw never goes this way, it leaves the endpoint sealed
     pub fn send_events(&self, events: Vec<SystemEvent>, timeout_secs: u64) -> Result<minreq::Response, String> {
+        let sensed = |event: &SystemEvent| {
+            matches!(event, SystemEvent::Process(_) | SystemEvent::File(_) | SystemEvent::Network(_) | SystemEvent::Persistence(_) | SystemEvent::Package(_))
+        };
+        if events.iter().any(sensed) {
+            return Err("Sensor events are not sent unsealed".to_string());
+        }
+
         let agent_id = self.agent_id.clone();
         self.post_signed("/api/events", timeout_secs, |session, seq, _| {
             serde_json::to_string(&EventBatch { agent_id, session, seq, events })
         })
+        .map(|answered| answered.response)
+    }
+
+    pub fn open_ledger(&self, now: u64) -> Result<Ledger, String> {
+        let identity = self.identity.lock()
+            .map_err(|e| format!("Failed to lock identity: {}", e))?;
+
+        Ledger::open(&self.state_dir.join(LEDGER_DIR), identity.key_hash(), identity.ledger_key(), now)
+    }
+
+    /// Hands one sealed window to the control server. Only an answer signed by the deployment moves the chain,
+    /// its acknowledgement of exactly this window or the position its copy of the chain stands at instead
+    pub fn send_window(&self, window: &SealedWindow, proving: bool, timeout_secs: u64) -> Result<WindowDelivery, String> {
+        let deployment_key = self.deployment_key.as_ref().map_err(String::clone)?;
+        let sent = &window.header;
+        let header = wire_header(sent);
+        let events = window.leaves.iter().zip(&window.sealed).map(|(leaf, sealed)| SealedEvent { leaf: hash_to_hex(leaf), sealed: bytes_to_base64(sealed) }).collect();
+        let releases = window.releases.iter().map(wire_release).collect();
+
+        let answered = self.post_signed("/api/windows", timeout_secs, |session, seq, _| {
+            serde_json::to_string(&zedr_protocol::SealedWindow { agent_id: self.agent_id.clone(), session, seq, header, events, releases, proving })
+        })?;
+        let body = answered.response.as_bytes();
+
+        match answered.response.status_code {
+            200 => {
+                let ack: SealedWindowAck = serde_json::from_slice(body)
+                    .map_err(|e| format!("Unreadable window acknowledgement: {}", e))?;
+                let signed = window_ack_signing_bytes(&self.agent_id, ack.window, ack.next_index, &ack.head)?;
+                verify_answer(deployment_key, &signed, &ack.signature, "Window acknowledgement")?;
+
+                if (ack.window, ack.next_index, hash_from_hex(&ack.head)?) != (sent.window, sent.next_index(), sent.head) {
+                    return Err(format!("Window acknowledgement is for another window than window {}", sent.window));
+                }
+                Ok(WindowDelivery::Accepted)
+            }
+            409 => {
+                let position: ChainPosition = serde_json::from_slice(body)
+                    .map_err(|e| format!("HTTP 409 without a chain position: {}", e))?;
+                let signed = chain_position_signing_bytes(&self.agent_id, answered.session, answered.seq, position.next_window, position.next_index, &position.head)?;
+                verify_answer(deployment_key, &signed, &position.signature, "Chain position")?;
+
+                Ok(WindowDelivery::Refused(ServerPosition {
+                    next_window: position.next_window,
+                    next_index: position.next_index,
+                    head: hash_from_hex(&position.head)?,
+                }))
+            }
+            422 => Ok(WindowDelivery::Unacceptable),
+            status => Err(format!("HTTP {}", status)),
+        }
+    }
+
+    pub fn send_proof(&self, receipt: &[u8], timeout_secs: u64) -> Result<(), String> {
+        let agent_id = self.agent_id.clone();
+        let receipt = bytes_to_base64(receipt);
+        let answered = self.post_signed("/api/proofs", timeout_secs, |session, seq, _| {
+            serde_json::to_string(&ProofSubmission { agent_id, session, seq, receipt })
+        })?;
+
+        match answered.response.status_code {
+            200 => Ok(()),
+            status => Err(format!("HTTP {}", status)),
+        }
     }
 
     pub fn register(&self, host: &HostDescription) -> Result<(), String> {
@@ -150,7 +245,8 @@ impl ControlLink {
                 session,
                 seq,
             })
-        })?;
+        })?
+        .response;
 
         if response.status_code != 200 {
             return Err(format!("Registration rejected: HTTP {}", response.status_code));
@@ -164,6 +260,39 @@ impl ControlLink {
         self.send_events(vec![event], STOP_NOTICE_TIMEOUT_SECS)
             .map(|response| response.status_code)
     }
+}
+
+fn wire_header(header: &WindowHeader) -> SealedWindowHeader {
+    SealedWindowHeader {
+        epoch: header.epoch,
+        window: header.window,
+        first_index: header.first_index,
+        count: header.count,
+        fresh: header.fresh,
+        gap: header.gap,
+        prev_head: hash_to_hex(&header.prev_head),
+        root: hash_to_hex(&header.root),
+        head: hash_to_hex(&header.head),
+    }
+}
+
+fn wire_release(release: &Release) -> zedr_protocol::Release {
+    zedr_protocol::Release {
+        trigger: release.found.trigger,
+        rule: release.found.rule.id().to_string(),
+        context: release.found.context.clone(),
+        pid: release.found.pid,
+        started_at: release.found.started_at,
+        openings: release.openings.iter().map(|opening| zedr_protocol::Opening { index: opening.index, seed: hash_to_hex(&opening.seed) }).collect(),
+    }
+}
+
+fn verify_answer(deployment_key: &VerifyingKey, signed: &[u8], signature: &[u8], what: &str) -> Result<(), String> {
+    let signature = Signature::from_slice(signature)
+        .map_err(|e| format!("{} carries no signature: {}", what, e))?;
+
+    deployment_key.verify(signed, &signature)
+        .map_err(|_| format!("{} is not signed by this deployment", what))
 }
 
 pub fn unix_now() -> u64 {

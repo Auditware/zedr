@@ -12,6 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub use zedr_protocol::*;
 
 pub mod journal;
+pub mod ledger;
 pub mod link;
 pub mod runtime;
 pub mod sensor;
@@ -160,6 +161,7 @@ pub mod identity {
 
     const IDENTITY_FILE: &str = "identity.json";
     const ENROLLMENT_FILE: &str = "enrollment.key";
+    const LEDGER_KEY_DOMAIN: &[u8] = b"zedr/ledger-master/v1";
 
     #[derive(Serialize, Deserialize)]
     struct StoredIdentity {
@@ -209,8 +211,20 @@ pub mod identity {
         }
 
         pub fn key_fingerprint(&self) -> String {
-            let digest = Sha256::digest(self.signing_key.verifying_key().to_bytes());
-            hex::encode(&digest[..16])
+            hex::encode(&self.key_hash()[..16])
+        }
+
+        /// What the ledger calls this agent, the control server takes the same hash of the key it pinned at registration
+        pub fn key_hash(&self) -> [u8; 32] {
+            Sha256::digest(self.signing_key.verifying_key().to_bytes()).into()
+        }
+
+        /// Secret the ledger derives every event's seed from, it never leaves the endpoint
+        pub fn ledger_key(&self) -> [u8; 32] {
+            let mut hasher = Sha256::new();
+            hasher.update(LEDGER_KEY_DOMAIN);
+            hasher.update(self.signing_key.to_bytes());
+            hasher.finalize().into()
         }
 
         pub fn session(&self) -> u64 {
@@ -756,6 +770,54 @@ mod tests {
         use sha2::Digest;
         let key_bytes = hex::decode(first.public_key_hex()).unwrap();
         assert_eq!(first.key_fingerprint(), hex::encode(&sha2::Sha256::digest(&key_bytes)[..16]));
+
+        std::fs::remove_dir_all(&a).unwrap();
+        std::fs::remove_dir_all(&b).unwrap();
+    }
+
+    fn stored_seed(dir: &std::path::Path) -> [u8; 32] {
+        let stored: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("identity.json")).unwrap()).unwrap();
+        hex::decode(stored["seed"].as_str().unwrap()).unwrap().try_into().unwrap()
+    }
+
+    #[test]
+    fn test_key_hash_is_the_sha256_of_the_public_key_and_stable_per_identity() {
+        let a = test_dir("key-hash-a");
+        let b = test_dir("key-hash-b");
+        let first = identity::Identity::load_or_create(&a).unwrap();
+        let restarted = identity::Identity::load_or_create(&a).unwrap();
+        let other = identity::Identity::load_or_create(&b).unwrap();
+
+        use sha2::Digest;
+        let expected: [u8; 32] = sha2::Sha256::digest(hex::decode(first.public_key_hex()).unwrap()).into();
+        assert_eq!(first.key_hash(), expected);
+        assert_eq!(first.key_hash(), restarted.key_hash());
+        assert_ne!(first.key_hash(), other.key_hash());
+        assert_eq!(first.key_fingerprint(), hex::encode(&first.key_hash()[..16]));
+
+        std::fs::remove_dir_all(&a).unwrap();
+        std::fs::remove_dir_all(&b).unwrap();
+    }
+
+    #[test]
+    fn test_ledger_key_is_stable_per_identity_and_is_neither_the_seed_nor_the_key_hash() {
+        let a = test_dir("ledger-key-a");
+        let b = test_dir("ledger-key-b");
+        let first = identity::Identity::load_or_create(&a).unwrap();
+        let restarted = identity::Identity::load_or_create(&a).unwrap();
+        let other = identity::Identity::load_or_create(&b).unwrap();
+
+        assert_eq!(first.ledger_key(), restarted.ledger_key());
+        assert_ne!(first.ledger_key(), other.ledger_key());
+        assert_ne!(first.ledger_key(), stored_seed(&a), "the secret that signs requests is not the one that seals events");
+        assert_ne!(first.ledger_key(), first.key_hash());
+
+        use sha2::Digest;
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(b"zedr/ledger-master/v1");
+        hasher.update(stored_seed(&a));
+        let expected: [u8; 32] = hasher.finalize().into();
+        assert_eq!(first.ledger_key(), expected);
 
         std::fs::remove_dir_all(&a).unwrap();
         std::fs::remove_dir_all(&b).unwrap();

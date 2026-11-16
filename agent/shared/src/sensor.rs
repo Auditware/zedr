@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 
 use zedr_protocol::{
@@ -184,6 +184,15 @@ impl<S: Source> Sensor<S> {
         self.packages.tracked()
     }
 
+    /// Forgets what was reported, so the next poll reports everything again as the first one after a start does
+    pub fn forget(&mut self) {
+        self.processes.clear();
+        self.open_sockets.clear();
+        self.reported_connections.clear();
+        self.persistence = Inventory::new(self.persistence.interval);
+        self.packages = Inventory::new(self.packages.interval);
+    }
+
     pub fn poll(&mut self, now: u64) -> Observation {
         let mut observation = Observation::default();
 
@@ -367,78 +376,6 @@ fn package_event(change: Change<PackageKey, String>, timestamp: u64) -> SystemEv
         architecture,
         previous_version: change.previous,
     })
-}
-
-const SEPARATOR_BYTES: usize = 1;
-
-struct Queued {
-    event: SystemEvent,
-    encoded_bytes: usize,
-}
-
-pub struct Outbox {
-    events: VecDeque<Queued>,
-    limit: usize,
-    batch_bytes: usize,
-    dropped: u64,
-    unsendable: u64,
-}
-
-impl Outbox {
-    pub fn new(limit: usize, batch_bytes: usize) -> Self {
-        Self { events: VecDeque::new(), limit, batch_bytes, dropped: 0, unsendable: 0 }
-    }
-
-    pub fn push(&mut self, events: Vec<SystemEvent>) {
-        for event in events {
-            match serde_json::to_vec(&event) {
-                Ok(encoded) if encoded.len() + SEPARATOR_BYTES <= self.batch_bytes => {
-                    self.events.push_back(Queued { event, encoded_bytes: encoded.len() });
-                }
-                _ => self.unsendable += 1,
-            }
-        }
-
-        while self.events.len() > self.limit {
-            self.events.pop_front();
-            self.dropped += 1;
-        }
-    }
-
-    pub fn next_batch(&self, size: usize) -> Vec<SystemEvent> {
-        let mut batch = Vec::new();
-        let mut room = self.batch_bytes;
-
-        for queued in self.events.iter().take(size) {
-            match room.checked_sub(queued.encoded_bytes + SEPARATOR_BYTES) {
-                Some(left) => room = left,
-                None => break,
-            }
-            batch.push(queued.event.clone());
-        }
-
-        batch
-    }
-
-    pub fn confirm(&mut self, sent: usize) {
-        self.events.drain(..sent.min(self.events.len()));
-    }
-
-    pub fn take_dropped(&mut self) -> u64 {
-        std::mem::take(&mut self.dropped)
-    }
-
-    pub fn take_unsendable(&mut self) -> u64 {
-        std::mem::take(&mut self.unsendable)
-    }
-
-    pub fn len(&self) -> usize {
-        self.events.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.events.is_empty()
-    }
 }
 
 #[cfg(test)]
@@ -1152,108 +1089,28 @@ mod tests {
         assert_eq!(packages(&recovered), vec![package(InventoryAction::Changed, "openssl", "3.0.13-0ubuntu3.5", "amd64", Some("3.0.13-0ubuntu3"))]);
     }
 
-    fn heartbeat(timestamp: u64) -> SystemEvent {
-        SystemEvent::Heartbeat(zedr_protocol::HeartbeatEvent { timestamp })
-    }
-
-    fn timestamps(events: &[SystemEvent]) -> Vec<u64> {
-        events
-            .iter()
-            .map(|event| match event {
-                SystemEvent::Heartbeat(heartbeat) => heartbeat.timestamp,
-                _ => 0,
-            })
-            .collect()
-    }
-
-    const ROOMY: usize = 1024 * 1024;
-
     #[test]
-    fn test_outbox_keeps_unsent_events_in_order_and_drops_the_oldest_when_full() {
-        let mut outbox = Outbox::new(5, ROOMY);
-        outbox.push((1..=4).map(heartbeat).collect());
+    fn test_a_sensor_that_forgot_reports_everything_again_as_after_a_start() {
+        let source = FakeSource::default();
+        source.start(1, 0, 1_000, "/sbin/init");
+        source.start(700, 1, 1_500, "/usr/bin/bash");
+        source.connect(11, &[700], "203.0.113.7:4444");
+        source.install(unit("alpha.service", "/usr/bin/alpha", "aa"));
+        source.install_package("openssl", "3.0.13-0ubuntu3", "amd64");
+        let mut sensor = sensor(&source);
 
-        assert_eq!(timestamps(&outbox.next_batch(3)), vec![1, 2, 3]);
-        assert_eq!(timestamps(&outbox.next_batch(3)), vec![1, 2, 3], "a batch stays queued until it is confirmed");
+        let first = sensor.poll(2_000);
+        assert_eq!((processes(&first).len(), connections(&first).len(), persistence(&first).len(), packages(&first).len()), (2, 1, 1, 1));
+        assert!(sensor.poll(2_005).events.is_empty());
 
-        outbox.confirm(3);
-        assert_eq!(timestamps(&outbox.next_batch(3)), vec![4]);
+        sensor.forget();
+        assert_eq!((sensor.tracked_processes(), sensor.tracked_persistence(), sensor.tracked_packages()), (0, 0, 0));
+        let again = sensor.poll(2_010);
+        assert_eq!(processes(&again), processes(&first), "running processes are reported as started, with their start time");
+        assert_eq!(connections(&again), connections(&first), "an open connection is reported inside the window that would hold it back");
+        assert_eq!(changes(&again), vec![(InventoryAction::Present, "alpha.service".to_string())], "the inventories are read at once, not when their interval is over");
+        assert_eq!(packages(&again), vec![package(InventoryAction::Present, "openssl", "3.0.13-0ubuntu3", "amd64", None)]);
 
-        outbox.push((5..=10).map(heartbeat).collect());
-        assert_eq!(outbox.len(), 5);
-        assert_eq!(timestamps(&outbox.next_batch(10)), vec![6, 7, 8, 9, 10]);
-        assert_eq!(outbox.take_dropped(), 2);
-        assert_eq!(outbox.take_dropped(), 0);
-
-        outbox.confirm(99);
-        assert!(outbox.is_empty());
-    }
-
-    fn started(pid: u32, argument: &str) -> SystemEvent {
-        process_event(
-            pid,
-            &ProcessDetails {
-                ppid: 1,
-                uid: 1000,
-                executable_path: "/usr/bin/program".to_string(),
-                command_line: vec![argument.to_string()],
-                started_at: 1_000,
-            },
-            ProcessAction::Create,
-            1_000,
-        )
-    }
-
-    fn pids(events: &[SystemEvent]) -> Vec<u32> {
-        events
-            .iter()
-            .map(|event| match event {
-                SystemEvent::Process(process) => process.pid,
-                other => panic!("unexpected event {:?}", other),
-            })
-            .collect()
-    }
-
-    fn encoded_together(events: &[SystemEvent]) -> usize {
-        serde_json::to_vec(events).unwrap().len() - "[]".len()
-    }
-
-    #[test]
-    fn test_outbox_fills_a_batch_by_what_the_events_take_when_encoded() {
-        let control_characters = "\u{1}".repeat(4096);
-        let one = encoded_together(&[started(1, &control_characters)]);
-        assert!(one > 6 * 4096, "a control character takes six bytes on the wire");
-
-        let mut outbox = Outbox::new(100, 3 * (one + SEPARATOR_BYTES));
-        outbox.push((1..=5).map(|pid| started(pid, &control_characters)).collect());
-        outbox.push((6..=9).map(|pid| started(pid, "short")).collect());
-
-        let first = outbox.next_batch(200);
-        assert_eq!(pids(&first), vec![1, 2, 3], "three such events are all that fits");
-        assert!(encoded_together(&first) <= 3 * (one + SEPARATOR_BYTES));
-        assert_eq!(pids(&outbox.next_batch(2)), vec![1, 2], "the count still limits a batch that has room");
-
-        outbox.confirm(first.len());
-        assert_eq!(pids(&outbox.next_batch(200)), vec![4, 5, 6, 7, 8, 9], "order is kept and smaller events fill the room that is left");
-        assert_eq!(outbox.take_unsendable(), 0);
-    }
-
-    #[test]
-    fn test_outbox_leaves_out_only_the_event_that_fits_in_no_batch() {
-        let fits_exactly = started(2, "exactly");
-        let room = encoded_together(std::slice::from_ref(&fits_exactly)) + SEPARATOR_BYTES;
-        let mut outbox = Outbox::new(100, room);
-
-        outbox.push(vec![started(1, "a"), fits_exactly, started(3, "exactly!"), started(4, "b")]);
-
-        assert_eq!(outbox.len(), 3);
-        assert_eq!(outbox.take_unsendable(), 1);
-        assert_eq!(outbox.take_unsendable(), 0);
-        assert_eq!(pids(&outbox.next_batch(200)), vec![1]);
-        outbox.confirm(1);
-        assert_eq!(pids(&outbox.next_batch(200)), vec![2], "an event as large as the room goes alone");
-        outbox.confirm(1);
-        assert_eq!(pids(&outbox.next_batch(200)), vec![4]);
-        assert_eq!(outbox.take_dropped(), 0);
+        assert!(sensor.poll(2_015).events.is_empty());
     }
 }
