@@ -747,11 +747,15 @@ test('events: the fleet totals, lanes of what was reported, and a drag that cuts
   await settle(page, 600)
   await run.shot('lanes')
 
-  await over.getByRole('button', { name: /^Heartbeat/ }).click()
   await expect(over.getByRole('button', { name: /^Heartbeat/ })).toHaveAttribute('aria-pressed', 'false')
-  await expect(page).toHaveURL(/show=/)
+  await expect(page).not.toHaveURL(/show=/)
   await expect(page.locator('[data-event]').first()).toBeVisible()
   await expect(page.locator('[data-event="heartbeat"]')).toHaveCount(0)
+  await over.getByRole('button', { name: /^Heartbeat/ }).click()
+  await expect(page).toHaveURL(/show=/)
+  await expect(page.locator('[data-event="heartbeat"]').first()).toBeVisible()
+  await over.getByRole('button', { name: /^Heartbeat/ }).click()
+  await expect(page).not.toHaveURL(/show=/)
 
   const box = (await lanes.boundingBox())!
   await drag(page, { x: box.x + box.width * 0.5, y: box.y + 20 }, box.width * 0.49, 0)

@@ -80,6 +80,9 @@ type LanesProps = {
   onPeriod: (period: Period | null) => void
 }
 
+// Lanes the list leaves out until they are asked for: an endpoint beats every 30 seconds, and those rows would bury everything else
+const QUIET: ReadonlySet<string> = new Set(['heartbeat'])
+
 function Lanes({ lanes, histogram, frame, range, enabled, period, onToggle, onRange, onPeriod }: LanesProps) {
   const [tracks, { width }] = useSize<HTMLDivElement>()
   const [hover, setHover] = useState<number | null>(null)
@@ -223,7 +226,7 @@ export function Events() {
   const categories = useMemo(() => CATEGORIES.filter((category) => admin || category.id !== 'audit'), [admin])
   const enabled = useMemo(() => {
     const wanted = search.show?.split(',')
-    return new Set(categories.map((category) => category.id).filter((id) => !wanted || wanted.includes(id)))
+    return new Set(categories.map((category) => category.id).filter((id) => (wanted ? wanted.includes(id) : !QUIET.has(id))))
   }, [search.show, categories])
   const needle = (search.q ?? '').trim().toLowerCase()
   const range: Range = search.range ?? '1h'
@@ -361,8 +364,9 @@ export function Events() {
           const next = new Set(enabled)
           if (next.has(category)) next.delete(category)
           else next.add(category)
+          const usual = categories.every((one) => next.has(one.id) !== QUIET.has(one.id))
           void navigate({
-            search: (previous) => ({ ...previous, show: next.size === categories.length ? undefined : [...next].join(',') }),
+            search: (previous) => ({ ...previous, show: usual ? undefined : [...next].join(',') }),
             replace: true,
           })
         }}
