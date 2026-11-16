@@ -1101,6 +1101,7 @@ mod tests {
             "removed and never installed packages are left out, a description is not read as fields, the last entry needs no empty line"
         );
         assert!(packages::parse("".as_bytes(), PackageManager::Dpkg).unwrap().is_empty());
+        assert!(packages::parse(DPKG_STATUS.as_bytes(), PackageManager::Homebrew).unwrap_err().contains("not a package database of Linux"));
     }
 
     #[test]

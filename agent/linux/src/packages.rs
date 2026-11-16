@@ -55,6 +55,11 @@ impl Entry {
 }
 
 pub fn parse(mut database: impl BufRead, manager: PackageManager) -> Result<Vec<PackageItem>, String> {
+    let read_line: fn(&mut Entry, &str) = match manager {
+        PackageManager::Dpkg => Entry::read_dpkg,
+        PackageManager::Apk => Entry::read_apk,
+        other => return Err(format!("{:?} is not a package database of Linux", other)),
+    };
     let mut packages = Vec::new();
     let mut entry = Entry::default();
     let mut line = Vec::new();
@@ -73,10 +78,7 @@ pub fn parse(mut database: impl BufRead, manager: PackageManager) -> Result<Vec<
             continue;
         }
 
-        match manager {
-            PackageManager::Dpkg => entry.read_dpkg(text),
-            PackageManager::Apk => entry.read_apk(text),
-        }
+        read_line(&mut entry, text);
     }
 }
 

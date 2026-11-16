@@ -434,6 +434,12 @@ pub fn kind_name(kind: PersistenceKind) -> &'static str {
         PersistenceKind::LdPreload => "ld_preload",
         PersistenceKind::RcLocal => "rc_local",
         PersistenceKind::InitScript => "init_script",
+        PersistenceKind::LaunchDaemon => "launch_daemon",
+        PersistenceKind::LaunchAgent => "launch_agent",
+        PersistenceKind::RunKey => "run_key",
+        PersistenceKind::WindowsService => "windows_service",
+        PersistenceKind::ScheduledTask => "scheduled_task",
+        PersistenceKind::StartupFolder => "startup_folder",
     }
 }
 

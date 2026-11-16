@@ -154,6 +154,18 @@ pub enum PersistenceKind {
     LdPreload,
     RcLocal,
     InitScript,
+    /// A launchd job that starts at boot, from /Library/LaunchDaemons
+    LaunchDaemon,
+    /// A launchd job that starts at sign-in, from a LaunchAgents folder
+    LaunchAgent,
+    /// A Run or RunOnce value in the Windows registry
+    RunKey,
+    /// A Windows service
+    WindowsService,
+    /// A Windows scheduled task
+    ScheduledTask,
+    /// A file in a Windows Startup folder
+    StartupFolder,
 }
 
 /// One installed package, and what happened to it
@@ -176,6 +188,14 @@ pub struct PackageEvent {
 pub enum PackageManager {
     Dpkg,
     Apk,
+    /// A Homebrew formula or cask
+    Homebrew,
+    /// An application bundle in an Applications folder of macOS
+    MacApp,
+    /// A receipt the macOS installer kept
+    MacPkg,
+    /// A program the Windows registry lists as installed
+    WindowsInstalled,
 }
 
 /// Sent by the agent when the service manager asks it to stop
@@ -613,6 +633,12 @@ mod tests {
             (PersistenceKind::LdPreload, "ld_preload"),
             (PersistenceKind::RcLocal, "rc_local"),
             (PersistenceKind::InitScript, "init_script"),
+            (PersistenceKind::LaunchDaemon, "launch_daemon"),
+            (PersistenceKind::LaunchAgent, "launch_agent"),
+            (PersistenceKind::RunKey, "run_key"),
+            (PersistenceKind::WindowsService, "windows_service"),
+            (PersistenceKind::ScheduledTask, "scheduled_task"),
+            (PersistenceKind::StartupFolder, "startup_folder"),
         ];
         for (kind, name) in kinds {
             assert_eq!(serde_json::to_value(kind).unwrap(), name);
@@ -658,6 +684,14 @@ mod tests {
         );
 
         assert_eq!(serde_json::to_value(PackageManager::Apk).unwrap(), "apk");
+        for (manager, name) in [
+            (PackageManager::Homebrew, "homebrew"),
+            (PackageManager::MacApp, "mac_app"),
+            (PackageManager::MacPkg, "mac_pkg"),
+            (PackageManager::WindowsInstalled, "windows_installed"),
+        ] {
+            assert_eq!(serde_json::to_value(manager).unwrap(), name);
+        }
         assert_eq!(serde_json::from_value::<PackageManager>(serde_json::json!("dpkg")).unwrap(), PackageManager::Dpkg);
     }
 

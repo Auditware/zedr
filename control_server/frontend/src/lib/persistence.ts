@@ -20,7 +20,22 @@ export type AutostartItem = {
   finding: AutostartFinding | null
 }
 
-export const KIND_ORDER = ['ld_preload', 'authorized_key', 'cron', 'systemd_timer', 'systemd_unit', 'shell_profile', 'rc_local', 'init_script']
+export const KIND_ORDER = [
+  'ld_preload',
+  'authorized_key',
+  'cron',
+  'scheduled_task',
+  'systemd_timer',
+  'systemd_unit',
+  'launch_daemon',
+  'windows_service',
+  'launch_agent',
+  'run_key',
+  'startup_folder',
+  'shell_profile',
+  'rc_local',
+  'init_script',
+]
 
 export const KIND_LABEL: Record<string, string> = {
   ld_preload: 'Preloaded libraries',
@@ -31,14 +46,20 @@ export const KIND_LABEL: Record<string, string> = {
   shell_profile: 'Shell profiles',
   rc_local: 'rc.local',
   init_script: 'Init scripts',
+  launch_daemon: 'Launch daemons',
+  launch_agent: 'Launch agents',
+  run_key: 'Run keys',
+  windows_service: 'Windows services',
+  scheduled_task: 'Scheduled tasks',
+  startup_folder: 'Startup folders',
 }
 
 export type Moment = 'boot' | 'schedule' | 'signin' | 'remote' | 'program'
 
 export const MOMENTS: { id: Moment; label: string; short: string; kinds: string[] }[] = [
-  { id: 'boot', label: 'At boot', short: 'Boot', kinds: ['systemd_unit', 'rc_local', 'init_script'] },
-  { id: 'schedule', label: 'On a schedule', short: 'Timed', kinds: ['systemd_timer', 'cron'] },
-  { id: 'signin', label: 'At sign-in', short: 'Sign-in', kinds: ['shell_profile'] },
+  { id: 'boot', label: 'At boot', short: 'Boot', kinds: ['systemd_unit', 'rc_local', 'init_script', 'launch_daemon', 'windows_service'] },
+  { id: 'schedule', label: 'On a schedule', short: 'Timed', kinds: ['systemd_timer', 'cron', 'scheduled_task'] },
+  { id: 'signin', label: 'At sign-in', short: 'Sign-in', kinds: ['shell_profile', 'launch_agent', 'run_key', 'startup_folder'] },
   { id: 'remote', label: 'Remote access', short: 'Remote', kinds: ['authorized_key'] },
   { id: 'program', label: 'In every program', short: 'Preload', kinds: ['ld_preload'] },
 ]
