@@ -15,7 +15,6 @@ pub const MAX_EVENT_BATCH_BYTES: usize = 2 * 1024 * 1024;
 
 const UPGRADE_COMMAND_PURPOSE: &str = "zedr-upgrade-command-v1";
 const WINDOW_ACK_PURPOSE: &str = "zedr-window-ack-v1";
-const CHAIN_POSITION_PURPOSE: &str = "zedr-chain-position-v1";
 const WINDOW_REFUSAL_PURPOSE: &str = "zedr-window-refusal-v1";
 
 /// Agent registration request
@@ -462,34 +461,6 @@ pub fn window_ack_signing_bytes(agent_id: &str, window: u64, next_index: u64, he
         .map_err(|e| format!("Failed to encode window acknowledgement: {}", e))
 }
 
-/// Where the control server's copy of an agent's chain stands, its answer to a window that does not continue it.
-/// It is signed for the one request it answers, so nobody else can make an agent start over from an old position
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "utoipa", derive(ToSchema))]
-pub struct ChainPosition {
-    pub next_window: u64,
-    pub next_index: u64,
-    pub head: String,
-    pub signature: Vec<u8>,
-}
-
-#[derive(Serialize)]
-struct ChainPositionPayload<'a> {
-    purpose: &'a str,
-    agent_id: &'a str,
-    session: u64,
-    seq: u64,
-    next_window: u64,
-    next_index: u64,
-    head: &'a str,
-}
-
-/// Exact bytes signed by the server and verified by the agent for a chain position
-pub fn chain_position_signing_bytes(agent_id: &str, session: u64, seq: u64, next_window: u64, next_index: u64, head: &str) -> Result<Vec<u8>, String> {
-    serde_json::to_vec(&ChainPositionPayload { purpose: CHAIN_POSITION_PURPOSE, agent_id, session, seq, next_window, next_index, head })
-        .map_err(|e| format!("Failed to encode chain position: {}", e))
-}
-
 /// The control server's answer to a window it will not take: where its copy of the agent's chain stands.
 /// It is signed for the one request it answers, so nobody else can make an agent start over, and never from an old position
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -799,17 +770,6 @@ mod tests {
         assert_ne!(bytes, window_ack_signing_bytes("agent-1", 5, 41, &head).unwrap());
         assert_ne!(bytes, window_ack_signing_bytes("agent-1", 5, 40, &"cd".repeat(32)).unwrap());
         assert_ne!(bytes, upgrade_command_signing_bytes("agent-1", "5", "40", 0).unwrap(), "an acknowledgement is never a command");
-    }
-
-    #[test]
-    fn test_chain_position_signing_bytes_bind_the_request_they_answer() {
-        let head = "ab".repeat(32);
-        let bytes = chain_position_signing_bytes("agent-1", 3, 9, 5, 40, &head).unwrap();
-        assert_ne!(bytes, chain_position_signing_bytes("agent-1", 3, 10, 5, 40, &head).unwrap(), "a position signed for an earlier request is not valid for this one");
-        assert_ne!(bytes, chain_position_signing_bytes("agent-1", 4, 9, 5, 40, &head).unwrap());
-        assert_ne!(bytes, chain_position_signing_bytes("agent-2", 3, 9, 5, 40, &head).unwrap());
-        assert_ne!(bytes, chain_position_signing_bytes("agent-1", 3, 9, 6, 40, &head).unwrap());
-        assert_ne!(bytes, window_ack_signing_bytes("agent-1", 5, 40, &head).unwrap(), "a position is never an acknowledgement");
     }
 
     #[test]
