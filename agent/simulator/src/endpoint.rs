@@ -46,6 +46,8 @@ pub struct Endpoint {
     link: ControlLink,
     ledger: Ledger,
     prover: Option<PathBuf>,
+    /// Sends the journal of the rule run where the receipt goes, see `Scenario::stand_in_proofs`
+    states_journals: bool,
     withheld: Vec<RuleId>,
     stays_up: bool,
     /// Time of the sensor's last look
@@ -111,7 +113,8 @@ impl Endpoint {
             hostname: described.hostname.clone(),
             link,
             ledger,
-            prover: scenario.prover.clone().filter(|_| described.proving),
+            prover: scenario.prover.clone().filter(|_| described.proving && !scenario.stand_in_proofs),
+            states_journals: scenario.stand_in_proofs && described.proving,
             withheld: described.withheld()?,
             stays_up: described.stays_up,
             clock: started,
@@ -199,8 +202,12 @@ impl Endpoint {
     }
 
     /// Sends the sealed windows in order, as the agent does, and follows a refusal the deployment signed onto the position it names
+    fn proves(&self) -> bool {
+        self.prover.is_some() || self.states_journals
+    }
+
     fn deliver(&mut self, now: u64) -> Result<(), String> {
-        let proving = self.prover.is_some();
+        let proving = self.proves();
         while let Some(mut window) = self.ledger.next_undelivered()? {
             withhold_releases(&mut window, &self.withheld);
             let delivery = {
@@ -235,7 +242,7 @@ impl Endpoint {
 
     /// Whether nothing waits for this endpoint's first proof any more: it has no prover, made one, failed at one, or has nothing to prove
     pub fn first_proof_settled(&self) -> bool {
-        self.prover.is_none() || self.proofs > 0 || self.proof_failed || (self.proof.is_none() && self.ledger.unproven() == 0)
+        !self.proves() || self.proofs > 0 || self.proof_failed || (self.proof.is_none() && self.ledger.unproven() == 0)
     }
 
     pub fn is_proving(&self) -> bool {
@@ -245,12 +252,20 @@ impl Endpoint {
     /// Moves proving one step without waiting for the prover, as the agent does: builds the input of the next proof from the ledger,
     /// runs the prover on it when one may start, and hands the receipt to the control server. True once a proof reached the server in this step
     pub fn prove(&mut self, may_start: bool) -> Result<bool, String> {
-        let Some(program) = self.prover.clone() else {
-            return Ok(false);
-        };
         if Instant::now() < self.prove_not_before {
             return Ok(false);
         }
+        if self.states_journals {
+            let stated = self.state_journal();
+            if stated.is_err() {
+                self.proof_failed = true;
+                self.prove_not_before = Instant::now() + PROOF_RETRY_AFTER;
+            }
+            return stated;
+        }
+        let Some(program) = self.prover.clone() else {
+            return Ok(false);
+        };
 
         let stepped = match self.proof.take() {
             Some(proof) => self.finish_proof(proof),
@@ -263,6 +278,22 @@ impl Endpoint {
             self.prove_not_before = Instant::now() + PROOF_RETRY_AFTER;
         }
         stepped
+    }
+
+    /// The stand-in for a proof: runs the rules over the next delivered windows and sends what they said, with nothing that proves it.
+    /// It costs no more than the rules do, so it does not rest
+    fn state_journal(&mut self) -> Result<bool, String> {
+        let Some(input) = self.ledger.proof_input(DEFAULT_PROOF_EVENTS as usize)? else {
+            return Ok(false);
+        };
+        let (journal, state) = proof::run(input)?;
+        {
+            let _turn = one_at_a_time();
+            self.link.send_proof(&journal.to_bytes(), PROOF_TIMEOUT_SECS)?;
+        }
+        self.ledger.proven(&journal, state)?;
+        self.proofs += 1;
+        Ok(true)
     }
 
     fn start_proof(&mut self, program: &Path) -> Result<(), String> {

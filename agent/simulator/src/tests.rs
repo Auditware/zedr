@@ -220,6 +220,39 @@ fn test_an_endpoint_the_server_does_not_enroll_stops_the_run_and_is_named() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+#[test]
+fn test_on_a_test_tenant_an_endpoint_states_its_journal_where_a_receipt_goes_and_runs_no_prover() {
+    use zedr_protocol::bytes_from_base64;
+    use zedr_rules::proof::Journal;
+    use zedr_rules::RuleId;
+
+    let server = StubServer::start(200);
+    let dir = state_dir("stated");
+    let mut proving = web_server();
+    proving["proving"] = serde_json::json!(true);
+    let mut without = web_server();
+    without["hostname"] = serde_json::json!("WEB-SRV-05");
+    let mut played = scenario(&server, &dir.join("agents"), vec![proving, without]);
+    played.stand_in_proofs = true;
+    played.prover = Some(dir.join("no-such-prover"));
+
+    let mut said = Vec::new();
+    fleet::run(played, &mut said).unwrap();
+    assert_eq!(String::from_utf8(said).unwrap(), "READY 2 endpoints\nPROVEN 1 endpoints\n");
+
+    assert!(server.windows_of(&agent_id(&server, "WEB-SRV-04")).iter().all(|window| window.proving));
+    assert!(server.windows_of(&agent_id(&server, "WEB-SRV-05")).iter().all(|window| !window.proving), "an endpoint that is not marked as proving states nothing");
+
+    let stated = server.sent_to("/api/proofs");
+    assert_eq!(stated.len(), 1);
+    assert_eq!(stated[0]["agent_id"], agent_id(&server, "WEB-SRV-04"));
+    let journal = Journal::from_bytes(&bytes_from_base64(stated[0]["receipt"].as_str().unwrap()).unwrap()).expect("what is sent is the journal itself");
+    assert_eq!((journal.first_window, journal.last_window, journal.next_index), (0, 3, 2));
+    assert_eq!(journal.matches.iter().map(|found| found.rule).collect::<Vec<_>>(), vec![RuleId::ServerChild]);
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 #[cfg(unix)]
 #[test]
 fn test_the_dishonest_endpoint_seals_its_window_without_the_match_and_its_proof_still_tells_it() {

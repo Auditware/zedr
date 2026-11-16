@@ -18,6 +18,10 @@ pub struct Scenario {
     /// The zedr-prover binary. Without one no endpoint proves, whatever it is marked as
     #[serde(default)]
     pub prover: Option<PathBuf>,
+    /// For a test tenant: a proving endpoint sends the journal of its rule run where the receipt goes and runs no prover.
+    /// Only the server of a test tenant takes that, a control server refuses it as a receipt that does not verify
+    #[serde(default)]
+    pub stand_in_proofs: bool,
     /// Seconds between the heartbeats of an endpoint that stays up after its timeline. Without it the simulator ends once every timeline is played
     #[serde(default)]
     pub heartbeat_seconds: Option<u64>,
