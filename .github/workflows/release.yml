@@ -14,14 +14,77 @@ env:
   CHART_REPO: oci://ghcr.io/forefy/charts
 
 jobs:
-  image:
+  guest:
     if: github.repository == 'forefy/zedr'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Provide the env file the Makefile includes
+        run: cp secrets/.env.local.example secrets/.env.local
+
+      - name: Install the RISC Zero build tool
+        run: |
+          curl -L https://risczero.com/install | bash
+          "${HOME}/.risc0/bin/rzup" install cargo-risczero 3.1.0
+          echo "${HOME}/.risc0/bin" >> "${GITHUB_PATH}"
+
+      - name: Build the rule program
+        run: make guest
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: guest
+          path: prover/guest/target/riscv32im-risc0-zkvm-elf/docker/zedr-guest.bin
+          if-no-files-found: error
+
+  binaries:
+    needs: guest
+    strategy:
+      matrix:
+        include:
+          - arch: x64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Provide the env file the Makefile includes
+        run: cp secrets/.env.local.example secrets/.env.local
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: guest
+          path: prover/guest/target/riscv32im-risc0-zkvm-elf/docker
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build the agent and the prover
+        run: make build-linux-binary build-linux-prover LINUX_ARCHES=${{ matrix.arch }}
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: binaries-${{ matrix.arch }}
+          path: control_server/backend/binaries
+          if-no-files-found: error
+
+  image:
+    needs: binaries
     runs-on: ubuntu-latest
     outputs:
       digest: ${{ steps.build.outputs.digest }}
       version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Take the agent and prover of both architectures into the build context
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: binaries-*
+          path: control_server/backend/binaries
+          merge-multiple: true
 
       - name: Derive the version from the tag
         id: version

@@ -524,7 +524,8 @@ deploy-lint: chart-lint tf-validate ## Lint every deployment artifact
 	@shellcheck --shell sh control_server/backend/src/api/install.sh deploy/agents/ec2/user-data.sh deploy/agents/container/entrypoint.sh
 
 .PHONY: image-build
-image-build: ## Build the control server image locally
+image-build: ## Build the control server image locally, with the agents and provers the build-linux targets put under control_server/backend/binaries
+	@ls control_server/backend/binaries/v*/*/*/zedr-agent* >/dev/null 2>&1 || (echo "ERROR: no agent to serve, run 'make build-linux-binary' first, and 'make guest build-linux-prover' for endpoints that prove" && exit 1)
 	@docker build -t zedr-control-server:dev .
 
 .DEFAULT_GOAL := help
