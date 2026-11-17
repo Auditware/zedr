@@ -1,3 +1,4 @@
+use crate::collector::WindowsSource;
 use std::env;
 use std::ffi::OsString;
 use std::fs::OpenOptions;
@@ -76,7 +77,7 @@ fn get_log_path() -> String {
 pub fn log(msg: &str) {
     let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
 
-    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&get_log_path()) {
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(get_log_path()) {
         let _ = writeln!(file, "[{}] {}", timestamp, msg);
     }
 }
@@ -150,11 +151,13 @@ pub fn run_service_loop(arguments: Vec<std::ffi::OsString>) -> Result<(), Box<dy
         HostDescription { hostname, os_version: get_windows_version(), agent_version: env!("CARGO_PKG_VERSION").to_string() },
     ));
 
+    runtime.start_sensor(WindowsSource::new(), runtime::sensor_intervals());
+
     match runtime.run_until_stopped(&shutdown_rx, runtime::heartbeat_interval()) {
         Some(reason) => {
             log(&format!("Stop signal received: {:?}", reason));
             if !UPGRADE_HANDOFF.load(Ordering::SeqCst) {
-                notify_stopping(reason);
+                runtime.notify_stopping(reason);
             }
         }
         None => log("Stop channel closed"),
@@ -203,8 +206,7 @@ fn get_windows_version() -> String {
 pub fn install_service() -> windows_service::Result<()> {
     let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE)?;
 
-    let exe_path = std::env::current_exe()
-        .map_err(|e| windows_service::Error::Winapi(std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to get exe path: {}", e))))?;
+    let exe_path = std::env::current_exe().map_err(|e| windows_service::Error::Winapi(std::io::Error::other(format!("Failed to get exe path: {}", e))))?;
 
     let service_info = ServiceInfo {
         name: OsString::from(SERVICE_NAME),

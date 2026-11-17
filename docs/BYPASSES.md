@@ -25,11 +25,50 @@ This file documents the known agent bypassing or tampering techniques per operat
 
 ## MacOS
 
+- Root can `launchctl bootout` the daemon and delete the binary and its definition. The stop is reported, the removal is not prevented.
+- Hide a stop among shutdowns. launchd ends a daemon with the same `SIGTERM` at shutdown as at `launchctl bootout`, and the agent has no reliable way to tell the two apart, so it reports every stop as a service stop. Every shutdown and restart of a Mac opens `service_stopped`, and a real stop looks like one of them.
+- Kill the agent with `SIGKILL`. No stop notice is sent, launchd starts it again (`KeepAlive`) and the new process registers with the same key. Nothing is recorded but a new session number, so repeated kills are invisible as long as each gap stays under the silence window.
+- Freeze the agent with `SIGSTOP`. The process stays alive and silent, detected only by the silence window.
+- Replace the binary or the definition in `/Library/LaunchDaemons` as root. The self signature check runs inside the binary it protects, and launchd starts whatever the definition names.
+- Read `/Library/Application Support/zedr/identity.json` as root and report from elsewhere, as on Linux. Wipe that folder and install again with a fleet token, and the machine enrolls as a new agent.
+- Run and finish between two sensor polls. A process or a connection that lives shorter than five seconds is usually never reported.
+- Start a shell and let it `exec` the next program at once. The sensor reports the program it finds at the poll.
+- `exec` the program the process already runs, with other arguments. The image is told apart by its executable path, so this is not reported as a change, and the process keeps the command line the sensor read first.
+- Rewrite the command line from inside the process. `KERN_PROCARGS2` reads the argument area in the memory of the process, which the process can overwrite. The executable path comes from the kernel.
+- Talk over UDP, a raw socket, a Unix socket or loopback, or through a process that already has a connection open. Only new outbound TCP connections are reported, and one destination per process once in five minutes.
+- Connect through something that is not a socket descriptor of a process, such as a network extension. The sensor finds connections by walking the file descriptors of every process, a flow that no descriptor holds is not listed.
+- Pass a socket to another process and exit. The connection is attributed to the oldest process that holds it when the sensor first sees it.
+- Load a job by hand from another folder, with `launchctl bootstrap` or `launchctl submit`. It runs until the next restart and is never listed, the inventory reads only the folders launchd starts jobs from at boot.
+- Persist where the inventory does not read: a login item or a job registered with `SMAppService`, which live in the Background Task Management database, `/System/Library`, `periodic` scripts, `at` jobs, an authorization plugin, a kernel or system extension, a configuration profile, or a home outside `/Users`.
+- Write `Disabled` into a definition and turn the job on with `launchctl enable`, or the other way round. The inventory reads only the `Disabled` key, not launchd's overrides, so it reports whether the job starts from the definition alone.
+- Name a definition so that it starts with a dot. The inventory skips hidden files, and whether launchd starts such a file at boot is not verified.
+- Change what a job does without changing its program: `EnvironmentVariables` such as `DYLD_INSERT_LIBRARIES`, `WatchPaths`, `StartInterval`, `MachServices`. The definition is reported as changed with a new hash, the keys are not shown.
+- Leave the item alone and replace what it runs. The hash covers the definition, the cron entry or the key, not the program behind it.
+- Pad a definition, a crontab or an `authorized_keys` file beyond 1 MiB. The file is listed without a hash and nothing in it is read.
+- Install without a package manager the inventory reads: copy a bundle into a subfolder of `/Applications` or anywhere else, drop a binary into `/usr/local/bin`, use pip, npm or MacPorts. Only Homebrew, the top of the application folders and installer receipts are listed.
+- Edit an `Info.plist` or a receipt as its owner or as root. The version it names is reported, not what is on disk. An older Homebrew version left on disk is not listed, only the newest one.
+- Give a bundle in a home the name of one in `/Applications`. Only the first of the two is listed.
+- Flood the inventory. Any user can write thousands of definitions into their own `~/Library/LaunchAgents`, and each becomes a sealed event.
+- Never prove. No prover is built for macOS, so every Mac seals and releases and nothing checks its releases against its commitments, as on a Linux endpoint installed without a prover.
+- The ledger limits of Linux apply the same way: an event of more than 4 MiB is not committed, and after 2,880 waiting windows the agent gives up what was not delivered.
+
 ## Windows
 
 - Any administrator can stop or delete the service and delete the binary. The stop is reported, the removal is not prevented.
 - Suspend the agent's threads instead of killing it. The process stays alive and silent, detected only by the silence window.
 - Patch the binary on disk. The self signature check runs inside the binary it protects, so it can be patched out with the rest.
+- Status: the sensor is type-checked and unit-tested on another platform and not yet run on Windows, so every limit below is what the code does by design and not something observed.
+- Run and finish between two sensor polls. A process or a connection that lives shorter than five seconds is usually never reported.
+- Talk over UDP, a raw socket, a named pipe or loopback, or through a process that already has a connection open. Only new outbound TCP connections are reported, and one destination per process once in five minutes.
+- Rewrite the command line inside the process. It is read from the process memory, which the process can overwrite. The executable path comes from the kernel.
+- Run in a process the agent cannot open. It is listed with its image name only, without a start time, path or command line.
+- Persist where the inventory does not read: the `ServiceDll` of an `svchost` service, WMI event subscriptions, `Winlogon`, `Image File Execution Options`, AppInit DLLs, COM hijacks, a user whose hive is not loaded, the target of a shortcut in a Startup folder.
+- Leave the item alone and replace what it runs. The hash of a service or `Run` value is that of the program when it was last read, and the cache keeps a hash while path, size and modification time stay the same, so a file replaced by one of the same size with its time restored keeps the old hash. A task is hashed by its definition, not by its program.
+- Pad a task definition beyond 1 MiB. The task is listed without a command or hash. Files hashed beyond 32 MiB are hashed by their first 32 MiB only.
+- Name a path with blanks so that it is read another way. An unquoted command is resolved as `CreateProcess` does, which is also what runs, but a file that appears between two reads changes the hash.
+- Flood the inventory. Any user can write thousands of values into their own `Run` key or files into their Startup folder, and each becomes a sealed event.
+- Install without registering in `Uninstall`. The installed programs list only what the registry names, and the version it names is reported, not what is on disk.
+- The ledger limits of Linux apply the same way: an event of more than 4 MiB is not committed, and after 2,880 waiting windows the agent gives up what was not delivered.
 
 ## Linux
 

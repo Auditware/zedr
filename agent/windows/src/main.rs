@@ -1,10 +1,21 @@
 mod collector;
+mod hashing;
+mod network;
+mod packages;
+mod persistence;
+mod process;
+mod registry;
 mod service;
 #[cfg(test)]
 mod tests;
 
+use std::collections::BTreeMap;
 use std::env;
+
+use collector::WindowsSource;
+use zedr_shared::sensor::Sensor;
 use zedr_shared::verify_self_signature;
+use zedr_shared::SystemEvent;
 
 windows_service::define_windows_service!(ffi_service_main, service_main);
 
@@ -74,7 +85,10 @@ fn main() -> windows_service::Result<()> {
                 }
             }
             "staging-service" => windows_service::service_dispatcher::start("zedr-agent-staging", ffi_staging_service_main),
-            "--console" => windows_service::service_dispatcher::start("zedr-agent-staging", ffi_staging_service_main),
+            "--console" => {
+                run_console_mode();
+                Ok(())
+            }
             _ => {
                 print_usage();
                 Ok(())
@@ -94,7 +108,28 @@ fn run_console_mode() {
         println!("Windows Version: {}", version);
     }
 
-    collector::run();
+    let now = zedr_shared::link::unix_now();
+    let mut sensor = Sensor::new(WindowsSource::new(), std::process::id(), 0, 0);
+    let observation = sensor.poll(now);
+
+    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+    for event in &observation.events {
+        let kind = match event {
+            SystemEvent::Process(_) => "process",
+            SystemEvent::Network(_) => "network",
+            SystemEvent::Persistence(_) => "persistence",
+            SystemEvent::Package(_) => "package",
+            _ => "other",
+        };
+        *counts.entry(kind).or_default() += 1;
+    }
+
+    for (kind, count) in counts {
+        println!("{:>12} events: {}", kind, count);
+    }
+    for error in observation.errors {
+        println!("Error: {}", error);
+    }
 }
 
 fn print_usage() {

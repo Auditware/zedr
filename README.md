@@ -79,7 +79,8 @@ This is a proof of concept.
 | Linux agent | The whole flow runs end to end. `make test-e2e-linux` does it for real in containers, including an endpoint that hides a match and is caught by its own proof. |
 | Detection rules | 16 rules, of which 15 are detections with MITRE ATT&CK ids and one is a follow-up. |
 | Proving | About 20 CPU-seconds per event, so a quiet server keeps up and a busy workstation does not yet. |
-| Windows and macOS agents | They enroll and heartbeat and have no sensor yet. |
+| macOS agent | Seals processes, outbound connections, launchd jobs, cron, shell profiles, SSH keys, Homebrew, apps and installer receipts. Tested on Apple silicon; a run as root under launchd against a real server is not done yet, and macOS endpoints do not prove yet. |
+| Windows agent | Its sensor (processes, connections, Run keys, services, scheduled tasks, Startup folders, installed programs) type-checks for x64 and ARM64 and its parsing is unit-tested, it has not run on Windows yet. |
 
 A proof covers what the endpoint committed, so whoever has root on an endpoint can still keep an event from being sealed.
 

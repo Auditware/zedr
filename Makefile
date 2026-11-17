@@ -194,6 +194,23 @@ endef
 build-linux-binary: ## Build the static Linux agent in containers and copy it to the control server, LINUX_ARCHES picks x64, arm64 or both
 	$(call build_linux_static,zedr-agent,--file agent/linux/Dockerfile)
 
+# macOS endpoints get no prover yet, the installer goes on without one
+.PHONY: build-macos-binary
+build-macos-binary: ## Build the macOS agent for the architecture of this Mac and copy it to the control server
+	@[ "$$(uname)" = "Darwin" ] || { echo "ERROR: the macOS agent is built on a Mac"; exit 1; }
+	@set -e; \
+	case "$$(uname -m)" in \
+		arm64) arch=arm64; machine=arm64 ;; \
+		x86_64) arch=x64; machine=x86_64 ;; \
+		*) echo "ERROR: unknown architecture $$(uname -m)"; exit 1 ;; \
+	esac; \
+	(cd agent && cargo build --release --package zedr-agent-macos); \
+	out=control_server/backend/binaries/v0.1.0/macos/$$arch; \
+	mkdir -p $$out; \
+	cp agent/target/release/zedr-agent-macos $$out/zedr-agent; \
+	file $$out/zedr-agent | grep -q "Mach-O 64-bit executable $$machine" || { echo "ERROR: $$out/zedr-agent is not a $$machine Mach-O executable"; exit 1; }; \
+	ls -lh $$out/zedr-agent
+
 .PHONY: guest
 guest: ## Build the rule program a proof is about, reproducibly in a container, and print its image ID
 	@cargo risczero build --manifest-path prover/guest/Cargo.toml

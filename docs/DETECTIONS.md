@@ -2,7 +2,61 @@ This file documents the agent's detection techniques per operating system
 
 ## MacOS
 
+The macOS agent collects the same kinds of telemetry as the Linux agent, through the process interfaces of the macOS kernel, and seals and judges it with the same runtime and the same rules. The control server reads an event only when a rule opened it ([ADR 031](./adr/031-sealed-telemetry-opened-by-proven-rules.md)). The agent reads everything itself, it starts no helper program.
+
+### Collected
+
+- [x] Process inventory: every running process at agent start, with pid, parent pid, user, executable path, command line and start time, read with `proc_listallpids`, `proc_pidinfo`, `proc_pidpath` and the `KERN_PROCARGS2` sysctl. Zombies and the kernel task are left out, a command line is cut at 4 KiB like on Linux
+- [x] Process start and end: a poll every five seconds reports processes that appeared and processes that are gone
+- [x] Image change: a process that ran `exec` on another program is reported with its new executable and command line
+- [x] Outbound TCP connections per process, over IPv4 and IPv6: destination address and port, the process that holds the socket and its executable, read from the socket descriptors of every process (`PROC_PIDLISTFDS`, `PROC_PIDFDSOCKETINFO`). Listening sockets, accepted connections and sockets that are half open, closed or in time-wait are left out
+- [ ] Processes and connections that live shorter than the poll interval
+- [ ] An `exec` of the program a process already runs, the image is told apart by its executable path only
+- [ ] Listening sockets, UDP, DNS lookups, bytes per connection
+- [ ] File events, EndpointSecurity
+- [x] Persistence inventory: launch daemons in `/Library/LaunchDaemons`, launch agents in `/Library/LaunchAgents` and in every `~/Library/LaunchAgents`, from definitions in XML or binary form, with the label, the program and its arguments, the user the job runs as, whether launchd starts it and a hash of the definition. Also `/etc/crontab` and the user crontabs in `/usr/lib/cron/tabs`, shell profiles (`/etc/zshenv`, `/etc/zprofile`, `/etc/zshrc`, `/etc/profile`, `/etc/bashrc` and `.zshenv`, `.zprofile`, `.zshrc`, `.bashrc`, `.bash_profile`, `.profile` in every home) and `authorized_keys`, for root in `/var/root` and for every account with a home in `/Users` but `Shared`
+- [x] Persistence changes: a read every minute reports what was added, changed or removed since the last one
+- [ ] Persistence that lives elsewhere: `/System/Library`, which is on the sealed system volume and holds Apple's own jobs, login items and the jobs apps register with `SMAppService` in the Background Task Management database, the overrides of `launchctl enable` and `disable`, `periodic` scripts, `at` jobs, kernel and system extensions, authorization plugins, configuration profiles
+- [x] Installed packages: Homebrew formulas and casks under `/opt/homebrew` and `/usr/local`, each with its newest installed version, application bundles in `/Applications`, `/Applications/Utilities` and every `~/Applications` with the version from their `Info.plist` and the architectures of their executable, and installer receipts in `/var/db/receipts`. They are read every five minutes and reported like on Linux, and no rule opens a package event
+- [ ] Bundles in subfolders of `/Applications` or anywhere else, older Homebrew versions still on disk, packages of languages such as pip and npm, MacPorts
+- [ ] Resource use per process, logins
+
+As root the agent reads every process and every socket. Run as another user it still lists every process, but the sockets of its own user only.
+
+### Rules
+
+The rules are those of the Linux section, one rule set for every platform. An autostart rule that fires on a launch daemon names T1543.004, on a launch agent T1543.001.
+
+### Proving
+
+No prover is built for macOS yet. The installer goes on without one, the endpoint seals and releases its windows and the console shows them as not proven.
+
 ## Windows
+
+The Windows agent collects the same kinds of telemetry as the Linux agent and seals and judges it with the same runtime and the same rules. The control server reads an event only when a rule opened it ([ADR 031](./adr/031-sealed-telemetry-opened-by-proven-rules.md)). The agent reads everything through system calls and the registry itself, it starts no helper program. Type-checked and unit-tested on another platform, not yet run on Windows.
+
+### Collected
+
+- [x] Process inventory: every running process at agent start, with pid, parent pid, session, executable path, command line and start time. The list comes from a Toolhelp snapshot, the path from `QueryFullProcessImageNameW`, the start from `GetProcessTimes` and the command line from `NtQueryInformationProcess`, cut at 4 KiB and split by the rules of `CommandLineToArgvW`. The user field holds the session id, 0 for services. A process that cannot be opened is listed with its image name from the snapshot only
+- [x] Process start and end: a poll every five seconds reports processes that appeared and processes that are gone
+- [x] Outbound TCP connections per process, over IPv4 and IPv6: destination address and port and the process that owns the connection, from `GetExtendedTcpTable`. Only established connections count. Connections to the machine itself and connections accepted on a port something listens on are left out
+- [ ] Processes and connections that live shorter than the poll interval
+- [ ] Listening sockets, UDP, DNS lookups, bytes per connection
+- [ ] File and registry events, ETW
+- [x] Persistence inventory, each item with the command it runs where it has one, the account, whether it is set to start, and a hash. Variables such as `%SystemRoot%` are written out, as are `\SystemRoot\` and `\??\` in driver paths
+  - [x] `Run` and `RunOnce` values of the machine, in the native and the 32 bit registry view, and of every loaded user hive
+  - [x] Services and drivers under `HKLM\SYSTEM\CurrentControlSet\Services` with their `ImagePath`, enabled when `Start` is boot, system or automatic
+  - [x] Scheduled tasks: the definitions in `System32\Tasks`, one item per program the task starts, enabled as the task says, with the account of its principal. The hash is that of the definition
+  - [x] Files in the common Startup folder and the Startup folder of every profile
+  - The hash of a `Run` value or a service is that of the program it starts, found as `CreateProcess` would find it. Hashes are kept by path, size and modification time, and a file larger than 32 MiB is hashed by its first 32 MiB
+- [x] Persistence changes: a read every minute reports what was added, changed or removed since the last one
+- [ ] Persistence that lives elsewhere: the `ServiceDll` behind `svchost`, WMI subscriptions, `Winlogon` and `Image File Execution Options` keys, AppInit DLLs, COM hijacks, the shortcut target of a Startup folder file, the hives of users who are not signed in
+- [x] Installed programs: name, version and architecture from the `Uninstall` keys of the machine in both views and of every loaded user hive, read every five minutes and reported like on Linux. No rule opens a package event
+- [ ] Programs that register nothing in `Uninstall`, packages of Microsoft Store and winget, languages such as pip and npm
+
+### Rules
+
+The rules are those of the Linux section, one rule set for every platform.
 
 ## Linux
 

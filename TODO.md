@@ -23,7 +23,11 @@
 - [ ] Break-glass opening for an investigation that needs more than the rules open, with the key split among several holders
 - [ ] Keys bound to hardware instead of files that root can read
 - [ ] Prove a new rule over windows sealed in the past
-- [ ] Sensors for Windows and macOS, both agents enroll and heartbeat and seal nothing
+- [x] A macOS agent that enrolls, heartbeats and seals: processes, outbound connections, launchd jobs, cron, shell profiles, SSH keys, Homebrew, apps and installer receipts, read through the kernel and the files themselves (ADR 033)
+- [ ] Run the macOS agent as root under launchd against a real control server, through the installer, and on an Intel Mac
+- [x] A Windows sensor: processes, outbound connections, Run keys, services, scheduled tasks, Startup folders and installed programs (ADR 033)
+- [ ] Run the Windows agent and its sensor on Windows, it was type-checked for x64 and ARM64 and its parsing unit-tested on a Mac only
+- [ ] A prover for macOS and Windows endpoints, both seal and release without proving today
 
 # Agent trust, console and deployment
 
@@ -66,7 +70,7 @@
 - [ ] Logon and privilege events: interactive and remote logons, sudo, new accounts
 - [ ] The remaining event types proposed in ADR 020 (`ProcessUsage`, `AppUsage`, `Login`, `Dns`)
 - [ ] Persistence on Linux that is not read yet: socket and path units, `at` jobs, udev rules, kernel modules, XDG autostart, other shells' startup files, keys named by `sshd_config`, and the lines that changed in a shell profile
-- [ ] Persistence inventory on the other platforms: Run keys, services, scheduled tasks and WMI subscriptions on Windows, LaunchAgents, LaunchDaemons and login items on macOS
-- [ ] Installed packages on rpm hosts, on Windows and on macOS, and packages of languages such as pip and npm
+- [ ] Persistence the macOS and Windows sensors do not read yet: login items and `SMAppService` jobs, launchd overrides, periodic scripts on macOS, WMI subscriptions, Winlogon, IFEO, AppInit, COM hijacks and the `ServiceDll` behind svchost on Windows
+- [ ] Installed packages on rpm hosts, Store and winget apps on Windows, and packages of languages such as pip and npm
 - [ ] Run the DaemonSet on a cluster and check that it reports the node's persistence, reading the host through `/proc/1/root` was only run with a container that shares the host's process namespace
 - [ ] Response actions as signed commands with one fixed meaning each: isolate the endpoint, kill a process, quarantine a file

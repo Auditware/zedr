@@ -12,6 +12,10 @@ PROVER_NAME="zedr-prover"
 STATE_DIR="/var/lib/zedr"
 SERVICE_NAME="zedr-agent"
 UNIT_PATH="/etc/systemd/system/$SERVICE_NAME.service"
+MACOS_STATE_DIR="/Library/Application Support/zedr"
+LAUNCHD_LABEL="com.zedr.agent"
+DAEMON_PATH="/Library/LaunchDaemons/$LAUNCHD_LABEL.plist"
+MACOS_LOG_PATH="/var/log/zedr-agent.log"
 ENROLLMENT_WAIT_SECONDS=30
 
 fail() {
@@ -96,31 +100,14 @@ EOF
     systemctl restart "$SERVICE_NAME"
 }
 
-wait_for_enrollment() {
-    waited=0
-    while [ -f "$STATE_DIR/enrollment.key" ]; do
-        if ! systemctl is-active --quiet "$SERVICE_NAME"; then
-            fail "the agent service is not running, see: journalctl -u $SERVICE_NAME"
-        fi
-        if [ "$waited" -ge "$ENROLLMENT_WAIT_SECONDS" ]; then
-            fail "the agent is running but has not enrolled yet and keeps retrying, see: journalctl -u $SERVICE_NAME"
-        fi
-        waited=$((waited + 1))
-        sleep 1
-    done
-}
-
-install_macos_service() {
-    download "$CONTROL_SERVER_URL/api/installers/binaries/$PLATFORM-$ARCH" "$BINARY_PATH"
-    chmod +x "$BINARY_PATH"
-
-    cat > /Library/LaunchDaemons/com.zedr.agent.plist <<EOF
+install_launchd_service() {
+    cat > "$DAEMON_PATH" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.zedr.agent</string>
+    <string>$LAUNCHD_LABEL</string>
     <key>ProgramArguments</key>
     <array>
         <string>$BINARY_PATH</string>
@@ -129,18 +116,46 @@ install_macos_service() {
     <true/>
     <key>KeepAlive</key>
     <true/>
+    <key>StandardErrorPath</key>
+    <string>$MACOS_LOG_PATH</string>
 </dict>
 </plist>
 EOF
 
-    launchctl load /Library/LaunchDaemons/com.zedr.agent.plist
+    # launchd refuses a daemon definition that anyone but root could have written
+    chown 0:0 "$DAEMON_PATH"
+    chmod 0644 "$DAEMON_PATH"
 
-    sleep 2
-    if launchctl list | grep -q com.zedr.agent; then
-        echo "zedr agent $AGENT_VERSION installed, control server: $CONTROL_SERVER_URL"
+    launchctl bootout "system/$LAUNCHD_LABEL" 2>/dev/null || true
+    launchctl bootstrap system "$DAEMON_PATH" || fail "launchd did not load $DAEMON_PATH"
+}
+
+service_is_running() {
+    if [ "$PLATFORM" = "macos" ]; then
+        launchctl print "system/$LAUNCHD_LABEL" 2>/dev/null | grep -q "state = running"
     else
-        fail "the agent service failed to start, check the system logs"
+        systemctl is-active --quiet "$SERVICE_NAME"
     fi
+}
+
+wait_for_enrollment() {
+    if [ "$PLATFORM" = "macos" ]; then
+        logs="$MACOS_LOG_PATH"
+    else
+        logs="journalctl -u $SERVICE_NAME"
+    fi
+
+    waited=0
+    while [ -f "$STATE_DIR/enrollment.key" ]; do
+        if ! service_is_running; then
+            fail "the agent service is not running, see: $logs"
+        fi
+        if [ "$waited" -ge "$ENROLLMENT_WAIT_SECONDS" ]; then
+            fail "the agent is running but has not enrolled yet and keeps retrying, see: $logs"
+        fi
+        waited=$((waited + 1))
+        sleep 1
+    done
 }
 
 main() {
@@ -176,8 +191,7 @@ main() {
 
     if [ "$PLATFORM" = "macos" ]; then
         [ "$MODE" = "service" ] || fail "--foreground is only available on Linux"
-        install_macos_service
-        return
+        STATE_DIR="$MACOS_STATE_DIR"
     fi
 
     prepare_state_dir
@@ -188,7 +202,11 @@ main() {
         exec "$BINARY_PATH"
     fi
 
-    install_systemd_service
+    if [ "$PLATFORM" = "macos" ]; then
+        install_launchd_service
+    else
+        install_systemd_service
+    fi
     wait_for_enrollment
     echo "zedr agent $AGENT_VERSION installed and enrolled, control server: $CONTROL_SERVER_URL"
 }

@@ -18,6 +18,12 @@ sha2 = "0.10"
 hex = "0.4"
 getrandom = "0.2"
 
+[target.'cfg(windows)'.dependencies]
+quick-xml = "0.42"
+
+[dev-dependencies]
+quick-xml = "0.42"
+
 [target.'cfg(target_os = "linux")'.dependencies]
 minreq = { version = "2.12", features = ["https-rustls-probe"] }
 

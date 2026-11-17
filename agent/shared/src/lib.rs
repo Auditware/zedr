@@ -15,6 +15,10 @@ pub mod ledger;
 pub mod link;
 pub mod runtime;
 pub mod sensor;
+#[cfg(unix)]
+pub mod unix;
+#[cfg(any(windows, test))]
+pub mod windows_text;
 
 pub const AGENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const AGENT_NAME: &str = "zedr";

@@ -17,10 +17,28 @@ This file documents the technical measures to prevent agent bypassing or tamperi
 
 ## MacOS
 
+- [x] Refuse to start when the binary does not carry a valid signature of the deployment that served it, same check as on Linux
+- [ ] Start at all once the control server has sealed it: on Apple silicon the kernel kills a sealed binary, because the patched address and key break the ad hoc signature the linker gave it. The control server has to rehash the patched pages of that signature before it signs the binary
+- [ ] A Developer ID signature, the hardened runtime and notarization. The binary carries only the linker's ad hoc signature
+- [x] Agent state directory (`/Library/Application Support/zedr`) is created with mode `0700` and owned by root by the installer before the enrollment key is written, and the agent itself refuses a directory that is a symlink or belongs to another user and closes one that is open to group or others. The identity seed and the enrollment key are files with mode `0600`
+- [x] Agent id is derived from the agent's own public key, as on Linux
+- [ ] A stop while the system keeps running opens a `service_stopped` incident, but so does every shutdown: the agent sends a signed stop notice on every `SIGTERM` and reports it as a service stop, because it cannot tell a shutdown apart
+- [x] launchd starts the agent at boot and again after a crash or a kill (`KeepAlive`), and the installer writes the definition owned by root with mode `0644`. Not yet run as root under launchd
+- [x] Telemetry is read by the agent itself through `libproc`, `sysctl` and the files it inventories. No helper program such as `ps`, `lsof`, `launchctl`, `plutil`, `pkgutil` or `brew` is started that could be replaced on the path, and property lists are parsed inside the agent
+- [x] TLS comes from the system's Security framework, which lives on the sealed system volume
+- [x] The agent leaves its own connections out of the telemetry by process id, not by destination
+- [x] Sealing, the hash chain, delivery and the handling of refusals are the shared runtime, and work as described for Linux
+
 ## Windows
 
 - [x] Agent data directory (`%ProgramData%\zedr`) is restricted to SYSTEM and Administrators by the installer before the enrollment key and the identity seed are written
-- [x] A service stop while the system keeps running opens a `service_stopped` incident on the control server within one request
+- [x] A service stop while the system keeps running opens a `service_stopped` incident on the control server within one request. The service control handler tells a stop from a shutdown
+- [x] Telemetry is read by the agent itself through system calls and the registry, no helper program is started that could be replaced on the path
+- [x] The agent leaves its own connections out of the telemetry by process id, not by destination
+- [x] The last sensor round is sealed and flushed before the stop notice leaves
+- [x] Every sensor event is committed in a hash chain before it leaves the endpoint, and sealing, delivery and the handling of refusals are the shared runtime, as described for Linux
+- [x] Task definitions are parsed without expanding entities a document defines itself
+- [ ] These measures are type-checked and unit-tested on another platform and not yet run on Windows
 
 ## Linux
 

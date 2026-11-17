@@ -4,10 +4,13 @@ This file documents the agent's technical capabilities per operating system
 
 - [MacOS](#macos)
   - [Service Persistence](#service-persistence)
+  - [libproc and sysctl](#libproc-and-sysctl)
+  - [Property lists and inventory folders](#property-lists-and-inventory-folders)
   - [EndpointSecurity](#endpointsecurity)
   - [OpenBSM (audit subsystem)](#openbsm-audit-subsystem)
 - [Windows](#windows)
   - [Service Persistence](#service-persistence-1)
+  - [Win32 and the registry](#win32-and-the-registry)
   - [ETW (Event Tracing for Windows)](#etw-event-tracing-for-windows)
   - [WFP (Windows Filtering Platform)](#wfp-windows-filtering-platform)
   - [eBPF](#ebpf)
@@ -23,6 +26,25 @@ This file documents the agent's technical capabilities per operating system
 ## Service Persistence
 
 - [ ] Run as system LaunchDaemon with root privileges, auto-start on boot, survive crashes
+  - [ ] Run as the LaunchDaemon `com.zedr.agent` as root, start at boot and again after a crash or a kill (`KeepAlive`), log to `/var/log/zedr-agent.log` (`/install.sh`). The installer creates the state directory and stages the enrollment key as on Linux. Written, not yet run as root under launchd
+  - [ ] Enroll, send signed heartbeats, seal windows and send a stop notice, through the same runtime as Linux. Not yet run against a control server: a binary the control server sealed is killed by the kernel on Apple silicon, because patching the address and the key into it breaks the page hashes of the ad hoc signature the linker gave it. Rehashing the two patched pages in that signature before the binary is signed lets it start, tried on a copy by hand
+  - [x] Build the release agent for the architecture of the Mac it is built on and put it where the control server serves it from (`make build-macos-binary`)
+  - [ ] Prove: no prover is built for macOS yet, the installer goes on without one
+
+## libproc and sysctl
+
+- [x] As any user, can list every process with parent, user, executable and command line, and report starts, ends and `exec` by polling (`cargo test -p zedr-agent-macos`)
+- [x] As root, can read the socket descriptors of every process and report outbound TCP over IPv4 and IPv6 with the process that holds the socket. As another user, of its own processes only (`cargo test -p zedr-agent-macos`)
+- [x] Describe the host as `macOS <version> (<build>)` from `kern.osproductversion` and `kern.osversion`
+- [ ] Resource use per process (`proc_pid_rusage`)
+
+## Property lists and inventory folders
+
+- [x] As root, can read launchd job definitions in XML and binary form, crontabs, shell profiles and authorized keys, and report what was added, changed or removed by polling (`cargo test -p zedr-agent-macos`)
+- [x] Can read Homebrew's Cellar and Caskroom, application bundles and installer receipts, and report installed, upgraded and removed packages by polling (`cargo test -p zedr-agent-macos`)
+- [ ] Read the Background Task Management database, which lists login items and the jobs apps register with `SMAppService`
+- [ ] Read launchd's overrides of `launchctl enable` and `disable`
+- [ ] Watch the same folders with FSEvents instead of reading them every minute
 
 ## EndpointSecurity
 
@@ -51,6 +73,15 @@ This file documents the agent's technical capabilities per operating system
 ## Service Persistence
 
 - [x] Run as Windows Service with NT/AUTHORITY privileges, auto-start on boot, survive crashes
+- [x] Seal windows and send a stop notice, through the same runtime as Linux. Type-checked and unit-tested on another platform, not yet run on Windows
+
+## Win32 and the registry
+
+- [x] As SYSTEM, can list every process and read its path, start time, session and command line (`CreateToolhelp32Snapshot`, `QueryFullProcessImageNameW`, `GetProcessTimes`, `NtQueryInformationProcess`). A protected process may refuse
+- [x] Can read the TCP tables of both address families with the owning process (`GetExtendedTcpTable`)
+- [x] Can read `Run` keys, services, `Uninstall` keys and the loaded user hives, task definitions in `System32\Tasks` and Startup folders, and report what was added, changed or removed by polling (`cargo test -p zedr-agent-shared`, which covers the parsing)
+- [ ] Read the registry hives of users who are not signed in
+- [ ] Run the sensor on a Windows machine (`cargo test -p zedr-agent-windows`)
 
 ## ETW (Event Tracing for Windows)
 

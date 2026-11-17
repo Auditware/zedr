@@ -1,19 +1,24 @@
-#[cfg(test)]
-mod tests {
-    use std::env;
+use std::env;
 
-    #[test]
-    fn test_agent_starts() {
-        println!("\nzedr Windows Agent v{}", env!("CARGO_PKG_VERSION"));
-        println!("Platform: {} {}", env::consts::OS, env::consts::ARCH);
+use zedr_shared::sensor::Source;
 
-        if let Some(version) = crate::get_windows_version() {
-            println!("Windows Version: {}", version);
-        }
+use crate::collector::WindowsSource;
 
-        println!("\nRunning collector test...");
-        crate::collector::run();
+#[test]
+fn test_agent_starts() {
+    println!("\nzedr Windows Agent v{}", env!("CARGO_PKG_VERSION"));
+    println!("Platform: {} {}", env::consts::OS, env::consts::ARCH);
 
-        assert!(true);
+    if let Some(version) = crate::get_windows_version() {
+        println!("Windows Version: {}", version);
     }
+
+    let mut source = WindowsSource::new();
+    let processes = source.processes().unwrap();
+    assert!(processes.iter().any(|key| key.pid == std::process::id()));
+
+    let own = processes.iter().find(|key| key.pid == std::process::id()).unwrap();
+    let details = source.describe(own).unwrap();
+    assert!(!details.executable_path.is_empty());
+    assert!(!details.command_line.is_empty());
 }
