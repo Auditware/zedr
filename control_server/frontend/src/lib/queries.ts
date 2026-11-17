@@ -22,6 +22,10 @@ export function useInstallKeys() {
   return useQuery({ queryKey: ['install-keys'], queryFn: api.installKeys, refetchInterval: 30_000 })
 }
 
+export function useEnrollmentTokens() {
+  return useQuery({ queryKey: ['enrollment-tokens'], queryFn: api.enrollmentTokens, refetchInterval: 30_000 })
+}
+
 const AGENT_EVENT_TYPES = CATEGORIES.filter((category) => category.id !== 'telemetry').flatMap((category) => category.types)
 
 export function useAgentEvents(agentId: string) {

@@ -28,6 +28,9 @@ export type ReleaseView = Schemas['ReleaseView']
 export type RulesetView = Schemas['RulesetView']
 export type RuleView = Schemas['RuleView']
 
+export type EnrollmentToken = Schemas['EnrollmentToken']
+export type EnrollmentTokenCreated = Schemas['EnrollmentTokenCreated']
+
 export type InstallKey = {
   id: string
   created_at: number
@@ -118,6 +121,7 @@ export const testTenantLogin = () => request<LoginResponse>('POST', '/__dev/logi
 export const api = {
   login: (username: string, password: string) =>
     request<LoginResponse>('POST', '/api/auth/login', { username, password }, false),
+  changePassword: (current_password: string, password: string) => request<LoginResponse>('POST', '/api/auth/password', { current_password, password }),
   loginMfa: (mfa_token: string, code: string) =>
     request<LoginResponse>('POST', '/api/auth/login/mfa', { mfa_token, code }, false),
 
@@ -156,6 +160,11 @@ export const api = {
   installKeys: async () => (await request<{ keys: InstallKey[] }>('GET', '/api/admin/installers')).keys,
   generateInstallKey: (agent_version?: string) =>
     request<InstallKeyResponse>('POST', '/api/admin/installers/generate', agent_version ? { agent_version } : {}),
+  revokeInstallKey: (id: string) => request<InstallKey>('DELETE', `/api/admin/installers/${id}`),
+  enrollmentTokens: async () => (await request<{ tokens: EnrollmentToken[] }>('GET', '/api/admin/enrollment-tokens')).tokens,
+  createEnrollmentToken: (label: string, expires_in_days: number, max_uses: number | null) =>
+    request<EnrollmentTokenCreated>('POST', '/api/admin/enrollment-tokens', { label, expires_in_days, max_uses }),
+  revokeEnrollmentToken: (id: string) => request<EnrollmentToken>('DELETE', `/api/admin/enrollment-tokens/${id}`),
 
   upgrades: () => request<UpgradeCommand[]>('GET', '/api/admin/upgrades'),
   issueUpgrade: (body: { agent_id: string; install_key_id: string; target_version: string }) =>

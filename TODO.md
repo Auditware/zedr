@@ -47,14 +47,15 @@
 - [ ] Install the chart on a cluster. The image builds from a clean checkout and a container of it serves the console, the installer, the agent and the prover, the chart was only linted and rendered
 - [ ] Signing key rotation that moves enrolled agents to a new key, and a console marker for agents that still trust a replaced key
 - [ ] Move the binary signing key out of the control server into CI, with pre-flight and rollback on upgrade
-- [ ] Console page for fleet enrollment tokens (create, list, revoke) and agents grouped by `enrollment_group`, today the tokens are API only
+- [x] Fleet enrollment tokens in the console: create with the install commands shown once, list with how many machines each enrolled, revoke, and the endpoint map grouped by fleet
 - [ ] Run the EC2 recipe on a real autoscaling group and the DaemonSet on a managed cluster, both ran only on local containers and a kind cluster
 - [ ] Remove or quarantine an agent, and retire the agents of terminated instances
 - [ ] Linux agent self-upgrade, today an upgrade command is answered with a failure and the installer has to be run again
 - [ ] Report a node shutdown as a shutdown under kubelet graceful node shutdown, which needs the logind state as well as the systemd state
 - [ ] Platform attestation as a condition on a fleet token, starting with the AWS instance identity document
-- [ ] Revoke an install key from the console, the key has a `revoked_at` and no route sets it
-- [ ] Let a read-only user change their own password, and list an account's sessions so one can be ended on its own
+- [x] Revoke an install key from the console, audited
+- [x] Every user changes their own password in Settings, which ends their other sessions
+- [ ] List an account's sessions so one can be ended on its own, today ending sessions ends all of them
 - [ ] Refresh token rotation and a mandatory second factor for admins
 - [ ] Console: run the browser journeys (`npm run sweep`) in CI, incident acknowledgement
 - [ ] Console: repeat the browser journeys at laptop and pane width, after the sealed rows were added only the desktop run was repeated. The sealed rows stop refreshing once paged past the first 200

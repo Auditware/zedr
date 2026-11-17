@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Database, ExternalLink, Monitor, Plus, Server as ServerIcon, ShieldCheck, ShieldOff, Trash2 } from 'lucide-react'
+import { Database, ExternalLink, KeyRound, Monitor, Plus, Server as ServerIcon, ShieldCheck, ShieldOff, Trash2 } from 'lucide-react'
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import { Card, CopyButton, PageHeader, SectionTitle } from '@/components/ui/bits'
 import { Button } from '@/components/ui/button'
@@ -15,6 +15,69 @@ import { resolveTone } from '@/lib/palette'
 
 function message(cause: unknown, fallback: string): string {
   return cause instanceof ApiError ? cause.message : fallback
+}
+
+function Password() {
+  const signIn = useSession((state) => state.signIn)
+  const [current, setCurrent] = useState('')
+  const [next, setNext] = useState('')
+  const [again, setAgain] = useState('')
+  const [error, setError] = useState('')
+  const [changed, setChanged] = useState(false)
+
+  const change = useMutation({
+    mutationFn: () => api.changePassword(current, next),
+    onSuccess: (signedIn) => {
+      if (signedIn.token) signIn({ token: signedIn.token, username: signedIn.username, role: signedIn.role })
+      setCurrent('')
+      setNext('')
+      setAgain('')
+      setChanged(true)
+    },
+    onError: (cause) => setError(message(cause, 'Password not changed')),
+  })
+
+  const submit = (event: FormEvent) => {
+    event.preventDefault()
+    setChanged(false)
+    if (next !== again) {
+      setError('The new password and its repetition differ')
+      return
+    }
+    setError('')
+    change.mutate()
+  }
+
+  return (
+    <Card className="p-5">
+      <SectionTitle>Password</SectionTitle>
+      <form onSubmit={submit} aria-label="Change password" className="mt-3 max-w-[360px]">
+        <Field label="Current password">
+          <input type="password" autoComplete="current-password" required value={current} onChange={(event) => setCurrent(event.target.value)} className={inputClass} />
+        </Field>
+        <Field label="New password, 12 characters with upper and lower case, a number and a symbol">
+          <input type="password" autoComplete="new-password" required value={next} onChange={(event) => setNext(event.target.value)} className={inputClass} />
+        </Field>
+        <Field label="New password again">
+          <input type="password" autoComplete="new-password" required value={again} onChange={(event) => setAgain(event.target.value)} className={inputClass} />
+        </Field>
+        {error ? (
+          <p role="alert" className="mb-3 text-sm text-alert-soft">
+            {error}
+          </p>
+        ) : null}
+        {changed ? (
+          <p role="status" className="mb-3 text-sm text-sage">
+            Changed. Every other session of this account has ended.
+          </p>
+        ) : null}
+        <Button type="submit" disabled={change.isPending}>
+          <KeyRound size={15} strokeWidth={1.75} aria-hidden />
+          Change password
+        </Button>
+      </form>
+    </Card>
+  )
 }
 
 function TwoFactor() {
@@ -373,6 +436,7 @@ export function Settings() {
       <div className="grid auto-rows-[minmax(232px,auto)] grid-cols-2 gap-4 max-lg:grid-cols-1">
         <TwoFactor />
         <Server />
+        {session?.view ? null : <Password />}
         {admin ? <ApiKeys /> : null}
       </div>
     </div>

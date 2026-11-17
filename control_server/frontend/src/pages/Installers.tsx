@@ -1,8 +1,9 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { getRouteApi } from '@tanstack/react-router'
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { Plus, X } from 'lucide-react'
+import { Ban, Plus, X } from 'lucide-react'
 import { useMemo, useRef, useState } from 'react'
+import { FleetTokens } from '@/components/installers/FleetTokens'
 import { Card, Chip, CopyButton, Empty, PageHeader } from '@/components/ui/bits'
 import { Button } from '@/components/ui/button'
 import { Segmented } from '@/components/ui/segmented'
@@ -159,6 +160,11 @@ export function Installers() {
     },
   })
 
+  const revoke = useMutation({
+    mutationFn: (id: string) => api.revokeInstallKey(id),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ['install-keys'] }),
+  })
+
   const keys = useMemo(() => [...(data ?? [])].sort((a, b) => b.created_at - a.created_at), [data])
   const totals = useMemo(() => {
     const out: Record<Outcome, number> = { unused: 0, downloaded: 0, enrolled: 0, expired: 0, revoked: 0 }
@@ -201,6 +207,11 @@ export function Installers() {
           {issue.error instanceof ApiError ? issue.error.message : 'Key not issued'}
         </div>
       ) : null}
+      {revoke.error ? (
+        <div role="alert" className="text-sm text-alert-soft">
+          {revoke.error instanceof ApiError ? revoke.error.message : 'Key not revoked'}
+        </div>
+      ) : null}
 
       {fresh ? (
         <Card className="shrink-0 border-accent/60 p-4">
@@ -224,6 +235,8 @@ export function Installers() {
           </div>
         </Card>
       ) : null}
+
+      <FleetTokens admin={admin} now={now} />
 
       <Card className="@container flex min-h-0 flex-1 flex-col overflow-hidden">
         <Flow totals={totals} shown={shown} onToggle={toggle} />
@@ -263,6 +276,19 @@ export function Installers() {
                           style={{ width: `${(Math.max(0, key.expires_at - now) / Math.max(1, key.expires_at - key.created_at)) * 100}%` }}
                         />
                       </span>
+                      {admin ? (
+                        <button
+                          type="button"
+                          data-revoke-key={key.id}
+                          aria-label={`Revoke key ${shortId(key.id)}`}
+                          title="Revoke: the key downloads and enrolls nothing more"
+                          disabled={revoke.isPending}
+                          onClick={() => revoke.mutate(key.id)}
+                          className="ml-auto shrink-0 rounded-md p-1.5 text-muted hover:bg-raised hover:text-alert-soft disabled:opacity-40"
+                        >
+                          <Ban size={15} strokeWidth={1.5} aria-hidden />
+                        </button>
+                      ) : null}
                     </span>
                   ) : (
                     <span className="min-w-0 truncate text-muted">

@@ -514,6 +514,38 @@ async fn test_install_key_revocation() {
 }
 
 #[tokio::test]
+async fn test_an_admin_revokes_an_install_key_that_then_downloads_and_enrolls_nothing() {
+    let (app, pool) = create_test_app_with_pool().await;
+    let admin = admin_token("admin");
+    insert_install_key(&pool, "zedr_key_to_revoke", 3600).await;
+
+    let (status, _) = call(&app, "DELETE", "/api/admin/installers/id-zedr_key_to_revoke", Some(&admin_token("user")), None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = call(&app, "DELETE", "/api/admin/installers/never-issued", Some(&admin), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (status, revoked) = call(&app, "DELETE", "/api/admin/installers/id-zedr_key_to_revoke", Some(&admin), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(revoked["id"], "id-zedr_key_to_revoke");
+    let revoked_at = revoked["revoked_at"].as_i64().expect("the key says when it was revoked");
+    let (status, again) = call(&app, "DELETE", "/api/admin/installers/id-zedr_key_to_revoke", Some(&admin), None).await;
+    assert_eq!((status, again["revoked_at"].as_i64()), (StatusCode::OK, Some(revoked_at)), "revoking twice changes nothing");
+    let audited: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit_log WHERE action = 'install_key.revoke' AND target = 'id-zedr_key_to_revoke'").fetch_one(&pool).await.unwrap();
+    assert_eq!(audited, 1);
+
+    assert_eq!(download_agent(&app, "linux-x64", "zedr_key_to_revoke").await.0, StatusCode::UNAUTHORIZED);
+    let mut agent = TestAgent::new("after-revoke");
+    let body = agent.registration(Some("zedr_key_to_revoke"));
+    assert_eq!(send_signed(&app, &agent, "/api/agents/register", body).await.0, StatusCode::UNAUTHORIZED);
+
+    let mut enrolled = enroll(&app, &pool, "enrolled-before-revoke").await;
+    let (status, _) = call(&app, "DELETE", "/api/admin/installers/id-zedr_key_for_enrolled-before-revoke", Some(&admin), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let body = enrolled.heartbeat();
+    assert_eq!(send_signed(&app, &enrolled, "/api/events", body).await.0, StatusCode::OK, "an agent the key already enrolled keeps working");
+}
+
+#[tokio::test]
 async fn test_invalid_install_key_format() {
     let app = create_test_app().await;
     
@@ -1601,6 +1633,45 @@ async fn test_user_management_rules() {
     assert_eq!(status, StatusCode::OK);
     let names: Vec<&str> = users.as_array().unwrap().iter().map(|user| user["username"].as_str().unwrap()).collect();
     assert_eq!(names, vec!["tester", "reader"]);
+}
+
+#[tokio::test]
+async fn test_any_user_changes_their_own_password_and_keeps_only_this_session() {
+    let (app, pool) = create_test_app_with_pool().await;
+    let admin = admin_token("admin");
+    let viewer = serde_json::json!({ "username": "viewer", "password": "Str0ng!Passw0rd", "role": "user" });
+    assert_eq!(call(&app, "POST", "/api/admin/users", Some(&admin), Some(viewer)).await.0, StatusCode::CREATED);
+    let sign_in = |password: &str| serde_json::json!({ "username": "viewer", "password": password });
+    let first = call(&app, "POST", "/api/auth/login", None, Some(sign_in("Str0ng!Passw0rd"))).await.1["token"].as_str().unwrap().to_string();
+    let other = call(&app, "POST", "/api/auth/login", None, Some(sign_in("Str0ng!Passw0rd"))).await.1["token"].as_str().unwrap().to_string();
+    let change = |current: &str, new: &str| serde_json::json!({ "current_password": current, "password": new });
+
+    let (status, refused) = call(&app, "POST", "/api/auth/password", Some(&first), Some(change("wr0ng!Password", "N3w!Passw0rd-long"))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "a wrong current password does not end the session: {}", refused);
+    assert_eq!(call(&app, "GET", "/api/admin/agents", Some(&first), None).await.0, StatusCode::OK);
+    assert_eq!(call(&app, "POST", "/api/auth/password", Some(&first), Some(change("Str0ng!Passw0rd", "weak"))).await.0, StatusCode::BAD_REQUEST);
+
+    let (status, changed) = call(&app, "POST", "/api/auth/password", Some(&first), Some(change("Str0ng!Passw0rd", "N3w!Passw0rd-long"))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!((&changed["username"], &changed["role"]), (&serde_json::json!("viewer"), &serde_json::json!("user")));
+    let renewed = changed["token"].as_str().unwrap().to_string();
+    assert_eq!(call(&app, "GET", "/api/admin/agents", Some(&renewed), None).await.0, StatusCode::OK, "this session goes on with the new token");
+    assert_eq!(call(&app, "GET", "/api/admin/agents", Some(&other), None).await.0, StatusCode::UNAUTHORIZED, "every other session ended");
+    assert_eq!(call(&app, "GET", "/api/admin/agents", Some(&first), None).await.0, StatusCode::UNAUTHORIZED, "and so did the token it was changed with");
+
+    assert_eq!(call(&app, "POST", "/api/auth/login", None, Some(sign_in("Str0ng!Passw0rd"))).await.0, StatusCode::UNAUTHORIZED);
+    assert_eq!(call(&app, "POST", "/api/auth/login", None, Some(sign_in("N3w!Passw0rd-long"))).await.0, StatusCode::OK);
+    let audited = |action: &'static str| {
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM audit_log WHERE action = ? AND actor = 'viewer'").bind(action).fetch_one(&pool)
+    };
+    assert_eq!(audited("user.password_change").await.unwrap(), 1);
+    assert_eq!(audited("user.password_change_failed").await.unwrap(), 1, "the wrong current password was audited");
+
+    let (_, issued) = impersonate(&app, &admin, "user-2").await;
+    let viewing = issued["token"].as_str().unwrap();
+    let (status, _) = call(&app, "POST", "/api/auth/password", Some(viewing), Some(change("anything", "N3w!Passw0rd-long"))).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "an admin viewing an account does not change its password");
+    assert_eq!(call(&app, "POST", "/api/auth/password", None, Some(change("a", "b"))).await.0, StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]

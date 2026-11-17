@@ -2,10 +2,11 @@ import type { Agent } from './api'
 import { subnet } from './format'
 
 export type NodeState = 'active' | 'stale' | 'suspect' | 'incident' | 'stopped'
-export type GroupBy = 'subnet' | 'os' | 'version' | 'liveness'
+export type GroupBy = 'subnet' | 'fleet' | 'os' | 'version' | 'liveness'
 
 export const GROUP_BY: { id: GroupBy; label: string }[] = [
   { id: 'subnet', label: 'Subnet' },
+  { id: 'fleet', label: 'Fleet' },
   { id: 'os', label: 'OS' },
   { id: 'version', label: 'Version' },
   { id: 'liveness', label: 'Liveness' },
@@ -38,6 +39,8 @@ export function groupKey(agent: Agent, state: NodeState, by: GroupBy): string {
   switch (by) {
     case 'subnet':
       return subnet(agent.ip_address)
+    case 'fleet':
+      return agent.enrollment_group || 'install keys'
     case 'os':
       return agent.os_version || agent.platform
     case 'version':

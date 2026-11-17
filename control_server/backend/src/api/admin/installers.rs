@@ -1,4 +1,7 @@
-use axum::{extract::State, Extension, Json};
+use axum::{
+    extract::{Path, State},
+    Extension, Json,
+};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -116,6 +119,16 @@ pub struct InstallKey {
     pub enrolled_agent_id: Option<String>,
 }
 
+const INSTALL_KEY_COLUMNS: &str = "id, created_at, expires_at, created_by, agent_version, used_at, revoked_at, enrolled_at, enrolled_agent_id";
+
+type InstallKeyRow = (String, i64, i64, String, String, Option<i64>, Option<i64>, Option<i64>, Option<String>);
+
+impl From<InstallKeyRow> for InstallKey {
+    fn from((id, created_at, expires_at, created_by, agent_version, used_at, revoked_at, enrolled_at, enrolled_agent_id): InstallKeyRow) -> Self {
+        InstallKey { id, created_at, expires_at, created_by, agent_version, used_at, revoked_at, enrolled_at, enrolled_agent_id }
+    }
+}
+
 #[derive(Serialize, ToSchema)]
 pub struct InstallKeysResponse {
     pub keys: Vec<InstallKey>,
@@ -134,26 +147,47 @@ pub async fn list_install_keys(
     State(state): State<AppState>,
     Extension(_user): Extension<User>,
 ) -> Result<Json<InstallKeysResponse>, AppError> {
-    let keys = sqlx::query_as::<_, (String, i64, i64, String, String, Option<i64>, Option<i64>, Option<i64>, Option<String>)>(
-        "SELECT id, created_at, expires_at, created_by, agent_version, used_at, revoked_at, enrolled_at, enrolled_agent_id
-         FROM install_keys
-         ORDER BY created_at DESC"
-    )
-    .fetch_all(&state.pool)
-    .await?
-    .into_iter()
-    .map(|(id, created_at, expires_at, created_by, agent_version, used_at, revoked_at, enrolled_at, enrolled_agent_id)| InstallKey {
-        id,
-        created_at,
-        expires_at,
-        created_by,
-        agent_version,
-        used_at,
-        revoked_at,
-        enrolled_at,
-        enrolled_agent_id,
-    })
-    .collect();
+    let keys = sqlx::query_as::<_, InstallKeyRow>(&format!("SELECT {} FROM install_keys ORDER BY created_at DESC", INSTALL_KEY_COLUMNS))
+        .fetch_all(&state.pool)
+        .await?
+        .into_iter()
+        .map(InstallKey::from)
+        .collect();
 
     Ok(Json(InstallKeysResponse { keys }))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/admin/installers/{id}",
+    tag = "admin",
+    params(("id" = String, Path, description = "Install key id")),
+    responses(
+        (status = 200, description = "The key is revoked and downloads and enrolls nothing more. An agent it already enrolled keeps working", body = InstallKey),
+        (status = 403, description = "Admin role required"),
+        (status = 404, description = "Unknown key")
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn revoke_install_key(State(state): State<AppState>, AdminUser(user): AdminUser, Path(id): Path<String>) -> Result<Json<InstallKey>, AppError> {
+    let newly_revoked = sqlx::query("UPDATE install_keys SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL")
+        .bind(chrono::Utc::now().timestamp())
+        .bind(&id)
+        .execute(&state.pool)
+        .await?
+        .rows_affected()
+        > 0;
+
+    let key: InstallKey = sqlx::query_as::<_, InstallKeyRow>(&format!("SELECT {} FROM install_keys WHERE id = ?", INSTALL_KEY_COLUMNS))
+        .bind(&id)
+        .fetch_optional(&state.pool)
+        .await?
+        .ok_or(AppError::NotFound)?
+        .into();
+
+    if newly_revoked {
+        audit::record_by(&state.pool, &user, "install_key.revoke", Some(&id), serde_json::json!({ "enrolled_agent_id": key.enrolled_agent_id })).await?;
+    }
+
+    Ok(Json(key))
 }

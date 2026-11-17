@@ -4,7 +4,7 @@ use utoipa::ToSchema;
 
 use crate::api::AppState;
 use crate::audit;
-use crate::auth::{create_jwt, create_mfa_challenge, verify_mfa_challenge, verify_password, JwtSecret, User};
+use crate::auth::{create_jwt, create_mfa_challenge, hash_password, password_policy_violation, verify_mfa_challenge, verify_password, JwtSecret, User};
 use crate::error::AppError;
 use crate::mfa;
 
@@ -119,6 +119,64 @@ pub async fn login(
 
     Ok(Json(LoginResponse {
         token: Some(create_jwt(&user.id, &user.username, &user.role, epoch, &secret)?),
+        username: user.username,
+        role: user.role,
+        mfa_required: false,
+        mfa_token: None,
+    }))
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct ChangePasswordRequest {
+    pub current_password: String,
+    pub password: String,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/auth/password",
+    tag = "auth",
+    request_body = ChangePasswordRequest,
+    responses(
+        (status = 200, description = "Password changed. Every other session of the account ended, and this one goes on with the token returned", body = LoginResponse),
+        (status = 400, description = "The current password is wrong, or the new one does not meet the policy"),
+        (status = 403, description = "An impersonated account's password is not changed by the admin viewing it")
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn change_password(
+    State(state): State<AppState>,
+    Extension(user): Extension<User>,
+    Json(req): Json<ChangePasswordRequest>,
+) -> Result<Json<LoginResponse>, AppError> {
+    if user.impersonator.is_some() {
+        return Err(AppError::Forbidden);
+    }
+    if let Some(violation) = password_policy_violation(&req.password) {
+        return Err(AppError::BadRequest(violation.to_string()));
+    }
+
+    let current: String = sqlx::query_scalar("SELECT password_hash FROM users WHERE id = ? AND disabled_at IS NULL")
+        .bind(&user.id)
+        .fetch_optional(&state.pool)
+        .await?
+        .ok_or(AppError::Unauthorized)?;
+    // A wrong current password does not end the session, so the console keeps its place, and it is audited like a failed sign-in,
+    // as a stolen session guessing the password is what it can be
+    if !verify_password(&req.current_password, &current)? {
+        audit::record_by(&state.pool, &user, "user.password_change_failed", Some(&user.id), serde_json::json!({ "username": user.username })).await?;
+        return Err(AppError::BadRequest("The current password is wrong".to_string()));
+    }
+
+    let epoch: i64 = sqlx::query_scalar("UPDATE users SET password_hash = ?, session_epoch = session_epoch + 1 WHERE id = ? RETURNING session_epoch")
+        .bind(hash_password(&req.password)?)
+        .bind(&user.id)
+        .fetch_one(&state.pool)
+        .await?;
+    audit::record_by(&state.pool, &user, "user.password_change", Some(&user.id), serde_json::json!({ "username": user.username })).await?;
+
+    Ok(Json(LoginResponse {
+        token: Some(create_jwt(&user.id, &user.username, &user.role, epoch, &jwt_secret()?)?),
         username: user.username,
         role: user.role,
         mfa_required: false,

@@ -31,6 +31,12 @@ export const STORY = {
   noProver: 'LAB',
 }
 
+// Groups that enroll through a fleet token: the group, the token's label, and how many machines it may enroll
+export const FLEET_TOKENS = [
+  ['WEB', 'prod-web', 20],
+  ['LAB', 'lab-vms', null],
+]
+
 const WITHHELD_RULES = ['server-child', 'reverse-shell']
 const HISTORY_SECONDS = 1500
 const RECENT_SECONDS = 300

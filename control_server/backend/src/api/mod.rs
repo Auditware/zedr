@@ -108,6 +108,7 @@ pub struct SystemEventBroadcast {
         admin::incidents::list_incidents,
         admin::incidents::close_incident,
         admin::installers::generate_install_key,
+        admin::installers::revoke_install_key,
         admin::enrollment_tokens::create_enrollment_token,
         admin::enrollment_tokens::list_enrollment_tokens,
         admin::enrollment_tokens::revoke_enrollment_token,
@@ -126,6 +127,7 @@ pub struct SystemEventBroadcast {
         auth::login,
         auth::login_mfa,
         auth::mfa_status,
+        auth::change_password,
         auth::mfa_setup,
         auth::mfa_enable,
         auth::mfa_disable,
@@ -306,6 +308,7 @@ fn create_router_with_appstate(state: AppState, frontend_dist: Option<PathBuf>) 
         .route("/api/admin/incidents/:id/close", post(admin::incidents::close_incident))
         .route("/api/admin/installers", get(admin::installers::list_install_keys))
         .route("/api/admin/installers/generate", post(admin::installers::generate_install_key))
+        .route("/api/admin/installers/:id", axum::routing::delete(admin::installers::revoke_install_key))
         .route(
             "/api/admin/enrollment-tokens",
             get(admin::enrollment_tokens::list_enrollment_tokens).post(admin::enrollment_tokens::create_enrollment_token),
@@ -330,6 +333,7 @@ fn create_router_with_appstate(state: AppState, frontend_dist: Option<PathBuf>) 
         .route("/api/admin/users/:id/impersonate", post(admin::users::impersonate))
         .route("/api/admin/audit", get(admin::audit::list_audit))
         .route("/api/auth/mfa", get(auth::mfa_status))
+        .route("/api/auth/password", post(auth::change_password))
         .route("/api/auth/mfa/setup", post(auth::mfa_setup))
         .route("/api/auth/mfa/enable", post(auth::mfa_enable))
         .route("/api/auth/mfa/disable", post(auth::mfa_disable))

@@ -324,6 +324,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/admin/installers/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete: operations["revoke_install_key"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/admin/ruleset": {
         parameters: {
             query?: never;
@@ -548,6 +564,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/auth/password": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["change_password"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/events": {
         parameters: {
             query?: never;
@@ -756,6 +788,10 @@ export interface components {
             totals: components["schemas"]["ChainTotals"];
             /** @description The most recent windows, newest first */
             windows: components["schemas"]["WindowSummary"][];
+        };
+        ChangePasswordRequest: {
+            current_password: string;
+            password: string;
         };
         CreateApiKeyRequest: {
             name: string;
@@ -994,6 +1030,22 @@ export interface components {
             timestamp: number;
             version: string;
         };
+        InstallKey: {
+            agent_version: string;
+            /** Format: int64 */
+            created_at: number;
+            created_by: string;
+            enrolled_agent_id?: string | null;
+            /** Format: int64 */
+            enrolled_at?: number | null;
+            /** Format: int64 */
+            expires_at: number;
+            id: string;
+            /** Format: int64 */
+            revoked_at?: number | null;
+            /** Format: int64 */
+            used_at?: number | null;
+        };
         InstallKeyResponse: {
             agent_version: string;
             /** Format: int64 */
@@ -1089,7 +1141,7 @@ export interface components {
          * @description The package manager whose database lists a package
          * @enum {string}
          */
-        PackageManager: "dpkg" | "apk";
+        PackageManager: "dpkg" | "apk" | "homebrew" | "mac_app" | "mac_pkg" | "windows_installed";
         /** @description One thing that makes the system start a program without anyone asking, and what happened to it */
         PersistenceEvent: {
             action: components["schemas"]["InventoryAction"];
@@ -1107,7 +1159,7 @@ export interface components {
          * @description Where a persistence item lives
          * @enum {string}
          */
-        PersistenceKind: "systemd_unit" | "systemd_timer" | "cron" | "shell_profile" | "authorized_key" | "ld_preload" | "rc_local" | "init_script";
+        PersistenceKind: "systemd_unit" | "systemd_timer" | "cron" | "shell_profile" | "authorized_key" | "ld_preload" | "rc_local" | "init_script" | "launch_daemon" | "launch_agent" | "run_key" | "windows_service" | "scheduled_task" | "startup_folder";
         /**
          * @description Process action types
          * @enum {string}
@@ -2077,6 +2129,43 @@ export interface operations {
             };
         };
     };
+    revoke_install_key: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Install key id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The key is revoked and downloads and enrolls nothing more. An agent it already enrolled keeps working */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InstallKey"];
+                };
+            };
+            /** @description Admin role required */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Unknown key */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     ruleset: {
         parameters: {
             query?: never;
@@ -2642,6 +2731,44 @@ export interface operations {
             };
             /** @description A second factor is already enabled */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    change_password: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ChangePasswordRequest"];
+            };
+        };
+        responses: {
+            /** @description Password changed. Every other session of the account ended, and this one goes on with the token returned */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LoginResponse"];
+                };
+            };
+            /** @description The current password is wrong, or the new one does not meet the policy */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description An impersonated account's password is not changed by the admin viewing it */
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };

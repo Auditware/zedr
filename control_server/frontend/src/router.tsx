@@ -14,7 +14,7 @@ function index(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : undefined
 }
 
-const GROUPS: GroupBy[] = ['subnet', 'os', 'version', 'liveness']
+const GROUPS: GroupBy[] = ['subnet', 'fleet', 'os', 'version', 'liveness']
 const LENSES = ['processes', 'network', 'files', 'persistence', 'sealed', 'agent'] as const
 const FOCUSES: Focus[] = ['all', 'notable']
 

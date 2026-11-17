@@ -50,6 +50,11 @@ describe('groupKey', () => {
   it('keeps endpoints without an address together', () => {
     expect(groupKey(agent({ ip_address: null }), 'active', 'subnet')).toBe('no address')
   })
+
+  it('groups by the fleet token an endpoint enrolled with, and the rest by install key', () => {
+    expect(groupKey(agent({ enrollment_group: 'prod-web' }), 'active', 'fleet')).toBe('prod-web')
+    expect(groupKey(agent({ enrollment_group: null }), 'active', 'fleet')).toBe('install keys')
+  })
 })
 
 describe('layoutMap', () => {

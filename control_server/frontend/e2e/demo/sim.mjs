@@ -5,7 +5,7 @@ import https from 'node:https'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { CERT, demoClient } from './env.mjs'
-import { fleet, scenario, STORY } from './scenario.mjs'
+import { FLEET_TOKENS, fleet, scenario, STORY } from './scenario.mjs'
 
 const SPARE_KEYS = 3
 const AGENT_WORKSPACE = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../../agent')
@@ -26,9 +26,14 @@ if (login.status !== 200) throw new Error(`demo login failed with ${login.status
 const token = login.json.token
 const installKey = async () => (await call('POST', '/api/admin/installers/generate', { token, body: '{}' })).json.install_key
 
-const hosts = fleet().length
+const fleetToken = async (label, max_uses) =>
+  (await call('POST', '/api/admin/enrollment-tokens', { token, body: JSON.stringify({ label, expires_in_days: 30, max_uses }) })).json.token
+
+// Servers and lab machines come from images, so they enroll with a fleet token of their group. Laptops and desktops are installed one by one
+const tokens = new Map()
+for (const [group, label, seats] of FLEET_TOKENS) tokens.set(group, await fleetToken(label, seats))
 const enrollmentKeys = []
-while (enrollmentKeys.length < hosts) enrollmentKeys.push(await installKey())
+for (const endpoint of fleet()) enrollmentKeys.push(tokens.get(endpoint.group) ?? (await installKey()))
 
 // The simulator speaks through the agent's own link, which trusts the system's certificate authorities and not the
 // throwaway certificate of a test tenant, so its requests pass through this relay on the loopback interface.
