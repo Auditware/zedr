@@ -2450,7 +2450,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Password replaced and every session of the account ended */
+            /** @description Password replaced, every session of the account ended and its failed sign-ins forgotten */
             204: {
                 headers: {
                     [name: string]: unknown;
@@ -2480,6 +2480,13 @@ export interface operations {
             };
             /** @description User not found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Too many wrong passwords for your account, Retry-After says how many seconds to wait */
+            429: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -2589,6 +2596,13 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Too many failed attempts for this username or from this address, Retry-After says how many seconds to wait */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             /** @description Internal server error */
             500: {
                 headers: {
@@ -2622,6 +2636,13 @@ export interface operations {
             };
             /** @description Invalid or expired challenge, or wrong code */
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Too many failed attempts for this account or from this address, Retry-After says how many seconds to wait */
+            429: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -2769,6 +2790,13 @@ export interface operations {
             };
             /** @description An impersonated account's password is not changed by the admin viewing it */
             403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Too many wrong passwords for this account, Retry-After says how many seconds to wait */
+            429: {
                 headers: {
                     [name: string]: unknown;
                 };

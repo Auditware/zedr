@@ -1,5 +1,8 @@
 import { currentToken, useSession } from './auth'
+import { ApiError } from './errors'
 import type { components } from './schema'
+
+export { ApiError }
 
 type Schemas = components['schemas']
 
@@ -51,17 +54,6 @@ export type UpgradeCommand = {
   created_at: number
 }
 
-export class ApiError extends Error {
-  readonly status: number
-  readonly column: number | null
-
-  constructor(status: number, message: string, column: number | null = null) {
-    super(message)
-    this.status = status
-    this.column = column
-  }
-}
-
 export const API_BASE: string = import.meta.env.DEV ? '' : (import.meta.env.VITE_API_URL ?? '')
 
 async function request<T>(method: string, path: string, body?: unknown, authenticated = true): Promise<T> {
@@ -101,7 +93,8 @@ async function request<T>(method: string, path: string, body?: unknown, authenti
         ? parsed.error
         : response.statusText
     const column = parsed && typeof parsed === 'object' && 'column' in parsed && typeof parsed.column === 'number' ? parsed.column : null
-    throw new ApiError(response.status, message, column)
+    const retryAfter = Number.parseInt(response.headers.get('Retry-After') ?? '', 10)
+    throw new ApiError(response.status, message, column, Number.isFinite(retryAfter) ? retryAfter : null)
   }
 
   return parsed as T

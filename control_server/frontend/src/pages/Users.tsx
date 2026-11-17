@@ -15,6 +15,7 @@ import { auditTone } from '@/lib/events'
 import { ago, clock, dateTime, span } from '@/lib/format'
 import { tone } from '@/lib/palette'
 import { useMedia, useNow } from '@/lib/queries'
+import { retryAfterOf, useRetryWait, waitMessage } from '@/lib/wait'
 
 const route = getRouteApi('/app/users')
 
@@ -116,10 +117,13 @@ function NewUser({ open, onOpenChange }: { open: boolean; onOpenChange: (open: b
 function NewPassword({ user, self, onClose }: { user: UserSummary; self: boolean; onClose: () => void }) {
   const [password, setPassword] = useState('')
   const [current, setCurrent] = useState('')
+  const wait = useRetryWait()
   const reset = useMutation({
     mutationFn: () => api.resetPassword(user.id, password, self ? current : undefined),
     onSuccess: onClose,
+    onError: wait.hold,
   })
+  const failure = reset.error && retryAfterOf(reset.error) === null ? message(reset.error, 'Password not changed') : ''
 
   return (
     <Dialog open onOpenChange={(open) => (open ? undefined : onClose())} title={`New password for ${user.username}`}>
@@ -138,9 +142,9 @@ function NewPassword({ user, self, onClose }: { user: UserSummary; self: boolean
           <input autoFocus={!self} type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="new-password" className={inputClass} />
         </Field>
         <div role="alert" className="min-h-5 text-sm text-alert-soft">
-          {reset.error ? message(reset.error, 'Password not changed') : ''}
+          {wait.left > 0 ? waitMessage(wait.left) : failure}
         </div>
-        <Button type="submit" variant="primary" className="mt-1 w-full" disabled={reset.isPending || !password || (self && !current)}>
+        <Button type="submit" variant="primary" className="mt-1 w-full" disabled={reset.isPending || wait.left > 0 || !password || (self && !current)}>
           Set password and sign out every session
         </Button>
       </form>

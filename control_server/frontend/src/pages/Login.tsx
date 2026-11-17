@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button'
 import { inputClass } from '@/components/ui/input'
 import { ApiError, api, testTenantLogin, type LoginResponse } from '@/lib/api'
 import { useSession } from '@/lib/auth'
+import { useRetryWait, waitMessage } from '@/lib/wait'
 
 export function Login() {
   return import.meta.env.DEV ? <TestTenantLogin /> : <CredentialLogin />
@@ -70,6 +71,7 @@ function CredentialLogin() {
   const [challenge, setChallenge] = useState<string | null>(null)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+  const wait = useRetryWait()
 
   const submit = async (event: FormEvent) => {
     event.preventDefault()
@@ -82,7 +84,7 @@ function CredentialLogin() {
       if (response.mfa_required && response.mfa_token) setChallenge(response.mfa_token)
       else enter(response)
     } catch (cause) {
-      setError(cause instanceof ApiError && cause.status === 401 ? 'Not accepted' : 'Server unreachable')
+      if (!wait.hold(cause)) setError(cause instanceof ApiError && cause.status === 401 ? 'Not accepted' : 'Server unreachable')
     } finally {
       setBusy(false)
     }
@@ -128,9 +130,9 @@ function CredentialLogin() {
           </>
         )}
         <div role="alert" className="mt-3 min-h-5 text-sm text-alert-soft">
-          {error}
+          {wait.left > 0 ? waitMessage(wait.left) : error}
         </div>
-        <Button type="submit" variant="primary" disabled={busy} className="mt-2 w-full">
+        <Button type="submit" variant="primary" disabled={busy || wait.left > 0} className="mt-2 w-full">
           {challenge ? 'Verify' : 'Sign in'}
         </Button>
       </form>

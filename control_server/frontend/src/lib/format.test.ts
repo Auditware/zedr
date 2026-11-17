@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { ago, shortHash, shortId, span, subnet } from './format'
+import { ago, countdown, shortHash, shortId, span, subnet } from './format'
 
 describe('span', () => {
   it('uses the largest unit that fits', () => {
@@ -14,6 +14,15 @@ describe('span', () => {
   it('never goes negative when clocks disagree', () => {
     expect(span(-30)).toBe('0s')
     expect(ago(1000, 990)).toBe('0s')
+  })
+})
+
+describe('countdown', () => {
+  it('shows minutes and seconds left, never below zero', () => {
+    expect(countdown(900)).toBe('15:00')
+    expect(countdown(61)).toBe('1:01')
+    expect(countdown(9.2)).toBe('0:10')
+    expect(countdown(-4)).toBe('0:00')
   })
 })
 

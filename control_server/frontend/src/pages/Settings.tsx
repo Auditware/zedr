@@ -12,6 +12,7 @@ import { ago, span } from '@/lib/format'
 import { useLive } from '@/lib/live'
 import { useNow } from '@/lib/queries'
 import { resolveTone } from '@/lib/palette'
+import { useRetryWait, waitMessage } from '@/lib/wait'
 
 function message(cause: unknown, fallback: string): string {
   return cause instanceof ApiError ? cause.message : fallback
@@ -24,6 +25,7 @@ function Password() {
   const [again, setAgain] = useState('')
   const [error, setError] = useState('')
   const [changed, setChanged] = useState(false)
+  const wait = useRetryWait()
 
   const change = useMutation({
     mutationFn: () => api.changePassword(current, next),
@@ -34,7 +36,9 @@ function Password() {
       setAgain('')
       setChanged(true)
     },
-    onError: (cause) => setError(message(cause, 'Password not changed')),
+    onError: (cause) => {
+      if (!wait.hold(cause)) setError(message(cause, 'Password not changed'))
+    },
   })
 
   const submit = (event: FormEvent) => {
@@ -61,9 +65,9 @@ function Password() {
         <Field label="New password again">
           <input type="password" autoComplete="new-password" required value={again} onChange={(event) => setAgain(event.target.value)} className={inputClass} />
         </Field>
-        {error ? (
+        {wait.left > 0 || error ? (
           <p role="alert" className="mb-3 text-sm text-alert-soft">
-            {error}
+            {wait.left > 0 ? waitMessage(wait.left) : error}
           </p>
         ) : null}
         {changed ? (
@@ -71,7 +75,7 @@ function Password() {
             Changed. Every other session of this account has ended.
           </p>
         ) : null}
-        <Button type="submit" disabled={change.isPending}>
+        <Button type="submit" disabled={change.isPending || wait.left > 0}>
           <KeyRound size={15} strokeWidth={1.75} aria-hidden />
           Change password
         </Button>

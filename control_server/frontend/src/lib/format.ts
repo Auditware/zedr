@@ -14,6 +14,11 @@ export function span(seconds: number): string {
   return `${Math.floor(s / 86400)}d`
 }
 
+export function countdown(seconds: number): string {
+  const s = Math.max(0, Math.ceil(seconds))
+  return `${Math.floor(s / 60)}:${two(s % 60)}`
+}
+
 export function ago(timestamp: number, now: number = nowSeconds()): string {
   return span(now - timestamp)
 }

@@ -8,6 +8,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::api::AppState;
+use crate::attempts::{self, Subject};
 use crate::audit;
 use crate::auth::{
     create_impersonation, hash_password, password_policy_violation, verify_password, AdminUser, Impersonator, JwtSecret, IMPERSONATION_MINUTES,
@@ -260,11 +261,12 @@ pub async fn update_user(
     params(("id" = String, Path, description = "User ID")),
     request_body = ResetPasswordRequest,
     responses(
-        (status = 204, description = "Password replaced and every session of the account ended"),
+        (status = 204, description = "Password replaced, every session of the account ended and its failed sign-ins forgotten"),
         (status = 400, description = "Password does not meet the policy, or your current password is missing"),
         (status = 401, description = "Current password is wrong"),
         (status = 403, description = "Admin role required"),
-        (status = 404, description = "User not found")
+        (status = 404, description = "User not found"),
+        (status = 429, description = "Too many wrong passwords for your account, Retry-After says how many seconds to wait")
     )
 )]
 pub async fn reset_password(
@@ -283,11 +285,16 @@ pub async fn reset_password(
         .await?;
     let (username, current_hash) = target.ok_or(AppError::NotFound)?;
 
+    let account = Subject::account(&username);
     if id == admin.id {
         let current = req
             .current_password
             .ok_or_else(|| AppError::BadRequest("Your current password is required to change your own".to_string()))?;
+        let attempt = attempts::begin(&state.pool, std::slice::from_ref(&account)).await?;
         if !verify_password(&current, &current_hash)? {
+            for lock in attempt.failed() {
+                audit::record_by(&state.pool, &admin, attempts::LOCKED, Some(&id), lock.detail()).await?;
+            }
             return Err(AppError::Unauthorized);
         }
     }
@@ -297,6 +304,7 @@ pub async fn reset_password(
         .bind(&id)
         .execute(&state.pool)
         .await?;
+    attempts::forget(&state.pool, &account).await?;
 
     audit::record_by(&state.pool, &admin, "user.password_reset", Some(&id), serde_json::json!({ "username": username })).await?;
 

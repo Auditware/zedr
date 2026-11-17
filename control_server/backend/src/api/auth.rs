@@ -1,8 +1,14 @@
-use axum::{extract::State, Extension, Json};
+use std::net::{IpAddr, SocketAddr};
+
+use axum::{
+    extract::{ConnectInfo, State},
+    Extension, Json,
+};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::api::AppState;
+use crate::attempts::{self, Attempt, Subject};
 use crate::audit;
 use crate::auth::{create_jwt, create_mfa_challenge, hash_password, password_policy_violation, verify_mfa_challenge, verify_password, JwtSecret, User};
 use crate::error::AppError;
@@ -63,6 +69,17 @@ fn now_secs() -> u64 {
     chrono::Utc::now().timestamp().max(0) as u64
 }
 
+fn peer_ip(peer: Option<ConnectInfo<SocketAddr>>) -> Option<IpAddr> {
+    peer.map(|ConnectInfo(address)| address.ip())
+}
+
+async fn audit_locks(state: &AppState, attempt: Attempt, user: &User) -> Result<(), AppError> {
+    for lock in attempt.failed() {
+        audit::record_by(&state.pool, user, attempts::LOCKED, Some(&user.id), lock.detail()).await?;
+    }
+    Ok(())
+}
+
 fn decode_secret(secret_hex: &str) -> Result<Vec<u8>, AppError> {
     hex::decode(secret_hex).map_err(|_| AppError::InternalError("Stored MFA secret is corrupt".to_string()))
 }
@@ -75,13 +92,17 @@ fn decode_secret(secret_hex: &str) -> Result<Vec<u8>, AppError> {
     responses(
         (status = 200, description = "Login successful, or a second factor is required", body = LoginResponse),
         (status = 401, description = "Invalid credentials"),
+        (status = 429, description = "Too many failed attempts for this username or from this address, Retry-After says how many seconds to wait"),
         (status = 500, description = "Internal server error")
     )
 )]
 pub async fn login(
     State(state): State<AppState>,
+    peer: Option<ConnectInfo<SocketAddr>>,
     Json(req): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, AppError> {
+    let attempt = attempts::begin(&state.pool, &[Subject::account(&req.username), Subject::address(peer_ip(peer))]).await?;
+
     let user: Option<(String, String, String, String, bool, i64)> = sqlx::query_as(
         "SELECT id, username, password_hash, role, mfa_enabled, session_epoch FROM users WHERE username = ? AND disabled_at IS NULL"
     )
@@ -99,12 +120,16 @@ pub async fn login(
     let Some((user, mfa_enabled, epoch)) = authenticated else {
         let attempted: String = req.username.chars().take(MAX_LOGGED_USERNAME_CHARS).collect();
         audit::record(&state.pool, None, &attempted, "login.failed", None, serde_json::json!({})).await?;
+        for lock in attempt.failed() {
+            audit::record(&state.pool, None, &attempted, attempts::LOCKED, None, lock.detail()).await?;
+        }
         return Err(AppError::Unauthorized);
     };
 
     let secret = jwt_secret()?;
 
     if mfa_enabled {
+        attempt.passed(&state.pool).await?;
         return Ok(Json(LoginResponse {
             token: None,
             username: user.username,
@@ -114,6 +139,7 @@ pub async fn login(
         }));
     }
 
+    attempt.succeeded(&state.pool).await?;
     audit::record_by(&state.pool, &user, "login", None, serde_json::json!({ "mfa": false })).await?;
     record_login(&state, &user.id).await?;
 
@@ -140,7 +166,8 @@ pub struct ChangePasswordRequest {
     responses(
         (status = 200, description = "Password changed. Every other session of the account ended, and this one goes on with the token returned", body = LoginResponse),
         (status = 400, description = "The current password is wrong, or the new one does not meet the policy"),
-        (status = 403, description = "An impersonated account's password is not changed by the admin viewing it")
+        (status = 403, description = "An impersonated account's password is not changed by the admin viewing it"),
+        (status = 429, description = "Too many wrong passwords for this account, Retry-After says how many seconds to wait")
     ),
     security(("bearer_auth" = []))
 )]
@@ -161,10 +188,12 @@ pub async fn change_password(
         .fetch_optional(&state.pool)
         .await?
         .ok_or(AppError::Unauthorized)?;
-    // A wrong current password does not end the session, so the console keeps its place, and it is audited like a failed sign-in,
-    // as a stolen session guessing the password is what it can be
+    // A wrong current password does not end the session, so the console keeps its place, and it is audited and limited like a failed
+    // sign-in, as a stolen session guessing the password is what it can be
+    let attempt = attempts::begin(&state.pool, &[Subject::account(&user.username)]).await?;
     if !verify_password(&req.current_password, &current)? {
         audit::record_by(&state.pool, &user, "user.password_change_failed", Some(&user.id), serde_json::json!({ "username": user.username })).await?;
+        audit_locks(&state, attempt, &user).await?;
         return Err(AppError::BadRequest("The current password is wrong".to_string()));
     }
 
@@ -173,6 +202,7 @@ pub async fn change_password(
         .bind(&user.id)
         .fetch_one(&state.pool)
         .await?;
+    attempt.succeeded(&state.pool).await?;
     audit::record_by(&state.pool, &user, "user.password_change", Some(&user.id), serde_json::json!({ "username": user.username })).await?;
 
     Ok(Json(LoginResponse {
@@ -200,11 +230,13 @@ async fn record_login(state: &AppState, user_id: &str) -> Result<(), AppError> {
     request_body = MfaLoginRequest,
     responses(
         (status = 200, description = "Second factor accepted", body = LoginResponse),
-        (status = 401, description = "Invalid or expired challenge, or wrong code")
+        (status = 401, description = "Invalid or expired challenge, or wrong code"),
+        (status = 429, description = "Too many failed attempts for this account or from this address, Retry-After says how many seconds to wait")
     )
 )]
 pub async fn login_mfa(
     State(state): State<AppState>,
+    peer: Option<ConnectInfo<SocketAddr>>,
     Json(req): Json<MfaLoginRequest>,
 ) -> Result<Json<LoginResponse>, AppError> {
     let secret = jwt_secret()?;
@@ -224,15 +256,18 @@ pub async fn login_mfa(
         return Err(AppError::Unauthorized);
     };
 
+    let attempt = attempts::begin(&state.pool, &[Subject::account(&user.username), Subject::address(peer_ip(peer))]).await?;
     let method = if consume_totp(&state, &user.id, &mfa_secret, &req.code, last_step).await? {
         "totp"
     } else if consume_recovery_code(&state, &user.id, &req.code).await? {
         "recovery_code"
     } else {
         audit::record_by(&state.pool, &user, "login.mfa_failed", None, serde_json::json!({})).await?;
+        audit_locks(&state, attempt, &user).await?;
         return Err(AppError::Unauthorized);
     };
 
+    attempt.succeeded(&state.pool).await?;
     audit::record_by(&state.pool, &user, "login", None, serde_json::json!({ "mfa": method })).await?;
     record_login(&state, &user.id).await?;
 

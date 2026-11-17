@@ -94,7 +94,7 @@ export function incidentTitle(incident: IncidentLike): string {
 }
 
 export function auditTone(action: string): string {
-  if (action.includes('failed') || action.includes('rejected') || action.includes('delete') || action.includes('disable')) return tone('alert')
+  if (action.includes('failed') || action.includes('locked') || action.includes('rejected') || action.includes('delete') || action.includes('disable')) return tone('alert')
   if (action.startsWith('signing_key') || action.startsWith('mfa') || action.startsWith('user.') || action.startsWith('view.')) return tone('warn')
   if (action.startsWith('login')) return tone('node')
   return tone('soft')

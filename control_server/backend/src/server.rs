@@ -44,7 +44,8 @@ pub async fn run(receipt_verifier: Option<Arc<dyn ReceiptVerifier>>) -> Result<(
             axum::http::Method::POST,
             axum::http::Method::DELETE,
         ])
-        .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION]);
+        .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION])
+        .expose_headers([header::RETRY_AFTER]);
 
     let (agent_events_tx, _) = tokio::sync::broadcast::channel(100);
     let (system_events_tx, _) = tokio::sync::broadcast::channel(1000);

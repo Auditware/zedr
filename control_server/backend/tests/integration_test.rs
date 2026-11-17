@@ -4684,3 +4684,192 @@ async fn test_the_api_document_describes_the_sealed_telemetry_endpoints() {
     }
     assert!(document["components"]["schemas"]["ChainPosition"].is_null());
 }
+
+async fn try_auth(app: &axum::Router, uri: &str, token: Option<&str>, body: serde_json::Value) -> (StatusCode, Option<u64>) {
+    let mut request = Request::builder().method("POST").uri(uri).header("content-type", "application/json");
+    if let Some(token) = token {
+        request = request.header("authorization", format!("Bearer {}", token));
+    }
+    let response = app.clone().oneshot(request.body(Body::from(body.to_string())).unwrap()).await.unwrap();
+    let retry_after = response.headers().get("retry-after").map(|value| value.to_str().unwrap().parse().unwrap());
+    (response.status(), retry_after)
+}
+
+async fn try_sign_in(app: &axum::Router, username: &str, password: &str) -> (StatusCode, Option<u64>) {
+    try_auth(app, "/api/auth/login", None, serde_json::json!({ "username": username, "password": password })).await
+}
+
+async fn age_failures(pool: &SqlitePool, seconds: i64) {
+    sqlx::query("UPDATE auth_failures SET at = at - ?").bind(seconds).execute(pool).await.unwrap();
+}
+
+async fn locks(pool: &SqlitePool) -> Vec<serde_json::Value> {
+    let rows: Vec<(String, String)> = sqlx::query_as("SELECT actor, detail FROM audit_log WHERE action = 'auth.locked' ORDER BY seq").fetch_all(pool).await.unwrap();
+    rows.into_iter()
+        .map(|(actor, detail)| {
+            let mut entry: serde_json::Value = serde_json::from_str(&detail).unwrap();
+            entry["actor"] = actor.into();
+            entry
+        })
+        .collect()
+}
+
+fn lock(actor: &str, scope: &str, subject: &str, failures: i64, retry_after: i64) -> serde_json::Value {
+    serde_json::json!({ "actor": actor, "scope": scope, "subject": subject, "failures": failures, "retry_after": retry_after })
+}
+
+const WRONG_PASSWORD: &str = "Wrong-Horse-0";
+
+#[tokio::test]
+async fn test_failed_sign_ins_make_a_username_wait_and_a_sign_in_forgets_them() {
+    let (app, pool) = create_test_app_with_pool().await;
+    insert_user(&pool, "u-guarded", "guarded", ACCOUNT_PASSWORD, "admin").await;
+    insert_user(&pool, "u-bystander", "bystander", ACCOUNT_PASSWORD, "user").await;
+
+    for _ in 0..4 {
+        assert_eq!(try_sign_in(&app, "guarded", WRONG_PASSWORD).await, (StatusCode::UNAUTHORIZED, None));
+    }
+    assert_eq!(try_sign_in(&app, "guarded", ACCOUNT_PASSWORD).await.0, StatusCode::OK, "four failures do not make the account wait");
+    for _ in 0..5 {
+        assert_eq!(try_sign_in(&app, "guarded", WRONG_PASSWORD).await.0, StatusCode::UNAUTHORIZED, "the sign-in forgot the failures before it");
+    }
+
+    let (status, retry_after) = try_sign_in(&app, "guarded", ACCOUNT_PASSWORD).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "after five failures even the right password waits");
+    assert!(matches!(retry_after, Some(1..=60)), "the first wait is a minute: {:?}", retry_after);
+    assert_eq!(try_sign_in(&app, "bystander", ACCOUNT_PASSWORD).await.0, StatusCode::OK, "another account is not kept waiting");
+
+    age_failures(&pool, 60).await;
+    assert_eq!(try_sign_in(&app, "guarded", WRONG_PASSWORD).await.0, StatusCode::UNAUTHORIZED, "the wait lifted after a minute");
+    let (status, retry_after) = try_sign_in(&app, "guarded", WRONG_PASSWORD).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert!(matches!(retry_after, Some(61..=120)), "the next failure doubled the wait: {:?}", retry_after);
+
+    assert_eq!(
+        locks(&pool).await,
+        vec![lock("guarded", "account", "guarded", 5, 60), lock("guarded", "account", "guarded", 6, 120)],
+        "each failure that starts or lengthens a wait is audited, a refused attempt is neither counted nor audited"
+    );
+}
+
+#[tokio::test]
+async fn test_an_unknown_username_waits_like_a_real_one_from_every_address_until_its_failures_are_an_hour_old() {
+    let pool = create_test_db().await;
+    let first = app_with_allowlist(pool.clone(), "", Some("192.0.2.10"));
+    let second = app_with_allowlist(pool.clone(), "", Some("192.0.2.11"));
+
+    for _ in 0..5 {
+        assert_eq!(try_sign_in(&first, "ghost", WRONG_PASSWORD).await, (StatusCode::UNAUTHORIZED, None));
+    }
+    let (status, refused) = call(&second, "POST", "/api/auth/login", None, Some(serde_json::json!({ "username": "ghost", "password": WRONG_PASSWORD }))).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "a username waits from every address, and whether it exists does not show");
+    assert_eq!(refused["error"], "Too many failed attempts");
+
+    age_failures(&pool, 30).await;
+    assert_eq!(try_sign_in(&first, "ghost", WRONG_PASSWORD).await.0, StatusCode::TOO_MANY_REQUESTS, "half a minute later it still waits");
+
+    age_failures(&pool, 3600).await;
+    for _ in 0..5 {
+        assert_eq!(try_sign_in(&first, "ghost", WRONG_PASSWORD).await.0, StatusCode::UNAUTHORIZED, "failures older than an hour no longer count");
+    }
+    assert_eq!(try_sign_in(&second, "ghost", WRONG_PASSWORD).await.0, StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
+async fn test_one_address_guessing_many_usernames_waits_and_another_address_does_not() {
+    let pool = create_test_db().await;
+    insert_user(&pool, "u-near", "near", ACCOUNT_PASSWORD, "user").await;
+    let guessing = app_with_allowlist(pool.clone(), "", Some("203.0.113.7"));
+    let elsewhere = app_with_allowlist(pool.clone(), "", Some("198.51.100.20"));
+
+    for n in 0..20 {
+        assert_eq!(try_sign_in(&guessing, &format!("spray-{}", n), WRONG_PASSWORD).await.0, StatusCode::UNAUTHORIZED);
+    }
+    let (status, retry_after) = try_sign_in(&guessing, "near", ACCOUNT_PASSWORD).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "twenty failures from one address make every username wait there");
+    assert!(matches!(retry_after, Some(1..=60)), "{:?}", retry_after);
+    assert_eq!(try_sign_in(&elsewhere, "near", ACCOUNT_PASSWORD).await.0, StatusCode::OK, "another address is not kept waiting");
+    assert_eq!(locks(&pool).await, vec![lock("spray-19", "address", "203.0.113.7", 20, 60)]);
+
+    let shared = app_with_allowlist(pool.clone(), "", Some("198.51.100.30"));
+    for n in 0..19 {
+        assert_eq!(try_sign_in(&shared, &format!("typo-{}", n), WRONG_PASSWORD).await.0, StatusCode::UNAUTHORIZED);
+    }
+    assert_eq!(try_sign_in(&shared, "near", ACCOUNT_PASSWORD).await.0, StatusCode::OK);
+    assert_eq!(try_sign_in(&shared, "typo-19", WRONG_PASSWORD).await.0, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        try_sign_in(&shared, "near", ACCOUNT_PASSWORD).await.0,
+        StatusCode::TOO_MANY_REQUESTS,
+        "a sign-in does not forget the failures of its address, or one working account would reset it between rounds of guessing"
+    );
+}
+
+async fn challenge_of(app: &axum::Router, username: &str) -> String {
+    let (status, challenge) = sign_in(app, username, ACCOUNT_PASSWORD).await;
+    assert_eq!((status, &challenge["mfa_required"]), (StatusCode::OK, &serde_json::json!(true)));
+    challenge["mfa_token"].as_str().unwrap().to_string()
+}
+
+#[tokio::test]
+async fn test_wrong_codes_count_against_the_account_and_a_right_password_does_not_forget_them() {
+    let (app, pool) = create_test_app_with_pool().await;
+    insert_user(&pool, "u-two", "two-step", ACCOUNT_PASSWORD, "admin").await;
+    let secret = zedr_control_server::mfa::new_secret();
+    sqlx::query("UPDATE users SET mfa_enabled = 1, mfa_secret = ? WHERE id = 'u-two'").bind(hex::encode(&secret)).execute(&pool).await.unwrap();
+    let mfa = |token: &str, code: &str| serde_json::json!({ "mfa_token": token, "code": code });
+    let wrong_code = zedr_control_server::mfa::code_at_step(&secret, totp_step_now() + 100);
+
+    let token = challenge_of(&app, "two-step").await;
+    for _ in 0..4 {
+        assert_eq!(try_auth(&app, "/api/auth/login/mfa", None, mfa(&token, &wrong_code)).await.0, StatusCode::UNAUTHORIZED);
+    }
+    let token = challenge_of(&app, "two-step").await;
+    assert_eq!(try_auth(&app, "/api/auth/login/mfa", None, mfa(&token, &wrong_code)).await.0, StatusCode::UNAUTHORIZED);
+
+    let right_code = zedr_control_server::mfa::code_at_step(&secret, totp_step_now());
+    let (status, retry_after) = try_auth(&app, "/api/auth/login/mfa", None, mfa(&token, &right_code)).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "the right password in between did not forget the wrong codes");
+    assert!(matches!(retry_after, Some(1..=60)), "{:?}", retry_after);
+    assert_eq!(try_sign_in(&app, "two-step", ACCOUNT_PASSWORD).await.0, StatusCode::TOO_MANY_REQUESTS, "the password waits with the code");
+    assert_eq!(locks(&pool).await, vec![lock("two-step", "account", "two-step", 5, 60)]);
+
+    age_failures(&pool, 60).await;
+    assert_eq!(try_auth(&app, "/api/auth/login/mfa", None, mfa(&token, &right_code)).await.0, StatusCode::OK);
+    let token = challenge_of(&app, "two-step").await;
+    for _ in 0..5 {
+        assert_eq!(try_auth(&app, "/api/auth/login/mfa", None, mfa(&token, &wrong_code)).await.0, StatusCode::UNAUTHORIZED, "the sign-in forgot the wrong codes");
+    }
+}
+
+#[tokio::test]
+async fn test_wrong_current_passwords_count_against_the_account_until_an_admin_replaces_the_password() {
+    let (app, pool) = create_test_app_with_pool().await;
+    insert_user(&pool, "u-stolen", "stolen", ACCOUNT_PASSWORD, "admin").await;
+    let session = session_of(&app, "stolen").await;
+    let change = |current: &str| serde_json::json!({ "current_password": current, "password": "N3w!Passw0rd-long" });
+
+    for _ in 0..5 {
+        assert_eq!(try_auth(&app, "/api/auth/password", Some(&session), change(WRONG_PASSWORD)).await.0, StatusCode::BAD_REQUEST);
+    }
+    let (status, retry_after) = try_auth(&app, "/api/auth/password", Some(&session), change(ACCOUNT_PASSWORD)).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "a session guessing its password waits like the sign-in");
+    assert!(matches!(retry_after, Some(1..=60)), "{:?}", retry_after);
+    assert_eq!(call(&app, "GET", "/api/admin/agents", Some(&session), None).await.0, StatusCode::OK, "the session goes on");
+    let own = serde_json::json!({ "password": "N3w!Passw0rd-long", "current_password": ACCOUNT_PASSWORD });
+    assert_eq!(try_auth(&app, "/api/admin/users/u-stolen/password", Some(&session), own).await.0, StatusCode::TOO_MANY_REQUESTS, "and so does an admin's change of their own");
+    assert_eq!(try_sign_in(&app, "stolen", ACCOUNT_PASSWORD).await.0, StatusCode::TOO_MANY_REQUESTS, "one budget for every check of the password");
+    assert_eq!(locks(&pool).await, vec![lock("stolen", "account", "stolen", 5, 60)]);
+
+    let replaced = serde_json::json!({ "password": "Fresh-Horse-Battery-8" });
+    assert_eq!(call(&app, "POST", "/api/admin/users/u-stolen/password", Some(&admin_token("admin")), Some(replaced)).await.0, StatusCode::NO_CONTENT);
+    assert_eq!(try_sign_in(&app, "stolen", "Fresh-Horse-Battery-8").await.0, StatusCode::OK, "a password another admin replaced works at once");
+}
+
+#[tokio::test]
+async fn test_parallel_guesses_do_not_get_past_the_limit() {
+    let app = create_test_app().await;
+    let guesses = (0..12).map(|_| try_sign_in(&app, "burst", WRONG_PASSWORD));
+    let statuses: Vec<StatusCode> = futures::future::join_all(guesses).await.into_iter().map(|(status, _)| status).collect();
+    assert_eq!(statuses.iter().filter(|status| **status == StatusCode::UNAUTHORIZED).count(), 5, "{:?}", statuses);
+    assert_eq!(statuses.iter().filter(|status| **status == StatusCode::TOO_MANY_REQUESTS).count(), 7, "{:?}", statuses);
+}

@@ -55,6 +55,8 @@
 - [ ] Platform attestation as a condition on a fleet token, starting with the AWS instance identity document
 - [x] Revoke an install key from the console, audited
 - [x] Every user changes their own password in Settings, which ends their other sessions
+- [x] Wrong passwords and codes limited per account and per client address, with a wait that grows and lifts by itself, audited, and the wait shown in the console (ADR 034)
+- [ ] Answer a sign-in for a username that does not exist as slowly as one for a real account, today only a real account's password is checked
 - [ ] List an account's sessions so one can be ended on its own, today ending sessions ends all of them
 - [ ] Refresh token rotation and a mandatory second factor for admins
 - [ ] Console: run the browser journeys (`npm run sweep`) in CI, incident acknowledgement

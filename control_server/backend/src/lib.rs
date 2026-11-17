@@ -1,5 +1,6 @@
 pub mod agent_auth;
 pub mod api;
+pub mod attempts;
 pub mod audit;
 pub mod auth;
 #[cfg(test)]

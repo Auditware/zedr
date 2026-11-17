@@ -1,5 +1,5 @@
 use axum::{
-    http::StatusCode,
+    http::{header, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
@@ -31,12 +31,20 @@ pub enum AppError {
     #[error("Unprocessable: {0}")]
     Unprocessable(String),
 
+    #[error("Too many failed attempts, retry after {0} seconds")]
+    TooManyAttempts(u64),
+
     #[error("Internal server error: {0}")]
     InternalError(String),
 }
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
+        let retry_after = match self {
+            AppError::TooManyAttempts(seconds) => Some(seconds),
+            _ => None,
+        };
+
         let (status, error_message) = match self {
             AppError::Database(ref e) => {
                 tracing::error!("Database error: {:?}", e);
@@ -52,6 +60,7 @@ impl IntoResponse for AppError {
             AppError::Forbidden => (StatusCode::FORBIDDEN, "Forbidden"),
             AppError::Conflict(ref msg) => (StatusCode::CONFLICT, msg.as_str()),
             AppError::Unprocessable(ref msg) => (StatusCode::UNPROCESSABLE_ENTITY, msg.as_str()),
+            AppError::TooManyAttempts(_) => (StatusCode::TOO_MANY_REQUESTS, "Too many failed attempts"),
             AppError::InternalError(ref msg) => {
                 tracing::error!("Internal server error: {}", msg);
                 (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error")
@@ -62,7 +71,11 @@ impl IntoResponse for AppError {
             error: error_message.to_string(),
         });
 
-        (status, body).into_response()
+        let mut response = (status, body).into_response();
+        if let Some(seconds) = retry_after {
+            response.headers_mut().insert(header::RETRY_AFTER, HeaderValue::from(seconds));
+        }
+        response
     }
 }
 

@@ -9,7 +9,7 @@ Everything else on the box is reachable from the admin network only, or not at a
 | Surface | Exposure | Control | Status |
 |---|---|---|---|
 | Agent paths: `/install.ps1`, `/install.sh`, `/api/installers/binaries/*`, `/api/agents/*`, `/api/events`, `/api/windows`, `/api/proofs` | Public, port 443 | TLS in the server. Install keys for downloads, signed requests per agent identity for the rest. | Enforced by the server |
-| Operator paths: console, `/api/admin/*`, `/api/auth/*`, `/api-docs/*` | Port 443, limited to `server.adminAllowedCidrs` | Peer address checked in the server before any handler, then login, optional MFA, or an API key. An unknown peer address is denied. | Enforced once `server.adminAllowedCidrs` is set. Empty means any address. `bootstrap.sh` refuses an empty list. |
+| Operator paths: console, `/api/admin/*`, `/api/auth/*`, `/api-docs/*` | Port 443, limited to `server.adminAllowedCidrs` | Peer address checked in the server before any handler, then login, optional MFA, or an API key. An unknown peer address is denied. Wrong passwords and codes are limited per account and per peer address ([ADR 034](../docs/adr/034-limits-on-password-and-code-attempts.md)). | Enforced once `server.adminAllowedCidrs` is set. Empty means any address. `bootstrap.sh` refuses an empty list. |
 | Health: `/healthz`, `/readyz`, `/health` | Public, port 443, no authentication | Return status only. `/health` also returns the server version. | By design, the kubelet probes them |
 | Client address seen by the server | n/a | `service.externalTrafficPolicy: Local`, the chart default. With `Cluster` the server sees a cluster address and the allowlist rejects every operator. | Enforced by the chart default |
 | SQLite database | Not exposed | A file on the volume mounted at `/data` of the single pod | By construction |
@@ -29,7 +29,7 @@ Everything else on the box is reachable from the admin network only, or not at a
 - Signing key rotation. Each deployment generates its own key and the server patches the public half into every agent it serves ([ADR 017](../docs/adr/017-per-deployment-signing-key.md)). Agents keep the key they were installed with, so replacing `ZEDR_SIGNING_KEY_HEX` strands them until they are reinstalled. The server refuses to start with a changed key while agents are enrolled, unless `server.signingKeyChangeAccepted` names the new public key, and there is still no way to move enrolled agents to a new key.
 - Backups. Nothing snapshots the volume or exports the signing key. Losing the key strands every deployed agent.
 - Certificate reload. The server reads its certificate at startup, so a renewed certificate is served only after the pod restarts.
-- Rate limiting and brute-force protection on the public port. The server is directly on the internet with nothing in front.
+- Rate limiting on the public port beyond sign-ins. Wrong passwords and codes are limited, the agent paths and every other request are not, and the server is directly on the internet with nothing in front.
 - A proxy or CDN in front. The server trusts the TCP peer address and reads no forwarding header, so behind a proxy every client looks like the proxy and the allowlist stops working.
 - High availability. One SQLite file means one replica, and an upgrade restarts it.
 - External secret stores. `secrets.mode: existing` accepts a Secret written by any operator, but none is wired up.

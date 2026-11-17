@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { auditEvent, CATEGORIES, categoryOf, detectionOf, eventData, incidentTitle, summarize, typesOf } from './events'
+import { auditEvent, auditTone, CATEGORIES, categoryOf, detectionOf, eventData, incidentTitle, summarize, typesOf } from './events'
+import { tone } from './palette'
 
 describe('event categories', () => {
   it('assigns every known event type to exactly one category', () => {
@@ -114,5 +115,11 @@ describe('audit entries as events', () => {
 
   it('summarise to the action alone when there is no target', () => {
     expect(summarize(auditEvent({ ...entry, action: 'login', target: null }))).toBe('login')
+  })
+
+  it('show failures and the waits they start as alerts', () => {
+    expect(auditTone('login.failed')).toBe(tone('alert'))
+    expect(auditTone('auth.locked')).toBe(tone('alert'))
+    expect(auditTone('login')).toBe(tone('node'))
   })
 })
