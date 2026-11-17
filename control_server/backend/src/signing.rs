@@ -49,6 +49,7 @@ impl SigningService {
     pub fn seal_agent_binary(&self, template_binary: &[u8], server_url: &str) -> Result<Vec<u8>> {
         let mut binary = patch_server_url(template_binary, server_url)?;
         patch_signing_public_key(&mut binary, &self.public_key())?;
+        rehash_code_signature(&mut binary)?;
 
         let signature = self.sign_binary(&binary);
         binary.extend_from_slice(&signature.to_bytes());
@@ -79,6 +80,92 @@ impl SigningService {
             signature: self.signing_key.sign(&signed_bytes).to_bytes().to_vec(),
         })
     }
+}
+
+const MH_MAGIC_64: u32 = 0xfeed_facf;
+const FAT_MAGIC: u32 = 0xcafe_babe;
+const LC_CODE_SIGNATURE: u32 = 0x1d;
+const MACH_HEADER_64_BYTES: usize = 32;
+const CSMAGIC_EMBEDDED_SIGNATURE: u32 = 0xfade_0cc0;
+const CSMAGIC_CODEDIRECTORY: u32 = 0xfade_0c02;
+const CS_HASHTYPE_SHA256: u8 = 2;
+const SHA256_BYTES: usize = 32;
+
+fn read<const N: usize>(binary: &[u8], at: usize) -> Result<[u8; N]> {
+    binary
+        .get(at..at.checked_add(N).ok_or_else(|| malformed("an offset past the end"))?)
+        .and_then(|bytes| bytes.try_into().ok())
+        .ok_or_else(|| malformed("a field past the end of the binary"))
+}
+
+fn le32(binary: &[u8], at: usize) -> Result<u32> {
+    read::<4>(binary, at).map(u32::from_le_bytes)
+}
+
+fn be32(binary: &[u8], at: usize) -> Result<u32> {
+    read::<4>(binary, at).map(u32::from_be_bytes)
+}
+
+fn malformed(what: &str) -> AppError {
+    AppError::InternalError(format!("The agent template has a malformed Mach-O code signature: {}", what))
+}
+
+/// macOS kills a program whose pages no longer match the hashes of its code signature, and Apple silicon runs no unsigned code.
+/// The agent carries the ad hoc signature the linker gave it, which signs nothing but those hashes, so after the slots are filled
+/// every page hash is computed again. A binary that is not a Mach-O is left as it is
+pub fn rehash_code_signature(binary: &mut [u8]) -> Result<()> {
+    let Ok(magic) = read::<4>(binary, 0) else {
+        return Ok(());
+    };
+    if u32::from_be_bytes(magic) == FAT_MAGIC {
+        return Err(malformed("a universal binary, serve one per architecture"));
+    }
+    if u32::from_le_bytes(magic) != MH_MAGIC_64 {
+        return Ok(());
+    }
+
+    let commands = le32(binary, 16)? as usize;
+    let mut at = MACH_HEADER_64_BYTES;
+    let mut signature = None;
+    for _ in 0..commands {
+        let (command, size) = (le32(binary, at)?, le32(binary, at + 4)? as usize);
+        if command == LC_CODE_SIGNATURE {
+            signature = Some(le32(binary, at + 8)? as usize);
+        }
+        at = at.checked_add(size).filter(|_| size >= 8).ok_or_else(|| malformed("a load command of no size"))?;
+    }
+    let signature = signature.ok_or_else(|| malformed("no code signature"))?;
+
+    if be32(binary, signature)? != CSMAGIC_EMBEDDED_SIGNATURE {
+        return Err(malformed("no embedded signature where the load command points"));
+    }
+    let blobs = be32(binary, signature + 8)? as usize;
+    let mut directories = 0;
+    for blob in 0..blobs {
+        let directory = signature + be32(binary, signature + 12 + blob * 8 + 4)? as usize;
+        if be32(binary, directory)? != CSMAGIC_CODEDIRECTORY {
+            continue;
+        }
+        let hashes = be32(binary, directory + 16)? as usize;
+        let slots = be32(binary, directory + 28)? as usize;
+        let limit = be32(binary, directory + 32)? as usize;
+        let [hash_size, hash_type, _, page_shift] = read::<4>(binary, directory + 36)?;
+        if hash_type != CS_HASHTYPE_SHA256 || hash_size as usize != SHA256_BYTES || page_shift >= 32 || limit > binary.len() {
+            return Err(malformed("a code directory that is not SHA-256 over the binary"));
+        }
+        let page = 1usize << page_shift;
+        for slot in 0..slots {
+            let start = slot * page;
+            let digest = sha256(binary.get(start..(start + page).min(limit)).ok_or_else(|| malformed("a page past the code limit"))?);
+            let at = directory + hashes + slot * SHA256_BYTES;
+            binary.get_mut(at..at + SHA256_BYTES).ok_or_else(|| malformed("a page hash past the end"))?.copy_from_slice(&digest);
+        }
+        directories += 1;
+    }
+    if directories == 0 {
+        return Err(malformed("no code directory"));
+    }
+    Ok(())
 }
 
 pub fn sha256(data: &[u8]) -> [u8; 32] {
@@ -142,6 +229,98 @@ fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const MACHO_TEMPLATE: &[u8] = include_bytes!("../tests/fixtures/macho-template");
+
+    /// Pages of the template whose hash in its code directory is not the hash of the page. Read on its own, apart from the code under test
+    fn stale_pages(binary: &[u8]) -> usize {
+        let u32_at = |at: usize, little: bool| {
+            let bytes: [u8; 4] = binary[at..at + 4].try_into().unwrap();
+            if little {
+                u32::from_le_bytes(bytes)
+            } else {
+                u32::from_be_bytes(bytes)
+            }
+        } as usize;
+        let mut at = 32;
+        let mut signature = 0;
+        for _ in 0..u32_at(16, true) {
+            if u32_at(at, true) == 0x1d {
+                signature = u32_at(at + 8, true);
+            }
+            at += u32_at(at + 4, true);
+        }
+        let directory = signature + u32_at(signature + 16, false);
+        let (hashes, slots, limit, page) = (u32_at(directory + 16, false), u32_at(directory + 28, false), u32_at(directory + 32, false), 1usize << binary[directory + 39]);
+        (0..slots).filter(|slot| binary[directory + hashes + slot * 32..][..32] != sha256(&binary[slot * page..((slot + 1) * page).min(limit)])).count()
+    }
+
+    #[test]
+    fn test_a_sealed_macos_agent_keeps_every_page_of_its_code_signature_true() {
+        assert_eq!(stale_pages(MACHO_TEMPLATE), 0, "the linker signed the template");
+
+        let service = SigningService::from_seed_hex(&"42".repeat(32)).unwrap();
+        let mut patched_only = patch_server_url(MACHO_TEMPLATE, "https://zedr.example.com").unwrap();
+        patch_signing_public_key(&mut patched_only, &service.public_key()).unwrap();
+        assert!(stale_pages(&patched_only) > 0, "filling the slots alone breaks the signature, macOS would kill the agent");
+
+        let sealed = service.seal_agent_binary(MACHO_TEMPLATE, "https://zedr.example.com").unwrap();
+        let (body, signature) = sealed.split_at(sealed.len() - 64);
+        assert_eq!(stale_pages(body), 0);
+        assert!(service.signing_key.verifying_key().verify_strict(body, &Signature::from_slice(signature).unwrap()).is_ok(), "the deployment signs the rehashed binary");
+        assert_eq!(body.len(), MACHO_TEMPLATE.len());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_macos_runs_a_sealed_agent_and_kills_one_whose_pages_were_not_rehashed() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::process::ExitStatusExt;
+        let run = |binary: &[u8], name: &str| {
+            let path = std::env::temp_dir().join(format!("zedr-{}-{}", name, std::process::id()));
+            std::fs::write(&path, binary).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let status = std::process::Command::new(&path).status().unwrap();
+            std::fs::remove_file(&path).unwrap();
+            status
+        };
+
+        let service = SigningService::from_seed_hex(&"42".repeat(32)).unwrap();
+        let sealed = service.seal_agent_binary(MACHO_TEMPLATE, "https://zedr.example.com").unwrap();
+        let status = run(&sealed, "sealed");
+        assert!(status.success(), "the kernel ran the sealed binary and it saw both slots filled: {:?}", status);
+
+        let mut patched_only = patch_server_url(MACHO_TEMPLATE, "https://zedr.example.com").unwrap();
+        patch_signing_public_key(&mut patched_only, &service.public_key()).unwrap();
+        const SIGKILL: i32 = 9;
+        assert_eq!(run(&patched_only, "stale").signal(), Some(SIGKILL), "without the rehash the kernel kills it at launch");
+    }
+
+    #[test]
+    fn test_binaries_that_are_not_a_single_mach_o_are_left_alone_or_refused() {
+        let mut elf = b"\x7fELF and the rest of a Linux agent".to_vec();
+        let before = elf.clone();
+        rehash_code_signature(&mut elf).unwrap();
+        assert_eq!(elf, before);
+        let mut pe = b"MZ, a Windows agent".to_vec();
+        rehash_code_signature(&mut pe).unwrap();
+        rehash_code_signature(&mut []).unwrap();
+
+        let mut universal = MACHO_TEMPLATE.to_vec();
+        universal[..4].copy_from_slice(&0xcafe_babe_u32.to_be_bytes());
+        assert!(rehash_code_signature(&mut universal).unwrap_err().to_string().contains("universal"));
+
+        let mut unsigned = MACHO_TEMPLATE.to_vec();
+        let commands = u32::from_le_bytes(unsigned[16..20].try_into().unwrap()) as usize;
+        let mut at = 32;
+        for _ in 0..commands {
+            if u32::from_le_bytes(unsigned[at..at + 4].try_into().unwrap()) == 0x1d {
+                unsigned[at..at + 4].copy_from_slice(&0x7fff_ffffu32.to_le_bytes());
+            }
+            at += u32::from_le_bytes(unsigned[at + 4..at + 8].try_into().unwrap()) as usize;
+        }
+        assert!(rehash_code_signature(&mut unsigned).unwrap_err().to_string().contains("no code signature"));
+    }
     
     #[test]
     fn test_patch_server_url() {
